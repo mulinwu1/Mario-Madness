@@ -144,7 +144,10 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mario-angle-windows
-          path: export/release/windows/
+          name: mario-angle-minimal
+          path: |
+            export/release/windows/Mario.exe
+            export/release/windows/*.ndll
+            export/release/windows/*.dll
           if-no-files-found: warn
           retention-days: 7
