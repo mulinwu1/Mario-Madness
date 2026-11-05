@@ -57,6 +57,7 @@ jobs:
           haxelib install discord_rpc
           haxelib install linc_luajit
           haxelib install format
+          haxelib install hxp
           haxelib list
           Write-Host "--- lime native project check ---"
           $limeRoot = "$env:USERPROFILE\haxelib\lime\8,0,2"
