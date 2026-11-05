@@ -13,22 +13,32 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Install Haxe and Neko
+      - name: Install Haxe 4.2.5 and Neko
         shell: pwsh
         run: |
-          choco install haxe --version=4.3.4 -y --no-progress
-          choco install neko -y --no-progress
-          $neko = Get-ChildItem "$env:ProgramData\chocolatey\lib\neko\tools" -Directory -Recurse -Filter "neko-*win64*" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $neko) {
-            $neko = Get-ChildItem "$env:ProgramData\chocolatey\lib\neko" -Directory -Recurse -ErrorAction SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName "neko.exe") } | Select-Object -First 1
-          }
-          Write-Host "NEKO DIR: $($neko.FullName)"
-          $env:NEKOPATH = $neko.FullName
-          $env:PATH = "$($neko.FullName);$env:PATH"
-          Add-Content -Path $env:GITHUB_ENV -Value "NEKOPATH=$($neko.FullName)"
-          Add-Content -Path $env:GITHUB_PATH -Value $neko.FullName
-          refreshenv
-          Write-Host "--- versions ---"
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path C:\haxe | Out-Null
+          New-Item -ItemType Directory -Force -Path C:\neko | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/HaxeFoundation/haxe/releases/download/4.2.5/haxe-4.2.5-win64.zip" -OutFile C:\haxe\haxe.zip -UseBasicParsing
+          Expand-Archive -Path C:\haxe\haxe.zip -DestinationPath C:\haxe -Force
+          Invoke-WebRequest -Uri "https://github.com/HaxeFoundation/neko/releases/download/v2-3-0/neko-2.3.0-win64.zip" -OutFile C:\neko\neko.zip -UseBasicParsing
+          Expand-Archive -Path C:\neko\neko.zip -DestinationPath C:\neko -Force
+
+          $haxeDir = (Get-ChildItem C:\haxe -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'haxe.exe') } | Select-Object -First 1).FullName
+          $nekoDir = (Get-ChildItem C:\neko -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'neko.exe') } | Select-Object -First 1).FullName
+          Write-Host "HAXE DIR: $haxeDir"
+          Write-Host "NEKO DIR: $nekoDir"
+          Test-Path (Join-Path $nekoDir 'std.ndll')
+
+          Add-Content -Path $env:GITHUB_ENV -Value "NEKOPATH=$nekoDir"
+          Add-Content -Path $env:GITHUB_ENV -Value "HAXE_STD_PATH=$haxeDir\std"
+          Add-Content -Path $env:GITHUB_PATH -Value $haxeDir
+          Add-Content -Path $env:GITHUB_PATH -Value $nekoDir
+
+          $env:PATH = "$haxeDir;$nekoDir;$env:PATH"
+          $env:NEKOPATH = $nekoDir
+          $env:HAXE_STD_PATH = "$haxeDir\std"
+
           haxe -version
           neko -version
           haxelib version
@@ -36,7 +46,7 @@ jobs:
       - name: Install haxelibs
         shell: pwsh
         run: |
-          haxelib install hxcpp
+          haxelib install hxcpp 4.3.2
           haxelib install lime 8.0.2
           haxelib install openfl 9.2.0
           haxelib install flixel 5.3.1
@@ -47,16 +57,26 @@ jobs:
           haxelib install discord_rpc
           haxelib install linc_luajit
           haxelib list
+          Write-Host "--- lime native project check ---"
+          $limeRoot = "$env:USERPROFILE\haxelib\lime\8,0,2"
+          Test-Path "$limeRoot\project\Build.xml"
+          Get-ChildItem "$limeRoot\ndll" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName, Length, LastWriteTime
 
       - name: Rebuild lime native with ANGLE
         shell: pwsh
         run: |
-          haxelib run lime rebuild windows -Dangle
+          Write-Host "before rebuild:"
+          Get-ChildItem "$env:USERPROFILE\haxelib\lime\8,0,2\ndll" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName, Length, LastWriteTime
+          haxelib run lime rebuild windows -Dangle -verbose
+          Write-Host "after rebuild (exit=$LASTEXITCODE):"
+          Get-ChildItem "$env:USERPROFILE\haxelib\lime\8,0,2\ndll" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName, Length, LastWriteTime
 
       - name: Build game with ANGLE
         shell: pwsh
         run: |
           haxelib run lime build windows -Dangle
+          Write-Host "exit=$LASTEXITCODE"
+          Get-ChildItem export\windows -ErrorAction SilentlyContinue | Select-Object Name, Length
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
