@@ -1,0 +1,56 @@
+name: Build ANGLE Windows
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install Haxe and Neko
+        shell: pwsh
+        run: |
+          choco install haxe --version=4.3.4 -y --no-progress
+          choco install neko -y --no-progress
+          refreshenv
+          haxe -version
+          neko -version
+
+      - name: Install haxelibs
+        shell: pwsh
+        run: |
+          haxelib install hxcpp --quiet
+          haxelib install lime 8.0.2 --quiet
+          haxelib install openfl 9.2.0 --quiet
+          haxelib install flixel 5.3.1 --quiet
+          haxelib install flixel-addons 3.1.1 --quiet
+          haxelib install flixel-ui 2.5.0 --quiet
+          haxelib install hxCodec 2.6.1 --quiet
+          haxelib install hscript --quiet
+          haxelib install discord_rpc --quiet
+          haxelib install linc_luajit --quiet
+          haxelib list
+
+      - name: Rebuild lime native with ANGLE
+        shell: pwsh
+        run: |
+          haxelib run lime rebuild windows -Dangle
+
+      - name: Build game with ANGLE
+        shell: pwsh
+        run: |
+          haxelib run lime build windows -Dangle
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mario-angle-windows
+          path: export/windows/
+          if-no-files-found: warn
+          retention-days: 7
