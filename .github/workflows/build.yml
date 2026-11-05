@@ -91,14 +91,15 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           git clone --depth 1 --branch 8.0.2 --recursive --shallow-submodules https://github.com/openfl/lime.git C:\lime-src
-          Write-Host "--- lime source tree (project) ---"
-          Get-ChildItem C:\lime-src\project -ErrorAction SilentlyContinue | Select-Object Name
+          Write-Host "--- lime source project/lib ---"
           Get-ChildItem C:\lime-src\project\lib -ErrorAction SilentlyContinue | Select-Object Name
-          Push-Location C:\lime-src\project
-          haxelib run hxcpp Build.xml windows -Dangle
+          Write-Host "--- point haxelib lime to source ---"
+          haxelib dev lime C:\lime-src
+          Push-Location C:\lime-src
+          haxelib run lime rebuild windows -Dangle
           $code = $LASTEXITCODE
           Pop-Location
-          Write-Host "hxcpp exit=$code"
+          Write-Host "lime rebuild exit=$code"
           $ndll = "C:\lime-src\ndll\Windows64\lime.ndll"
           if (Test-Path $ndll) {
             Get-Item $ndll | Select-Object FullName, Length, LastWriteTime
@@ -106,8 +107,6 @@ jobs:
             $txt = [Text.Encoding]::ASCII.GetString($bytes)
             Write-Host "ANGLE check - libEGL.dll occurrences: $(([regex]::Matches($txt,'libEGL.dll')).Count)"
             Write-Host "ANGLE check - eglCreateContext occurrences: $(([regex]::Matches($txt,'eglCreateContext')).Count)"
-            Copy-Item $ndll "$env:USERPROFILE\haxelib\lime\8,0,2\ndll\Windows64\lime.ndll" -Force
-            Write-Host "copied to haxelib lime ndll"
           } else {
             Write-Host "lime.ndll NOT produced"
           }
