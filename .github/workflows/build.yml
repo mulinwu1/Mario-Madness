@@ -18,23 +18,32 @@ jobs:
         run: |
           choco install haxe --version=4.3.4 -y --no-progress
           choco install neko -y --no-progress
+          $neko = Get-ChildItem "$env:ProgramData\chocolatey\lib\neko\tools" -Directory -Recurse -Filter "neko-*win64*" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $neko) {
+            $neko = Get-ChildItem "$env:ProgramData\chocolatey\lib\neko" -Directory -Recurse -ErrorAction SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName "neko.exe") } | Select-Object -First 1
+          }
+          Write-Host "NEKO DIR: $($neko.FullName)"
+          Get-ChildItem $neko.FullName | Select-Object -First 15 Name
+          Add-Content -Path $env:GITHUB_ENV -Value "NEKOPATH=$($neko.FullName)"
+          Add-Content -Path $env:GITHUB_PATH -Value $neko.FullName
           refreshenv
           haxe -version
           neko -version
+          haxelib version
 
       - name: Install haxelibs
         shell: pwsh
         run: |
-          haxelib install hxcpp --quiet
-          haxelib install lime 8.0.2 --quiet
-          haxelib install openfl 9.2.0 --quiet
-          haxelib install flixel 5.3.1 --quiet
-          haxelib install flixel-addons 3.1.1 --quiet
-          haxelib install flixel-ui 2.5.0 --quiet
-          haxelib install hxCodec 2.6.1 --quiet
-          haxelib install hscript --quiet
-          haxelib install discord_rpc --quiet
-          haxelib install linc_luajit --quiet
+          haxelib install hxcpp
+          haxelib install lime 8.0.2
+          haxelib install openfl 9.2.0
+          haxelib install flixel 5.3.1
+          haxelib install flixel-addons 3.1.1
+          haxelib install flixel-ui 2.5.0
+          haxelib install hxCodec 2.6.1
+          haxelib install hscript
+          haxelib install discord_rpc
+          haxelib install linc_luajit
           haxelib list
 
       - name: Rebuild lime native with ANGLE
