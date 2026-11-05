@@ -85,8 +85,16 @@ jobs:
             Copy-Item "$inc\discord_rpc.h" "$inc\discord-rpc.h" -Force
             Write-Host "created discord-rpc.h alias"
           }
-          Test-Path $header
-          Get-ChildItem (Join-Path $drRoot "lib\discord-rpc") -Depth 2 -ErrorAction SilentlyContinue | Select-Object Name
+          Write-Host "--- patch rapidjson ---"
+          $rj = "C:\rapidjson-src"
+          git clone --depth 1 https://github.com/Tencent/rapidjson.git $rj
+          $srcDir = Join-Path $drRoot "lib\discord-rpc\src"
+          New-Item -ItemType Directory -Force -Path (Join-Path $srcDir "rapidjson") | Out-Null
+          Copy-Item "$rj\include\rapidjson\*" (Join-Path $srcDir "rapidjson") -Recurse -Force
+          New-Item -ItemType Directory -Force -Path (Join-Path $inc "rapidjson") | Out-Null
+          Copy-Item "$rj\include\rapidjson\*" (Join-Path $inc "rapidjson") -Recurse -Force
+          Test-Path (Join-Path $srcDir "rapidjson\document.h")
+          Test-Path (Join-Path $inc "rapidjson\document.h")
 
       - name: Rebuild lime native with ANGLE (hxcpp direct)
         shell: pwsh
@@ -97,8 +105,14 @@ jobs:
           Get-ChildItem C:\lime-src\project\lib -ErrorAction SilentlyContinue | Select-Object Name
           Write-Host "--- point haxelib lime to source ---"
           haxelib dev lime C:\lime-src
+          $buildXml = "C:\lime-src\project\Build.xml"
+          $content = Get-Content $buildXml -Raw
+          $content = $content -replace '<!-- <set name="LIME_SDL_ANGLE" value="1" if="windows" unless="static_link" /> -->', '<set name="LIME_SDL_ANGLE" value="1" if="windows" unless="static_link" />'
+          Set-Content -Path $buildXml -Value $content -NoNewline
+          Write-Host "--- LIME_SDL_ANGLE lines after patch ---"
+          Select-String -Path $buildXml -Pattern "LIME_SDL_ANGLE" | ForEach-Object { $_.Line.Trim() }
           Push-Location C:\lime-src
-          haxelib run lime rebuild windows -Dangle -Dwindows -DLIME_SDL_ANGLE -DNATIVE_TOOLKIT_SDL_ANGLE
+          haxelib run lime rebuild windows
           $code = $LASTEXITCODE
           Pop-Location
           Write-Host "lime rebuild exit=$code"
