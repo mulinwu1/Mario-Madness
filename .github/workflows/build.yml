@@ -132,18 +132,19 @@ jobs:
         run: |
           haxelib run lime build windows -Dangle
           Write-Host "exit=$LASTEXITCODE"
-          Get-ChildItem export\windows -ErrorAction SilentlyContinue | Select-Object Name, Length
+          $outDir = "export\release\windows"
+          Get-ChildItem $outDir -ErrorAction SilentlyContinue | Select-Object Name, Length
           $angleDir = "C:\lime-src\dependencies\angle"
-          Write-Host "angle dir: $angleDir exists=$(Test-Path $angleDir)"
+          Write-Host "angle dir exists=$(Test-Path $angleDir)"
           if (Test-Path $angleDir) {
-            Copy-Item "$angleDir\*.dll" export\windows\ -Force -ErrorAction SilentlyContinue
-            Get-ChildItem export\windows\*.dll -ErrorAction SilentlyContinue | Select-Object Name, Length
+            Copy-Item "$angleDir\*.dll" $outDir -Force -ErrorAction SilentlyContinue
+            Get-ChildItem "$outDir\*.dll" -ErrorAction SilentlyContinue | Select-Object Name, Length
           }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: mario-angle-windows
-          path: export/windows/
+          path: export/release/windows/
           if-no-files-found: warn
           retention-days: 7
