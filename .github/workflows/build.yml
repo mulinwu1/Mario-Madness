@@ -23,10 +23,12 @@ jobs:
             $neko = Get-ChildItem "$env:ProgramData\chocolatey\lib\neko" -Directory -Recurse -ErrorAction SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName "neko.exe") } | Select-Object -First 1
           }
           Write-Host "NEKO DIR: $($neko.FullName)"
-          Get-ChildItem $neko.FullName | Select-Object -First 15 Name
+          $env:NEKOPATH = $neko.FullName
+          $env:PATH = "$($neko.FullName);$env:PATH"
           Add-Content -Path $env:GITHUB_ENV -Value "NEKOPATH=$($neko.FullName)"
           Add-Content -Path $env:GITHUB_PATH -Value $neko.FullName
           refreshenv
+          Write-Host "--- versions ---"
           haxe -version
           neko -version
           haxelib version
