@@ -89,22 +89,27 @@ jobs:
       - name: Rebuild lime native with ANGLE (hxcpp direct)
         shell: pwsh
         run: |
-          $limeRoot = "$env:USERPROFILE\haxelib\lime\8,0,2"
-          Write-Host "before rebuild:"
-          Get-Item "$limeRoot\ndll\Windows64\lime.ndll" -ErrorAction SilentlyContinue | Select-Object FullName, Length, LastWriteTime
-          Push-Location "$limeRoot\project"
+          $ErrorActionPreference = 'Stop'
+          git clone --depth 1 --branch 8.0.2 --recursive --shallow-submodules https://github.com/openfl/lime.git C:\lime-src
+          Write-Host "--- lime source tree (project) ---"
+          Get-ChildItem C:\lime-src\project -ErrorAction SilentlyContinue | Select-Object Name
+          Get-ChildItem C:\lime-src\project\lib -ErrorAction SilentlyContinue | Select-Object Name
+          Push-Location C:\lime-src\project
           haxelib run hxcpp Build.xml windows -Dangle
           $code = $LASTEXITCODE
           Pop-Location
           Write-Host "hxcpp exit=$code"
-          Write-Host "after rebuild:"
-          Get-Item "$limeRoot\ndll\Windows64\lime.ndll" -ErrorAction SilentlyContinue | Select-Object FullName, Length, LastWriteTime
-          $ndll = "$limeRoot\ndll\Windows64\lime.ndll"
+          $ndll = "C:\lime-src\ndll\Windows64\lime.ndll"
           if (Test-Path $ndll) {
+            Get-Item $ndll | Select-Object FullName, Length, LastWriteTime
             $bytes = [IO.File]::ReadAllBytes($ndll)
             $txt = [Text.Encoding]::ASCII.GetString($bytes)
             Write-Host "ANGLE check - libEGL.dll occurrences: $(([regex]::Matches($txt,'libEGL.dll')).Count)"
             Write-Host "ANGLE check - eglCreateContext occurrences: $(([regex]::Matches($txt,'eglCreateContext')).Count)"
+            Copy-Item $ndll "$env:USERPROFILE\haxelib\lime\8,0,2\ndll\Windows64\lime.ndll" -Force
+            Write-Host "copied to haxelib lime ndll"
+          } else {
+            Write-Host "lime.ndll NOT produced"
           }
 
       - name: Build game with ANGLE
@@ -113,7 +118,7 @@ jobs:
           haxelib run lime build windows -Dangle
           Write-Host "exit=$LASTEXITCODE"
           Get-ChildItem export\windows -ErrorAction SilentlyContinue | Select-Object Name, Length
-          $angleDir = "$env:USERPROFILE\haxelib\lime\8,0,2\dependencies\angle"
+          $angleDir = "C:\lime-src\dependencies\angle"
           Write-Host "angle dir: $angleDir exists=$(Test-Path $angleDir)"
           if (Test-Path $angleDir) {
             Copy-Item "$angleDir\*.dll" export\windows\ -Force -ErrorAction SilentlyContinue
