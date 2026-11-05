@@ -72,9 +72,9 @@ jobs:
           Get-ChildItem $drRoot -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object FullName
           $header = Join-Path $drRoot "lib\discord-rpc\include\discord-rpc.h"
           if (-not (Test-Path $header)) {
-            Write-Host "discord-rpc native lib missing, cloning..."
+            Write-Host "discord-rpc native lib missing, cloning v2.1.0..."
             $tmp = "C:\discord-rpc-src"
-            git clone --depth 1 --recursive --shallow-submodules https://github.com/discord/discord-rpc.git $tmp
+            git clone --depth 1 --branch v2.1.0 --recursive --shallow-submodules https://github.com/discord/discord-rpc.git $tmp
             New-Item -ItemType Directory -Force -Path (Join-Path $drRoot "lib\discord-rpc") | Out-Null
             Copy-Item "$tmp\include" (Join-Path $drRoot "lib\discord-rpc\include") -Recurse -Force
             Copy-Item "$tmp\src" (Join-Path $drRoot "lib\discord-rpc\src") -Recurse -Force
@@ -98,7 +98,7 @@ jobs:
           Write-Host "--- point haxelib lime to source ---"
           haxelib dev lime C:\lime-src
           Push-Location C:\lime-src
-          haxelib run lime rebuild windows -Dangle
+          haxelib run lime rebuild windows -Dangle -Dwindows -DLIME_SDL_ANGLE -DNATIVE_TOOLKIT_SDL_ANGLE
           $code = $LASTEXITCODE
           Pop-Location
           Write-Host "lime rebuild exit=$code"
