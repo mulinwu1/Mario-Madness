@@ -62,6 +62,24 @@ jobs:
           Test-Path "$limeRoot\project\Build.xml"
           Get-ChildItem "$limeRoot\ndll" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName, Length, LastWriteTime
 
+      - name: Patch discord_rpc native sources
+        shell: pwsh
+        run: |
+          $drRoot = "$env:USERPROFILE\haxelib\discord_rpc\1,0,0"
+          Write-Host "--- discord_rpc tree ---"
+          Get-ChildItem $drRoot -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object FullName
+          $header = Join-Path $drRoot "lib\discord-rpc\include\discord-rpc.h"
+          if (-not (Test-Path $header)) {
+            Write-Host "discord-rpc native lib missing, cloning..."
+            $tmp = "C:\discord-rpc-src"
+            git clone --depth 1 --recursive --shallow-submodules https://github.com/discord/discord-rpc.git $tmp
+            New-Item -ItemType Directory -Force -Path (Join-Path $drRoot "lib\discord-rpc") | Out-Null
+            Copy-Item "$tmp\include" (Join-Path $drRoot "lib\discord-rpc\include") -Recurse -Force
+            Copy-Item "$tmp\src" (Join-Path $drRoot "lib\discord-rpc\src") -Recurse -Force
+          }
+          Test-Path $header
+          Get-ChildItem (Join-Path $drRoot "lib\discord-rpc") -Depth 1 -ErrorAction SilentlyContinue | Select-Object Name
+
       - name: Rebuild lime native with ANGLE
         shell: pwsh
         run: |
@@ -70,6 +88,13 @@ jobs:
           haxelib run lime rebuild windows -Dangle -verbose
           Write-Host "after rebuild (exit=$LASTEXITCODE):"
           Get-ChildItem "$env:USERPROFILE\haxelib\lime\8,0,2\ndll" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName, Length, LastWriteTime
+          $ndll = "$env:USERPROFILE\haxelib\lime\8,0,2\ndll\Windows64\lime.ndll"
+          if (Test-Path $ndll) {
+            $bytes = [IO.File]::ReadAllBytes($ndll)
+            $txt = [Text.Encoding]::ASCII.GetString($bytes)
+            Write-Host "ANGLE check - libEGL.dll occurrences: $(([regex]::Matches($txt,'libEGL.dll')).Count)"
+            Write-Host "ANGLE check - EGL symbols: $(([regex]::Matches($txt,'eglCreateContext')).Count)"
+          }
 
       - name: Build game with ANGLE
         shell: pwsh
@@ -77,6 +102,12 @@ jobs:
           haxelib run lime build windows -Dangle
           Write-Host "exit=$LASTEXITCODE"
           Get-ChildItem export\windows -ErrorAction SilentlyContinue | Select-Object Name, Length
+          $angleDir = "$env:USERPROFILE\haxelib\lime\8,0,2\dependencies\angle"
+          Write-Host "angle dir: $angleDir exists=$(Test-Path $angleDir)"
+          if (Test-Path $angleDir) {
+            Copy-Item "$angleDir\*.dll" export\windows\ -Force -ErrorAction SilentlyContinue
+            Get-ChildItem export\windows\*.dll -ErrorAction SilentlyContinue | Select-Object Name, Length
+          }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
