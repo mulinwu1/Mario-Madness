@@ -263,6 +263,18 @@ void lime_gl_tex_image_2d(int target, int level, int internalformat, int width, 
     const unsigned char* src = (const unsigned char*)(uintptr_t)data;
     if (!src) return;
 
+    // 诊断：确认上传的像素不是全 0（全 0 会让采样全透明，整条 filter 链输出空）
+    {
+        static int s_texLog = 0;
+        if (s_texLog < 12 || s_texLog % 200 == 0) {
+            int bpp = (format == 0x1908) ? 4 : 3;
+            fprintf(stderr, "[gltex] name=%d %dx%d fmt=0x%x px=%02x%02x%02x%02x\n",
+                    texName, width, height, format,
+                    src[0], src[1], src[2], bpp == 3 ? 0xff : src[3]);
+        }
+        s_texLog++;
+    }
+
     std::vector<unsigned char> rgba((size_t)width * height * 4);
     // GL_RGBA = 0x1908, GL_RGB = 0x1907, GL_UNSIGNED_BYTE = 0x1401
     if (format == 0x1908) {
