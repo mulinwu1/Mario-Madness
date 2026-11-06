@@ -99,7 +99,7 @@ jobs:
             git -C C:\lime-src submodule update --init --recursive --depth 1
           }
           New-Item -ItemType Directory -Force -Path C:\lime-src\project\src\graphics\vulkan | Out-Null
-          Copy-Item native_vulkan\vk_renderer.h, native_vulkan\vk_renderer.cpp, native_vulkan\gl_core.cpp, native_vulkan\gl_compat.h, native_vulkan\gl_vk_bridge.h, native_vulkan\gl_vk_c.h, native_vulkan\gl_vk_contract.h, native_vulkan\gl_vk_contract.cpp, native_vulkan\gl_fbo.cpp, native_vulkan\gl_texture_params.cpp, native_vulkan\gl_state.h, native_vulkan\gl_state.cpp C:\lime-src\project\src\graphics\vulkan\ -Force
+          Copy-Item native_vulkan\vk_shaders_spv.h, native_vulkan\vk_renderer.h, native_vulkan\vk_renderer.cpp, native_vulkan\gl_core.cpp, native_vulkan\gl_compat.h, native_vulkan\gl_vk_bridge.h, native_vulkan\gl_vk_c.h, native_vulkan\gl_vk_contract.h, native_vulkan\gl_vk_contract.cpp, native_vulkan\gl_fbo.cpp, native_vulkan\gl_texture_params.cpp, native_vulkan\gl_state.h, native_vulkan\gl_state.cpp C:\lime-src\project\src\graphics\vulkan\ -Force
           # vulkan_core.h 会引用 vk_video/ 下的视频编码头，两个目录都要复制
           Copy-Item vkh\include\vulkan C:\lime-src\project\include\ -Recurse -Force
           Copy-Item vkh\include\vk_video C:\lime-src\project\include\ -Recurse -Force
