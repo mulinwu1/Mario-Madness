@@ -577,18 +577,15 @@ int main() {
         return 1;
     }
 
-    // ---------- quad vertices ----------
-    float verts[] = {
-        -0.5f, -0.5f, 0.0f, 0.0f,
-         0.5f, -0.5f, 1.0f, 0.0f,
-         0.5f,  0.5f, 1.0f, 1.0f,
-        -0.5f, -0.5f, 0.0f, 0.0f,
-         0.5f,  0.5f, 1.0f, 1.0f,
-        -0.5f,  0.5f, 0.0f, 1.0f
-    };
+    // ---------- sprite batch ----------
+    const int MAX_SPRITES = 200;
+    const size_t VERTS_PER_SPRITE = 6;
+    const size_t FLOATS_PER_VERT = 4;
+    const size_t VB_FLOATS = MAX_SPRITES * VERTS_PER_SPRITE * FLOATS_PER_VERT;
+    const size_t VB_SIZE = VB_FLOATS * sizeof(float);
 
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bci.size = sizeof(verts);
+    bci.size = VB_SIZE;
     bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
     VkBuffer vb = VK_NULL_HANDLE;
     createBuf(dev, &bci, nullptr, &vb);
@@ -602,8 +599,6 @@ int main() {
     bindBufMem(dev, vb, vbMem, 0);
     void* vptr = nullptr;
     mapMem(dev, vbMem, 0, vmr.size, 0, &vptr);
-    memcpy(vptr, verts, sizeof(verts));
-    unmapMem(dev, vbMem);
 
     auto acquire = (PFN_vkAcquireNextImageKHR)gipa(inst, "vkAcquireNextImageKHR");
     auto present = (PFN_vkQueuePresentKHR)gipa(inst, "vkQueuePresentKHR");
@@ -617,6 +612,8 @@ int main() {
     MSG msg{};
     bool run = true;
     uint32_t idx = 0;
+    DWORD lastFps = GetTickCount();
+    int frames = 0;
 
     while (run) {
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -646,12 +643,32 @@ int main() {
         rbi.clearValueCount = 1;
         rbi.pClearValues = &cv;
 
+        {
+            float* v = (float*)vptr;
+            for (int i = 0; i < MAX_SPRITES; i++) {
+                float px = 0.92f * (float)(((i * 37) % 200) - 100) / 100.0f;
+                float py = 0.55f * (float)(((i * 53 + (int)(t * 90)) % 200) - 100) / 100.0f;
+                float sz = 0.05f + 0.02f * (float)(i % 5);
+                float qx[6] = {-sz, sz, sz, -sz, sz, -sz};
+                float qy[6] = {-sz, -sz, sz, -sz, sz, sz};
+                float qu[6] = {0, 1, 1, 0, 1, 0};
+                float qv[6] = {0, 0, 1, 0, 1, 1};
+                for (int k = 0; k < 6; k++) {
+                    size_t o = ((size_t)i * 6 + k) * 4;
+                    v[o + 0] = px + qx[k];
+                    v[o + 1] = py + qy[k];
+                    v[o + 2] = qu[k];
+                    v[o + 3] = qv[k];
+                }
+            }
+        }
+
         beginRP(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
         bindPipe(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
         bindDS(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &ds, 0, nullptr);
         VkDeviceSize off = 0;
         bindVB(cb, 0, 1, &vb, &off);
-        cmdDraw(cb, 6, 1, 0, 0);
+        cmdDraw(cb, MAX_SPRITES * 6, 1, 0, 0);
         endRP(cb);
         endCB(cb);
 
@@ -666,6 +683,15 @@ int main() {
         pi.pSwapchains = &sw;
         pi.pImageIndices = &idx;
         present(queue, &pi);
+
+        frames++;
+        DWORD now = GetTickCount();
+        if (now - lastFps >= 1000) {
+            printf("[vk] fps=%d sprites=%d\n", frames, MAX_SPRITES);
+            fflush(stdout);
+            frames = 0;
+            lastFps = now;
+        }
 
         Sleep(16);
     }
