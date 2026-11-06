@@ -103,6 +103,25 @@ jobs:
 
       # 把 lime 输出重定向到文件并轮询打印，这样 Actions 页面能看到实时进度
       # 之前完全看不到输出，无法判断是在编译还是卡在网络请求
+      # 二分定位：如果连 lime --version 都不响应，问题在 haxelib/neko 启动层
+      - name: Probe lime
+        shell: pwsh
+        run: |
+          $hx = (Get-Command haxelib).Source
+          Write-Host "=== haxelib ==="
+          & $hx version 2>&1 | ForEach-Object { Write-Host "  $_" }
+          Write-Host "=== neko ==="
+          neko -version 2>&1 | ForEach-Object { Write-Host "  $_" }
+          Write-Host "=== lime --version (30s watchdog) ==="
+          $job = Start-Job -ScriptBlock { & $using:hx run lime --version 2>&1 }
+          if (Wait-Job $job -Timeout 30) {
+            Receive-Job $job | ForEach-Object { Write-Host "  $_" }
+          } else {
+            Write-Host "  TIMEOUT: lime --version no response in 30s"
+            Stop-Job $job
+          }
+          Remove-Job $job -Force
+
       - name: Build game
         shell: pwsh
         run: |
