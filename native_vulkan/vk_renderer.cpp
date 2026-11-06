@@ -94,6 +94,8 @@ struct VkRenderer::Impl {
     std::vector<TexSlot> textures;
     std::vector<RenderTarget> targets;
     uint32_t currentTarget = 0;
+    // 最后一次真正收到顶点并提交的离屏目标（present 选源用）
+    uint32_t lastGeomTarget = 0;
     uint32_t frameImageIndex = 0;
     bool frameOpen = false;
     float clearR = 0, clearG = 0, clearB = 0, clearA = 1;
@@ -1215,6 +1217,10 @@ bool VkRenderer::FrameHasGeometry() const {
     return false;
 }
 
+uint32_t VkRenderer::LastGeometryTarget() const {
+    return impl->lastGeomTarget;
+}
+
 bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float a) {
     Impl& o = *impl;
     // 同一目标重复绑定（OpenFL 每个 pass 开头都会 glClear，gl_vk_handle_clear 又会 Bind 一次）
@@ -1394,6 +1400,8 @@ void VkRenderer::DestroyRenderTarget(uint32_t id) {
     if (t.image) o.destroyImage(o.dev, t.image, nullptr);
     if (t.mem) o.freeMemory(o.dev, t.mem, nullptr);
     t = RenderTarget();
+    // 目标 id 按槽位复用，留着旧 id 会让 present 采样到无关的目标
+    if (o.lastGeomTarget == id) o.lastGeomTarget = 0;
 }
 
 void VkRenderer::EndFrame() {
@@ -1415,6 +1423,12 @@ void VkRenderer::EndFrame() {
     };
     for (auto& t : o.textures) if (t.used) pushBatch(t.verts, t.set);
     for (auto& t : o.targets) if (t.used) pushBatch(t.verts, t.set);
+
+    // present 选源：记下最后一帧真正收到顶点（vertexCount>0）的离屏目标。
+    // 只绑了 FBO、clear 过、没写几何的目标会呈现为黑纹帧，不能拿它当合成源。
+    if (totalVerts > 0 && o.currentTarget >= 1000) {
+        o.lastGeomTarget = o.currentTarget;
+    }
 
     VkFramebuffer fb = o.framebuffers[o.frameImageIndex];
     VkRenderPass rp = o.renderPass;

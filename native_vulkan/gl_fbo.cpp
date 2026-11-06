@@ -652,11 +652,15 @@ void gl_vk_present_frame () {
         // 渲染结果只留在 FBO 里，后缓冲从来没被画过 → 屏幕只有清屏色（黑屏）。
         // 所以提交前先把最后一张离屏图铺满后缓冲。
         if (g_currentTarget >= 1000) {
-            uint32_t src = g_currentTarget;
             float c[4];
             GetClearColor (c);
-            int tw = 0, th = 0;
+            // 先开后缓冲：这一步会把当前离屏目标里尚未提交的几何落地，
+            // EndFrame 里同时记下"本帧最后一个真正收到顶点的离屏目标"。
             bool bound = r->BindRenderTarget (0, c[0], c[1], c[2], c[3]);
+            // 源优先取真正写过几何的目标；只 clear 过、没写几何的目标会呈黑纹帧。
+            uint32_t src = r->LastGeometryTarget ();
+            if (src < 1000) src = g_currentTarget;
+            int tw = 0, th = 0;
             if (bound && r->GetRenderTargetSize (src, &tw, &th) && tw > 0 && th > 0) {
                 float W = (float)r->ScreenWidth ();
                 float H = (float)r->ScreenHeight ();
@@ -670,8 +674,8 @@ void gl_vk_present_frame () {
                 };
                 r->DrawRaw (src, quad, 6);
                 g_backbufferOpen = true;
-                fprintf (stderr, "[glvk] blit cur src=%u %dx%d -> %dx%d\n",
-                         src, tw, th, (int)W, (int)H);
+                fprintf (stderr, "[glvk] blit cur=%u src=%u %dx%d -> %dx%d\n",
+                         g_currentTarget, src, tw, th, (int)W, (int)H);
             }
         } else if (g_lastTarget >= 1000 && !r->FrameHasGeometry ()) {
             // 已经绑回后缓冲但这一帧没往它上面画任何东西：把最后一张离屏图补上，
