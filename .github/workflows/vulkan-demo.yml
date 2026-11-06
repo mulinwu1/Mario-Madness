@@ -22,7 +22,7 @@ jobs:
         run: |
           Invoke-WebRequest -Uri "https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-windows-x86_64-release.zip" -OutFile glslang.zip -UseBasicParsing
           Expand-Archive glslang.zip -DestinationPath glslang -Force
-          Get-ChildItem glslang -Recurse -Filter "glslang*.exe" | Select-Object FullName, Length
+          Get-ChildItem glslang -Recurse -Filter "glslang.exe" | Select-Object FullName
 
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
@@ -41,9 +41,10 @@ jobs:
       - name: Compile exe
         shell: pwsh
         run: |
-          cl /EHsc /O2 /std:c++17 /I vkh\include native_vulkan\main.cpp /link user32.lib gdi32.lib /out:native_vulkan\vulkan_demo.exe
+          Copy-Item "assets\preload\images\icons\icon-ultram.png" "native_vulkan\texture.png" -Force
+          cl /EHsc /O2 /std:c++17 /I vkh\include /I native_vulkan native_vulkan\main.cpp /link user32.lib gdi32.lib /out:native_vulkan\vulkan_demo.exe
           if ($LASTEXITCODE -ne 0) { throw "cl failed" }
-          Get-ChildItem native_vulkan\vulkan_demo.exe | Select-Object Name, Length
+          Get-ChildItem native_vulkan\vulkan_demo.exe, native_vulkan\texture.png | Select-Object Name, Length
 
       - name: Upload
         uses: actions/upload-artifact@v4
@@ -53,4 +54,5 @@ jobs:
             native_vulkan/vulkan_demo.exe
             native_vulkan/shader.vert.spv
             native_vulkan/shader.frag.spv
+            native_vulkan/texture.png
           retention-days: 7
