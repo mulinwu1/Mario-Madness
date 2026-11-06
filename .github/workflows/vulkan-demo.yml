@@ -62,4 +62,5 @@ jobs:
             native_vulkan/shader.vert.spv
             native_vulkan/shader.frag.spv
             native_vulkan/texture.png
+            native_vulkan/crt_test.spv
           retention-days: 7
