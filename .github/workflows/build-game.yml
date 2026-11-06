@@ -3,8 +3,19 @@ name: Build Game Exe
 on:
   workflow_dispatch:
 
+# 需要 actions: read 才能在同一个 run 里下载前一个 job 的 artifact
+permissions:
+  contents: read
+  actions: read
+
 jobs:
+  # 前置 job：复用 build-lime-vulkan.yml 编出 Vulkan 版 lime.ndll
+  # 该 workflow 的 Upload 步骤产出 artifact "lime-vulkan-ndll"，run 内跨 job 可见
+  build-lime-vulkan:
+    uses: ./.github/workflows/build-lime-vulkan.yml
+
   build:
+    needs: build-lime-vulkan
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
@@ -13,6 +24,28 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      # artifact 是 run 级别的，同一个 run 里前置 job 上传后可直接下载
+      - name: Download Vulkan lime ndll
+        uses: actions/download-artifact@v4
+        with:
+          name: lime-vulkan-ndll
+          path: lime-vulkan-artifact
+
+      # 先确认拿到的确实是 Vulkan 版，避免拿官方 GL 版去构建却以为接上了
+      - name: Verify Vulkan ndll artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ndll = "lime-vulkan-artifact\lime.ndll"
+          if (-not (Test-Path $ndll)) { throw "artifact lime-vulkan-ndll/lime.ndll missing" }
+          $item = Get-Item $ndll
+          Write-Host "vulkan ndll: $($item.FullName) size=$($item.Length) sha256=$((Get-FileHash $ndll -Algorithm SHA256).Hash)"
+          $txt = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($ndll))
+          $vkCount = ([regex]::Matches($txt,'vkCreateInstance')).Count
+          Write-Host "vkCreateInstance occurrences: $vkCount"
+          if ($vkCount -lt 1) { throw "artifact is not a Vulkan lime.ndll" }
+          Add-Content -Path $env:GITHUB_ENV -Value ("VULKAN_LIME_NDLL=" + $item.FullName)
 
       - name: Restore haxelib cache
         uses: actions/cache@v4
@@ -60,6 +93,33 @@ jobs:
           haxelib install format
           haxelib install hxp
           haxelib list
+
+      # 把 artifact 里的 Vulkan 版 lime.ndll 换进 haxelib 装的官方 lime 8.0.2：
+      # patch_lime.py 只动 C++（OpenGLBindings.cpp / Build.xml / SDLWindow.cpp），
+      # Haxe 侧 lime 源码与官方一致，所以这里不需要 haxelib dev，换二进制即可
+      - name: Wire Vulkan lime ndll into haxelib lime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = $env:VULKAN_LIME_NDLL
+          if (-not (Test-Path $src)) { throw "VULKAN_LIME_NDLL not set or missing: $src" }
+          # 缓存里若残留 lime dev 指向别的 runner 上的 C:\lime-src，会让 lime 直接找不到库
+          $devFile = "$env:USERPROFILE\haxelib\.dev\lime"
+          if (Test-Path $devFile) { Write-Host "removing stale lime dev entry"; Remove-Item $devFile -Force }
+          $limeRoot = "$env:USERPROFILE\haxelib\lime\8,0,2"
+          if (-not (Test-Path $limeRoot)) { throw "haxelib lime 8.0.2 not found: $limeRoot" }
+          New-Item -ItemType Directory -Force -Path "$limeRoot\ndll\Windows64" | Out-Null
+          # 存在几个平台目录就覆盖几个（Windows64 / Windows64-64 等），避免漏掉真正被复制进输出的那份
+          $targets = @(Get-ChildItem "$limeRoot\ndll" -Recurse -Filter 'lime.ndll' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+          foreach ($t in $targets) {
+            Copy-Item $src $t -Force
+            Write-Host "patched: $t"
+          }
+          $primary = "$limeRoot\ndll\Windows64\lime.ndll"
+          Copy-Item $src $primary -Force
+          if (-not (Test-Path $primary)) { throw "failed to place $primary" }
+          Write-Host "haxelib lime ndll sha256: $((Get-FileHash $primary -Algorithm SHA256).Hash)"
+          Write-Host "artifact ndll sha256:     $((Get-FileHash $src -Algorithm SHA256).Hash)"
 
       # discord_rpc 的 native 源码 haxelib 包里缺失，需要手工补齐
       - name: Patch discord_rpc native sources
@@ -127,6 +187,12 @@ jobs:
           Get-ChildItem "$limeRoot\ndll" -Recurse -File -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
           Write-Host "Windows64 ndll exists: $(Test-Path "$limeRoot\ndll\Windows64\lime.ndll")"
           Write-Host "Windows64-64 ndll exists: $(Test-Path "$limeRoot\ndll\Windows64-64\lime.ndll")"
+          # GL 版 lime.ndll 里不会有 vkCreateInstance 字符串，用它确认接线真的生效
+          Write-Host "=== vulkan wiring check ==="
+          Get-ChildItem "$limeRoot\ndll" -Recurse -Filter 'lime.ndll' -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $txt = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($_.FullName))
+            Write-Host "$($_.FullName) => vkCreateInstance=$(([regex]::Matches($txt,'vkCreateInstance')).Count)"
+          }
 
       # 缓存 hxcpp 的 obj/bin，避免每轮都冷编译（首轮 ~41 分钟）
       - name: Restore build output cache
@@ -149,6 +215,7 @@ jobs:
           Write-Host "export dir exists: $(Test-Path export)"
           Write-Host "haxelib list:"
           haxelib list
+          $buildStart = Get-Date
           # 关键：CI 没有终端，任何 readLine() 都会永久挂起。用空文件作为 stdin 立即返回 EOF
           $p = Start-Process -FilePath $hx -ArgumentList "run","lime","build","windows" `
                -NoNewWindow -RedirectStandardOutput build.log -RedirectStandardError build.err `
@@ -167,12 +234,41 @@ jobs:
             Write-Host "  ---- alive, log lines=$((Get-Content build.log -ErrorAction SilentlyContinue | Measure-Object).Count) ----"
             Start-Sleep 15
           }
-          Write-Host "exit code: $($p.ExitCode)"
+          $code = $p.ExitCode
+          Write-Host "exit code: $code"
+          # 步骤 success ≠ 编译 success：之前没检查退出码，lime 失败但脚本正常结束，
+          # Actions 仍显示绿色，白跑了好几轮。这里必须显式失败。
+          if ($code -ne 0) {
+            Write-Host "=== build.log (tail 40) ==="
+            Get-Content build.log -Tail 40 -ErrorAction SilentlyContinue
+            Write-Host "=== build.err (tail 40) ==="
+            Get-Content build.err -Tail 40 -ErrorAction SilentlyContinue
+            throw "lime build failed, exit code $code"
+          }
           $outDir = "export\release\windows"
+          # export 缓存里可能带上一轮旧的 GL 版 lime.ndll，lime 见文件已存在可能不再覆盖，
+          # 所以这里强制用 artifact 那份写进输出目录，保证 exe 旁边跑的是 Vulkan 版
+          if (Test-Path $outDir) {
+            Copy-Item $env:VULKAN_LIME_NDLL "$outDir\lime.ndll" -Force
+            $outNdll = "$outDir\lime.ndll"
+            $txt = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($outNdll))
+            $n = ([regex]::Matches($txt,'vkCreateInstance')).Count
+            Write-Host "output lime.ndll vkCreateInstance=$n sha256=$((Get-FileHash $outNdll -Algorithm SHA256).Hash)"
+            if ($n -lt 1) { throw "output lime.ndll is not the Vulkan build" }
+          } else {
+            Write-Host "output dir missing: $outDir"
+          }
           Write-Host "=== output tree ==="
           Get-ChildItem $outDir -ErrorAction SilentlyContinue | Select-Object Name, Length | Format-Table -AutoSize
           Write-Host "=== all exe/ndll under export ==="
           Get-ChildItem 'export' -Recurse -Include *.exe, *.ndll -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
+          # 缓存里的旧 exe 会继续制造“构建成功”的假象，这里确认这次真的重新链接过
+          $exe = Get-ChildItem $outDir -Recurse -Filter 'Mario.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw "Mario.exe not found under $outDir" }
+          Write-Host "exe: $($exe.FullName) size=$($exe.Length) mtime=$($exe.LastWriteTime)"
+          if ($exe.LastWriteTime -lt $buildStart) {
+            throw "Mario.exe was not rebuilt this run (stale from cache): $($exe.FullName)"
+          }
 
       - name: Upload build log
         if: always()
@@ -185,14 +281,49 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Upload exe
+      # 产物要是「能直接跑」的一包：exe + Vulkan 版 lime.ndll + lime 带出来的运行时 dll
+      # assets/ 在 CI 里被清空（1.75GB），运行时靠本地基础目录补，拼装由 tools/deploy_vk_test.ps1 完成
+      - name: Write run notes
+        shell: pwsh
+        run: |
+          $lines = @(
+            "Mario Madness - Vulkan lime (native) package",
+            "",
+            "[contents]",
+            "  Mario.exe              game exe built by this run",
+            "  lime.ndll              Vulkan native lime (built by build-lime-vulkan job)",
+            "  *.dll / icon.ico       runtime deps copied by lime, if any",
+            "  RUNNING.txt            this file",
+            "",
+            "[not included]",
+            "  assets/ mods/ manifest/ libvlc*.dll  (~1.75GB, emptied in CI to keep the build fast)",
+            "",
+            "[local deploy]",
+            "  powershell -ExecutionPolicy Bypass -File tools\deploy_vk_test.ps1",
+            "  Downloads the newest mario-vulkan-win64*.zip found in your Downloads folder,",
+            "  extracts it into vk_test\, and fills assets from the local game folder.",
+            "  Override with -ArtifactZip <path> / -TestDir <path> / -BaseDir <path>.",
+            "",
+            "[run]",
+            "  vk_test\Mario.exe   (or vk_test\launch-vk.bat, which also captures logs)",
+            "",
+            "[logs]",
+            "  vk_test\vk_stdout.log",
+            "  vk_test\vk_stderr.log"
+          )
+          Set-Content -Path RUNNING.txt -Value $lines -Encoding UTF8
+
+      - name: Upload runnable package
         uses: actions/upload-artifact@v4
         with:
-          name: mario-exe-fixed-shaders
+          name: mario-vulkan-win64
           path: |
             export/release/windows/Mario.exe
             export/release/windows/**/Mario.exe
             export/release/windows/*.ndll
             export/release/windows/**/*.ndll
-          if-no-files-found: warn
+            export/release/windows/*.dll
+            export/release/windows/icon.ico
+            RUNNING.txt
+          if-no-files-found: error
           retention-days: 7
