@@ -1,1 +1,242 @@
-I3ByYWdtYSBvbmNlCiNpbmNsdWRlIDx2dWxrYW4vdnVsa2FuLmg+CiNpbmNsdWRlIDxjc3RkaW50PgoKLy8gR0xFUyDnirbmgIHnvJPlrZggKyBWdWxrYW4g566h57q/6ZSuCi8vCi8vIOWumuS9je+8muWPquWBmiLmlbDmja7lu7rmqKEi77yM5LiN6LCD55So5Lu75L2VIFZ1bGthbiDlh73mlbDvvIzkuZ/kuI3norAgbGltZV9nbF8qIOespuWPt+OAggovLyAgIC0g5omA5pyJ5YWl5Y+j5oyJIEdMRVMg6KeE6IyD6K6w5b2V54q25oCB44CB5qCh6aqM5Y+C5pWw44CB5oyJIEdMIOivreS5ieiusOW9lemUmeivr+egge+8mwovLyAgIC0g5b2x5ZON566h57q/5Yib5bu655qE54q25oCB5rGH5oC75oiQIFBpcGVsaW5lS2V577yM5L2c5Li6IHBpcGVsaW5lIGNhY2hlIOeahOmUru+8iOeUn+aIkOaIluWkjeeUqO+8ie+8mwovLyAgIC0g5q+P5bin5Y+v5Y+Y55qE54q25oCB77yIc2Npc3NvciAvIHZpZXdwb3J0IC8gYmxlbmQg5bi46YePIC8gc3RlbmNpbCByZWYgLyBkZXB0aEJpYXMg5bey5YWlIGtlee+8iQovLyAgICAg5o+Q5L6b546w5oiQ55qEIFZrIOe7k+aehO+8jOeUseiwg+eUqOaWueiHquW3sSB2a0NtZFNldCog5bqU55So44CCCi8vCi8vIOe6v+eoi+aooeWei++8muWSjCBHTCDkuIDmoLfmjIki5Y2V5riy5p+T57q/56iLIuS9v+eUqO+8jOacquWKoOmUgeOAggovLyDnuqblrprvvJrnirbmgIHliJ3lgLzlsLHmmK8gR0xFUyDpu5jorqTlgLzvvIzljbPkvb/osIPnlKjmlrnku47mnKrosIPnlKggUmVzZXQoKSDkuZ/mmK/mraPnoa7nmoTjgIIKCm5hbWVzcGFjZSBsaW1lIHsKbmFtZXNwYWNlIGdsc3RhdGUgewoKLy8g5riy5p+T55uu5qCH55qE6ZmE5Lu25qC85byP44CCVnVsa2FuIOeuoee6v+W/hemhu+S4jiByZW5kZXIgcGFzcyDnmoTmoLzlvI/lhbzlrrnvvIwKLy8g5omA5Lul5qC85byP5Lmf5bGe5LqO566h57q/6ZSu55qE5LiA6YOo5YiG44CCCnN0cnVjdCBGb3JtYXRzIHsKICAgIGludCBjb2xvckZvcm1hdCA9IChpbnQpVktfRk9STUFUX1VOREVGSU5FRDsgICAgLy8gVmtGb3JtYXQKICAgIGludCBkZXB0aEZvcm1hdCA9IChpbnQpVktfRk9STUFUX1VOREVGSU5FRDsgICAgLy8gVmtGb3JtYXTvvIxWS19GT1JNQVRfVU5ERUZJTkVEIOihqOekuuaXoOa3seW6pumZhOS7tgogICAgaW50IHN0ZW5jaWxGb3JtYXQgPSAoaW50KVZLX0ZPUk1BVF9VTkRFRklORUQ7ICAvLyBWa0Zvcm1hdO+8jOmAmuW4uOS4jiBkZXB0aEZvcm1hdCDlkIjmiJAgRDI0UzgKICAgIGludCBzYW1wbGVzID0gMTsgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAvLyDph4fmoLfmlbDvvIwxIOihqOekuuS4jeW8gCBNU0FBCgogICAgYm9vbCBvcGVyYXRvcj09KGNvbnN0IEZvcm1hdHMmIG8pIGNvbnN0IHsKICAgICAgICByZXR1cm4gY29sb3JGb3JtYXQgPT0gby5jb2xvckZvcm1hdCAmJiBkZXB0aEZvcm1hdCA9PSBvLmRlcHRoRm9ybWF0ICYmCiAgICAgICAgICAgICAgIHN0ZW5jaWxGb3JtYXQgPT0gby5zdGVuY2lsRm9ybWF0ICYmIHNhbXBsZXMgPT0gby5zYW1wbGVzOwogICAgfQogICAgYm9vbCBvcGVyYXRvciE9KGNvbnN0IEZvcm1hdHMmIG8pIGNvbnN0IHsgcmV0dXJuICEoKnRoaXMgPT0gbyk7IH0KfTsKCi8vIOWNlemdouaooeadv+eKtuaAge+8iFZ1bGthbiDmlbDlgLzvvInjgIJyZWYg5LiN5Zyo5YW25Lit77yaR0wg55qE5YmNL+WQjuW8leeUqOWAvOWPr+S7peS4jeWQjO+8jAovLyDogIwgVnVsa2FuIOeahCB2a0NtZFNldFN0ZW5jaWxSZWZlcmVuY2Ug5piv5oyJ6Z2i6K6+572u55qE5Yqo5oCB54q25oCB77yMCi8vIOaUvui/myBrZXkg5Lya6K6p5q+P5Liq5byV55So5YC86YO95paw5bu65LiA5p2h566h57q/77yM5omA5Lul5Y2V54us55SoIEdldFN0ZW5jaWxSZWYoKSDlj5bjgIIKc3RydWN0IFN0ZW5jaWxGYWNlIHsKICAgIGludCBjb21wYXJlT3AgPSAoaW50KVZLX0NPTVBBUkVfT1BfQUxXQVlTOyAgICAgIC8vIFZrQ29tcGFyZU9wCiAgICBpbnQgZmFpbE9wID0gKGludClWS19TVEVOQ0lMX09QX0tFRVA7ICAgICAgICAgICAvLyBWa1N0ZW5jaWxPcAogICAgaW50IHBhc3NEZXB0aEZhaWxPcCA9IChpbnQpVktfU1RFTkNJTF9PUF9LRUVQOyAgLy8gVmtTdGVuY2lsT3AKICAgIGludCBwYXNzT3AgPSAoaW50KVZLX1NURU5DSUxfT1BfS0VFUDsgICAgICAgICAgIC8vIFZrU3RlbmNpbE9wCiAgICB1aW50MzJfdCBjb21wYXJlTWFzayA9IDB4RkZGRkZGRkZ1OwogICAgdWludDMyX3Qgd3JpdGVNYXNrID0gMHhGRkZGRkZGRnU7CgogICAgYm9vbCBvcGVyYXRvcj09KGNvbnN0IFN0ZW5jaWxGYWNlJiBvKSBjb25zdCB7CiAgICAgICAgcmV0dXJuIGNvbXBhcmVPcCA9PSBvLmNvbXBhcmVPcCAmJiBmYWlsT3AgPT0gby5mYWlsT3AgJiYKICAgICAgICAgICAgICAgcGFzc0RlcHRoRmFpbE9wID09IG8ucGFzc0RlcHRoRmFpbE9wICYmIHBhc3NPcCA9PSBvLnBhc3NPcCAmJgogICAgICAgICAgICAgICBjb21wYXJlTWFzayA9PSBvLmNvbXBhcmVNYXNrICYmIHdyaXRlTWFzayA9PSBvLndyaXRlTWFzazsKICAgIH0KfTsKCi8vIOS4gOadoeWbvuW9oueuoee6v+aJgOmcgOeahOWFqOmDqOeKtuaAge+8iFZ1bGthbiDmlbDlgLzvvIzlt7LlgZrov4cgR0zihpJWSyDnv7vor5HvvInjgIIKLy8g6LCD55So5pa555SoIEhhc2goKSDlgZogY2FjaGUg6ZSu77yM5ZG95Lit5YiZ5aSN55So77yM5pyq5ZG95Lit5YaN5bu6566h57q/44CCCnN0cnVjdCBQaXBlbGluZUtleSB7CiAgICAvLyDovpPlhaXoo4XphY0KICAgIGludCB0b3BvbG9neSA9IChpbnQpVktfUFJJTUlUSVZFX1RPUE9MT0dZX1RSSUFOR0xFX0xJU1Q7ICAvLyBWa1ByaW1pdGl2ZVRvcG9sb2d5CiAgICBib29sIHByaW1pdGl2ZVJlc3RhcnQgPSBmYWxzZTsKCiAgICAvLyDlhYnmoIXljJYKICAgIGludCBjdWxsTW9kZSA9IChpbnQpVktfQ1VMTF9NT0RFX05PTkU7ICAgICAgICAgICAgICAvLyBWa0N1bGxNb2RlRmxhZ3MKICAgIGludCBmcm9udEZhY2UgPSAoaW50KVZLX0ZST05UX0ZBQ0VfQ09VTlRFUl9DTE9DS1dJU0U7ICAvLyBWa0Zyb250RmFjZe+8iOW3suaMiSBZIOe/u+i9rOS/ruato++8iQogICAgYm9vbCBkZXB0aEJpYXNFbmFibGUgPSBmYWxzZTsgICAgICAgICAgICAgICAgICAgICAgICAvLyBHTF9QT0xZR09OX09GRlNFVF9GSUxMCiAgICBmbG9hdCBkZXB0aEJpYXNDb25zdGFudCA9IDAuMGY7CiAgICBmbG9hdCBkZXB0aEJpYXNTbG9wZSA9IDAuMGY7CiAgICBib29sIHJhc3Rlcml6ZXJEaXNjYXJkID0gZmFsc2U7ICAgICAgICAgICAgICAgICAgICAgIC8vIEdMX1JBU1RFUklaRVJfRElTQ0FSRAogICAgZmxvYXQgbGluZVdpZHRoID0gMS4wZjsgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAvLyDpnIDopoEgd2lkZUxpbmVzIOeJueaAp+aJjeeUn+aViAoKICAgIC8vIOa3seW6pgogICAgYm9vbCBkZXB0aFRlc3RFbmFibGUgPSBmYWxzZTsKICAgIGJvb2wgZGVwdGhXcml0ZUVuYWJsZSA9IGZhbHNlOwogICAgaW50IGRlcHRoQ29tcGFyZU9wID0gKGludClWS19DT01QQVJFX09QX0xFU1M7ICAgICAgICAvLyBWa0NvbXBhcmVPcAoKICAgIC8vIOaooeadvwogICAgYm9vbCBzdGVuY2lsVGVzdEVuYWJsZSA9IGZhbHNlOwogICAgU3RlbmNpbEZhY2UgZnJvbnRTdGVuY2lsOwogICAgU3RlbmNpbEZhY2UgYmFja1N0ZW5jaWw7CgogICAgLy8g5re35ZCI77yIR0wg55qEIFJHQi9hbHBoYSDpgJrpgZPlkIToh6rni6znq4vnmoTlm6DlrZDkuI7mlrnnqIvvvIkKICAgIGJvb2wgYmxlbmRFbmFibGUgPSBmYWxzZTsKICAgIGludCBzcmNDb2xvckJsZW5kRmFjdG9yID0gKGludClWS19CTEVORF9GQUNUT1JfT05FOyAgIC8vIFZrQmxlbmRGYWN0b3IKICAgIGludCBkc3RDb2xvckJsZW5kRmFjdG9yID0gKGludClWS19CTEVORF9GQUNUT1JfWkVSTzsKICAgIGludCBjb2xvckJsZW5kT3AgPSAoaW50KVZLX0JMRU5EX09QX0FERDsgICAgICAgICAgICAgIC8vIFZrQmxlbmRPcAogICAgaW50IHNyY0FscGhhQmxlbmRGYWN0b3IgPSAoaW50KVZLX0JMRU5EX0ZBQ1RPUl9PTkU7CiAgICBpbnQgZHN0QWxwaGFCbGVuZEZhY3RvciA9IChpbnQpVktfQkxFTkRfRkFDVE9SX1pFUk87CiAgICBpbnQgYWxwaGFCbGVuZE9wID0gKGludClWS19CTEVORF9PUF9BREQ7CiAgICB1aW50MzJfdCBjb2xvcldyaXRlTWFzayA9IDB4RjsgICAgICAgICAgICAgICAgICAgICAgIC8vIEdMX0NPTE9SX1dSSVRFTUFTSwoKICAgIC8vIOmZhOS7tuagvOW8j++8iOeuoee6v+WFvOWuueaAp++8iQogICAgRm9ybWF0cyBmb3JtYXRzOwoKICAgIGJvb2wgb3BlcmF0b3I9PShjb25zdCBQaXBlbGluZUtleSYgbykgY29uc3Q7CiAgICBib29sIG9wZXJhdG9yIT0oY29uc3QgUGlwZWxpbmVLZXkmIG8pIGNvbnN0IHsgcmV0dXJuICEoKnRoaXMgPT0gbyk7IH0KICAgIHVpbnQ2NF90IEhhc2goKSBjb25zdDsKfTsKCi8vIC0tLS0tLS0tLS0tLS0tLS0g5Yid5aeL5YyWIC8g5bC65a+4IC0tLS0tLS0tLS0tLS0tLS0KCi8vIOaBouWkjeaJgOaciSBHTEVTIOm7mOiupOWAvO+8m3ZpZXdwb3J0L3NjaXNzb3Ig5b2S6Zu277yM6Z2i5bC65a+46K6wIDDjgIIKdm9pZCBSZXNldCgpOwoKLy8g5oGi5aSN6buY6K6k5YC877yM5ZCM5pe25oqKIHZpZXdwb3J0L3NjaXNzb3Ig6K6+5Li65pW056qX77yIc3VyZmFjZVdpZHRoL3N1cmZhY2VIZWlnaHTvvInjgIIKLy8g5LiK5LiL5paH5Yib5bu65ZCO6LCD55So5LiA5qyh5pyA55yB5LqL44CCCnZvaWQgUmVzZXRUb0RlZmF1bHRzKGludCBzdXJmYWNlV2lkdGgsIGludCBzdXJmYWNlSGVpZ2h0KTsKCi8vIOS6pOaNoumTvumHjeW7ui/nqpflj6PnvKnmlL7ml7bosIPnlKjjgILlj6rmnIkgdmlld3BvcnQvc2Npc3NvciDku43nrYnkuo4i5LiK5LiA5qyh55qE5pW056qX5YC8IuaXtuaJjei3n+maj+abtOaWsO+8jAovLyDkuI3kvJropobnm5bmuLjmiI/oh6rlt7Horr7ov4fnmoTop4blm77nn6nlvaLjgIIKdm9pZCBSZXNpemVTdXJmYWNlKGludCBzdXJmYWNlV2lkdGgsIGludCBzdXJmYWNlSGVpZ2h0KTsKCi8vIC0tLS0tLS0tLS0tLS0tLS0g6IO95Yqb5byA5YWz77yIR0xfRU5BQkxFX0JJVO+8iSAtLS0tLS0tLS0tLS0tLS0tCgovLyDmnKrnn6UgY2FwIOaMieinhOiMg+iusCBHTF9JTlZBTElEX0VOVU0g5LiU5LiN5pS554q25oCB77yM6L+U5ZueIGZhbHNl44CCCmJvb2wgU2V0Q2FwYWJpbGl0eShpbnQgY2FwLCBib29sIGVuYWJsZWQpOwovLyBnbElzRW5hYmxlZCDor63kuYnvvJrmnKrnn6UgY2FwIOiusCBHTF9JTlZBTElEX0VOVU0g5bm26L+U5ZueIGZhbHNl44CCCmJvb2wgSXNFbmFibGVkKGludCBjYXApOwovLyDmmK/lkKbkuLrlt7Lnn6XnmoTvvIjlj68gZW5hYmxlL2Rpc2FibGUg55qE77yJY2Fw44CCCmJvb2wgSXNDYXBhYmlsaXR5KGludCBjYXApOwoKLy8gLS0tLS0tLS0tLS0tLS0tLSDmt7flkIggLS0tLS0tLS0tLS0tLS0tLQoKYm9vbCBCbGVuZEZ1bmMoaW50IHNmYWN0b3IsIGludCBkZmFjdG9yKTsKYm9vbCBCbGVuZEZ1bmNTZXBhcmF0ZShpbnQgc3JjUkdCLCBpbnQgZHN0UkdCLCBpbnQgc3JjQWxwaGEsIGludCBkc3RBbHBoYSk7CmJvb2wgQmxlbmRFcXVhdGlvbihpbnQgbW9kZSk7CmJvb2wgQmxlbmRFcXVhdGlvblNlcGFyYXRlKGludCByZ2IsIGludCBhbHBoYSk7CnZvaWQgQmxlbmRDb2xvcihmbG9hdCByLCBmbG9hdCBnLCBmbG9hdCBiLCBmbG9hdCBhKTsKCi8vIE9wZW5GTC9GbGl4ZWwg6LWw6aKE5LmYIGFscGhh77yM5q2j56Gu55qE5re35ZCI5pivIE9ORSAvIE9ORV9NSU5VU19TUkNfQUxQSEHjgIIKLy8g562J5Lu35LqOIGVuYWJsZShCTEVORCkgKyBCbGVuZEZ1bmNTZXBhcmF0ZShPTkUsIE9ORV9NSU5VU19TUkNfQUxQSEEsIE9ORSwgT05FX01JTlVTX1NSQ19BTFBIQSnjgIIKLy8g5L6b5Li757q/5ZyoIua4uOaIj+ayoeacieaYvuW8j+iuvue9rua3t+WQiCLnmoTml7blgJnlhZzlupXjgIIKdm9pZCBFbmFibGVQcmVtdWx0aXBsaWVkQWxwaGFCbGVuZCgpOwoKLy8gLS0tLS0tLS0tLS0tLS0tLSDmt7HluqYgLS0tLS0tLS0tLS0tLS0tLQoKYm9vbCBEZXB0aEZ1bmMoaW50IGZ1bmMpOwp2b2lkIERlcHRoTWFzayhib29sIGZsYWcpOwovLyB6TmVhci96RmFyIOaMieinhOiMgyBjbGFtcCDliLAgWzAsMV3vvJt6TmVhciA+IHpGYXIg6K6wIEdMX0lOVkFMSURfVkFMVUUg5LiU5LiN5pS554q25oCB44CCCmJvb2wgRGVwdGhSYW5nZWYoZmxvYXQgek5lYXIsIGZsb2F0IHpGYXIpOwoKLy8gLS0tLS0tLS0tLS0tLS0tLSDmqKHmnb8gLS0tLS0tLS0tLS0tLS0tLQoKLy8gZmFjZSDlj5YgR0xfRlJPTlQgLyBHTF9CQUNLIC8gR0xfRlJPTlRfQU5EX0JBQ0vjgIIKYm9vbCBTdGVuY2lsRnVuYyhpbnQgZnVuYywgaW50IHJlZiwgaW50IG1hc2spOwpib29sIFN0ZW5jaWxGdW5jU2VwYXJhdGUoaW50IGZhY2UsIGludCBmdW5jLCBpbnQgcmVmLCBpbnQgbWFzayk7CnZvaWQgU3RlbmNpbE1hc2soaW50IG1hc2spOwp2b2lkIFN0ZW5jaWxNYXNrU2VwYXJhdGUoaW50IGZhY2UsIGludCBtYXNrKTsKYm9vbCBTdGVuY2lsT3AoaW50IHNmYWlsLCBpbnQgZHBmYWlsLCBpbnQgZHBwYXNzKTsKYm9vbCBTdGVuY2lsT3BTZXBhcmF0ZShpbnQgZmFjZSwgaW50IHNmYWlsLCBpbnQgZHBmYWlsLCBpbnQgZHBwYXNzKTsKCi8vIC0tLS0tLS0tLS0tLS0tLS0g5YWJ5qCF5YyWIC0tLS0tLS0tLS0tLS0tLS0KCmJvb2wgQ3VsbEZhY2UoaW50IG1vZGUpOwpib29sIEZyb250RmFjZShpbnQgbW9kZSk7CnZvaWQgUG9seWdvbk9mZnNldChmbG9hdCBmYWN0b3IsIGZsb2F0IHVuaXRzKTsKLy8gd2lkdGggPD0gMCDorrAgR0xfSU5WQUxJRF9WQUxVReOAggpib29sIExpbmVXaWR0aChmbG9hdCB3aWR0aCk7CnZvaWQgQ29sb3JNYXNrKGJvb2wgcmVkLCBib29sIGdyZWVuLCBib29sIGJsdWUsIGJvb2wgYWxwaGEpOwovLyB2YWx1ZSBjbGFtcCDliLAgWzAsMV3jgIIKdm9pZCBTYW1wbGVDb3ZlcmFnZShmbG9hdCB2YWx1ZSwgYm9vbCBpbnZlcnQpOwoKLy8gLS0tLS0tLS0tLS0tLS0tLSDop4blj6MgLyDliaroo4EgLyDmuIXpmaTlgLwgLS0tLS0tLS0tLS0tLS0tLQoKYm9vbCBWaWV3cG9ydChpbnQgeCwgaW50IHksIGludCB3aWR0aCwgaW50IGhlaWdodCk7CmJvb2wgU2Npc3NvcihpbnQgeCwgaW50IHksIGludCB3aWR0aCwgaW50IGhlaWdodCk7CnZvaWQgQ2xlYXJDb2xvcihmbG9hdCByZWQsIGZsb2F0IGdyZWVuLCBmbG9hdCBibHVlLCBmbG9hdCBhbHBoYSk7CnZvaWQgQ2xlYXJEZXB0aGYoZmxvYXQgZGVwdGgpOwp2b2lkIENsZWFyU3RlbmNpbChpbnQgc3RlbmNpbCk7CgovLyAtLS0tLS0tLS0tLS0tLS0tIOe7mOWItuaLk+aJke+8iOi/m+WFpeeuoee6v+mUru+8iSAtLS0tLS0tLS0tLS0tLS0tCgovLyBHTCDmsqHmnIki5oyB5LmF5ouT5omRIui/meS4quamguW/te+8jOS9hueuoee6v+mHjCB0b3BvbG9neSDmmK/liJvlu7rmnJ/nirbmgIHjgIIKLy8g5Li757q/5ZyoIGRyYXcg5YmN6LCD5LiA5qyh5pys5Ye95pWw5Y2z5Y+v77yb5aSN5L2N6buY6K6kIEdMX1RSSUFOR0xFU+OAggpib29sIFNldERyYXdNb2RlKGludCBnbE1vZGUpOwovLyBHTF9UUklBTkdMRV9GQU4gLyBHTF9MSU5FX0xPT1Ag5ZyoIFZ1bGthbiDph4zmsqHmnInlr7nlupTmi5PmiZHvvIzpnIDopoHosIPnlKjmlrnoh6rooYzmi4bmiJDliJfooajjgIIKYm9vbCBEcmF3TW9kZU5lZWRzRW11bGF0aW9uKGludCBnbE1vZGUpOwoKLy8gLS0tLS0tLS0tLS0tLS0tLSDmn6Xor6LvvIhnbEdldCrvvIkgLS0tLS0tLS0tLS0tLS0tLQoKLy8gbWFpbmxpbmUg5Y+q5bqU5oqK5pys5qih5Z2X6K6k6K+G55qEIHBuYW1lIOi3r+eUsei/m+adpe+8m+WFiOeUqCBIYW5kbGVzUG5hbWUg5Yik5pat77yMCi8vIOWFtuWugyBwbmFtZe+8iE1BWF9URVhUVVJFX1NJWkUg5LmL57G777yJ57un57ut6LWw5Y6f5pyJ6Lev5b6E44CCCmJvb2wgSGFuZGxlc1BuYW1lKGludCBwbmFtZSk7Ci8vIOWkmuWIhumHjyBwbmFtZSDnmoTmoIfph4/niYjmnKzmjIkgR0wg6K+t5LmJ5Y+q5Zue56ys5LiA5Liq5YiG6YeP44CCCmJvb2wgUXVlcnlCb29sZWFuKGludCBwbmFtZSwgYm9vbCogb3V0KTsKLy8g6L+U5Zue5YaZ5YWl55qEIGludCDkuKrmlbDvvIwwIOihqOekuuS4jeaUr+aMge+8iOWQjOaXtuiusCBHTF9JTlZBTElEX0VOVU3vvInjgIIKaW50IFF1ZXJ5SW50ZWdlcihpbnQgcG5hbWUsIGludCogb3V0LCBpbnQgbWF4Q291bnQpOwovLyDov5Tlm57lhpnlhaXnmoQgZmxvYXQg5Liq5pWw77yMMCDooajnpLrkuI3mlK/mjIHvvIjlkIzml7borrAgR0xfSU5WQUxJRF9FTlVN77yJ44CCCmludCBRdWVyeUZsb2F0KGludCBwbmFtZSwgZmxvYXQqIG91dCwgaW50IG1heENvdW50KTsKCnZvaWQgR2V0Q2xlYXJDb2xvcihmbG9hdCBvdXRbNF0pOwpmbG9hdCBHZXRDbGVhckRlcHRoKCk7CmludCBHZXRDbGVhclN0ZW5jaWwoKTsKdm9pZCBHZXRCbGVuZENvbG9yKGZsb2F0IG91dFs0XSk7CnZvaWQgR2V0U2Npc3NvckJveChpbnQgb3V0WzRdKTsKdm9pZCBHZXRWaWV3cG9ydEJveChpbnQgb3V0WzRdKTsKZmxvYXQgR2V0TGluZVdpZHRoKCk7Ci8vIGZhY2Ug5Y+WIEdMX0ZST05UIC8gR0xfQkFDS++8m+eUqOS6jiB2a0NtZFNldFN0ZW5jaWxSZWZlcmVuY2XjgIIKaW50IEdldFN0ZW5jaWxSZWYoaW50IGZhY2UpOwpib29sIEdldENvbG9yTWFzayhpbnQqIG91dDQpOwpib29sIEdldERlcHRoUmFuZ2VmKGZsb2F0IG91dDJbMl0pOwoKLy8gLS0tLS0tLS0tLS0tLS0tLSBWdWxrYW4g5Yqo5oCB54q25oCBIC0tLS0tLS0tLS0tLS0tLS0KCi8vIEdMIOeahCB5IOi9tOacneS4iuOAgVZ1bGthbiDmnJ3kuIvvvJrov5Tlm57nmoQgc2Npc3NvciDlt7Lnv7vliLDlt6bkuIrljp/ngrnvvIzlubYgY2xhbXAg5Yiw55uu5qCH5bC65a+444CCCi8vIHNjaXNzb3IgdGVzdCDlhbPpl63ml7bov5Tlm57mlbTnm67moIfnn6nlvaLvvIhWdWxrYW4g5rKh5pyJIuWFs+mXrSBzY2lzc29yIui/meS4queuoee6v+eKtuaAge+8ieOAggpWa1JlY3QyRCBHZXRWdWxrYW5TY2lzc29yKGludCB0YXJnZXRXaWR0aCwgaW50IHRhcmdldEhlaWdodCk7Ci8vIOWQjOagt+WBmiB5IOe/u+i9rO+8m2RlcHRoIOWbuuWumiBbMCwxXeOAggpWa1ZpZXdwb3J0IEdldFZ1bGthblZpZXdwb3J0KGludCB0YXJnZXRIZWlnaHQpOwoKLy8gdmtfcmVuZGVyZXIg5b2T5YmN5ZyoIERyYXdSYXcg6YeM5YGa5LqGIHkg5Y+W5Y+N77yIcHkgLT4gMSAtIHB5KjIvaO+8ie+8jAovLyDov5nkvJrorqnkuInop5LlvaLnu5Xluo/mlbTkvZPlj43ovazvvIzmiYDku6Xpu5jorqTopoHmioogR0wg55qEIGZyb250RmFjZSDlj5blj43lkI7lho3lhpnov5vnrqHnur/jgIIKLy8g6Iul5Li757q/5pS55oiQ6LSf6auY5bqmIHZpZXdwb3J0IOiAjOS4jeWcqOmhtueCueS4iue/u+i9rO+8jOaKiui/memHjOiuvuaIkCBmYWxzZeOAggp2b2lkIFNldENsaXBTcGFjZVlGbGlwKGJvb2wgZmxpcCk7CmJvb2wgR2V0Q2xpcFNwYWNlWUZsaXAoKTsKCi8vIEdMIOe7mOWItuaooeW8jyDihpIgVmtQcmltaXRpdmVUb3BvbG9neeOAgm5lZWRzRW11bGF0aW9uIOWPr+S4uiBudWxscHRy77yMCi8vIOi/lOWbniB0cnVlIOihqOekuuayoeacieetieS7t+aLk+aJke+8iGZhbiAvIGxpbmUgbG9vcO+8ie+8jOaLk+aJkeWAvOe7meeahOaYr+WPr+eUqOeahOi/keS8vOOAggppbnQgVmtUb3BvbG9neShpbnQgZ2xNb2RlLCBib29sKiBuZWVkc0VtdWxhdGlvbik7CgovLyAtLS0tLS0tLS0tLS0tLS0tIOeuoee6v+mUriAtLS0tLS0tLS0tLS0tLS0tCgovLyDmjInlvZPliY3nirbmgIHnlJ/miJDplK7vvIjkuI3lgZrnvJPlrZjvvInjgIIKUGlwZWxpbmVLZXkgQ3VycmVudFBpcGVsaW5lS2V5KGNvbnN0IEZvcm1hdHMmIGZvcm1hdHMpOwovLyDluKbnvJPlrZjniYjmnKzvvJrnirbmgIHniYjmnKzlj7fkuI4gZm9ybWF0cyDpg73msqHlj5jml7bnm7TmjqXov5Tlm57kuIrmrKHnrpflpb3nmoTplK7jgIIKLy8g6YCC5ZCI5q+P5binL+avj+aJueasoeiwg+eUqO+8jOi/lOWbnuW8leeUqO+8jOeUn+WRveWRqOacn+ebtOWIsOS4i+asoeeKtuaAgeWPmOWMluOAggpjb25zdCBQaXBlbGluZUtleSYgQ2FjaGVkUGlwZWxpbmVLZXkoY29uc3QgRm9ybWF0cyYgZm9ybWF0cyk7Ci8vIOS7u+S4gOW9seWTjeeuoee6v+eahOeKtuaAgeWPmOWMlumDveS8miArMe+8m+S4jemajyBzY2lzc29yL3ZpZXdwb3J0L2JsZW5kQ29sb3Ivc3RlbmNpbFJlZiDlj5jljJbjgIIKdWludDY0X3QgVmVyc2lvbigpOwoKLy8g5oqK6ZSu5aGr6L+bIFZ1bGthbiDliJvlu7rnu5PmnoTkvZPvvJvosIPnlKjmlrnlj6rpnIDlho3ooaUgc3RhZ2UgLyBsYXlvdXQgLyByZW5kZXJQYXNz44CCCnZvaWQgRmlsbElucHV0QXNzZW1ibHkoY29uc3QgUGlwZWxpbmVLZXkmIGtleSwgVmtQaXBlbGluZUlucHV0QXNzZW1ibHlTdGF0ZUNyZWF0ZUluZm8qIG91dCk7CnZvaWQgRmlsbFJhc3Rlcml6YXRpb24oY29uc3QgUGlwZWxpbmVLZXkmIGtleSwgVmtQaXBlbGluZVJhc3Rlcml6YXRpb25TdGF0ZUNyZWF0ZUluZm8qIG91dCk7CnZvaWQgRmlsbERlcHRoU3RlbmNpbChjb25zdCBQaXBlbGluZUtleSYga2V5LCBWa1BpcGVsaW5lRGVwdGhTdGVuY2lsU3RhdGVDcmVhdGVJbmZvKiBvdXQpOwp2b2lkIEZpbGxDb2xvckJsZW5kQXR0YWNobWVudChjb25zdCBQaXBlbGluZUtleSYga2V5LCBWa1BpcGVsaW5lQ29sb3JCbGVuZEF0dGFjaG1lbnRTdGF0ZSogb3V0KTsKdm9pZCBGaWxsTXVsdGlzYW1wbGUoY29uc3QgUGlwZWxpbmVLZXkmIGtleSwgVmtQaXBlbGluZU11bHRpc2FtcGxlU3RhdGVDcmVhdGVJbmZvKiBvdXQpOwoKLy8gLS0tLS0tLS0tLS0tLS0tLSDplJnor6/noIHvvIjkvpsgZ2xHZXRFcnJvciDkvb/nlKjvvIkgLS0tLS0tLS0tLS0tLS0tLQoKLy8g5LiOIEdMIOS4gOiHtO+8muW3suaciemUmeivr+aXtuaWsOmUmeivr+iiq+S4ouW8g++8jOebtOWIsOiiqyBUYWtlRXJyb3Ig5Y+W6LWw44CCCnZvaWQgU2V0RXJyb3IoaW50IGdsRXJyb3IpOwppbnQgUGVla0Vycm9yKCk7CmludCBUYWtlRXJyb3IoKTsKCn0gLy8gbmFtZXNwYWNlIGdsc3RhdGUKfSAvLyBuYW1lc3BhY2UgbGltZQo=
+#pragma once
+#include <vulkan/vulkan.h>
+#include <cstdint>
+
+// GLES 状态缓存 + Vulkan 管线键
+//
+// 定位：只做"数据建模"，不调用任何 Vulkan 函数，也不碰 lime_gl_* 符号。
+//   - 所有入口按 GLES 规范记录状态、校验参数、按 GL 语义记录错误码；
+//   - 影响管线创建的状态汇总成 PipelineKey，作为 pipeline cache 的键（生成或复用）；
+//   - 每帧可变的状态（scissor / viewport / blend 常量 / stencil ref / depthBias 已入 key）
+//     提供现成的 Vk 结构，由调用方自己 vkCmdSet* 应用。
+//
+// 线程模型：和 GL 一样按"单渲染线程"使用，未加锁。
+// 约定：状态初值就是 GLES 默认值，即使调用方从未调用 Reset() 也是正确的。
+
+namespace lime {
+namespace glstate {
+
+// 渲染目标的附件格式。Vulkan 管线必须与 render pass 的格式兼容，
+// 所以格式也属于管线键的一部分。
+struct Formats {
+    int colorFormat = (int)VK_FORMAT_UNDEFINED;    // VkFormat
+    int depthFormat = (int)VK_FORMAT_UNDEFINED;    // VkFormat，VK_FORMAT_UNDEFINED 表示无深度附件
+    int stencilFormat = (int)VK_FORMAT_UNDEFINED;  // VkFormat，通常与 depthFormat 合成 D24S8
+    int samples = 1;                              // 采样数，1 表示不开 MSAA
+
+    bool operator==(const Formats& o) const {
+        return colorFormat == o.colorFormat && depthFormat == o.depthFormat &&
+               stencilFormat == o.stencilFormat && samples == o.samples;
+    }
+    bool operator!=(const Formats& o) const { return !(*this == o); }
+};
+
+// 单面模板状态（Vulkan 数值）。ref 不在其中：GL 的前/后引用值可以不同，
+// 而 Vulkan 的 vkCmdSetStencilReference 是按面设置的动态状态，
+// 放进 key 会让每个引用值都新建一条管线，所以单独用 GetStencilRef() 取。
+struct StencilFace {
+    int compareOp = (int)VK_COMPARE_OP_ALWAYS;      // VkCompareOp
+    int failOp = (int)VK_STENCIL_OP_KEEP;           // VkStencilOp
+    int passDepthFailOp = (int)VK_STENCIL_OP_KEEP;  // VkStencilOp
+    int passOp = (int)VK_STENCIL_OP_KEEP;           // VkStencilOp
+    uint32_t compareMask = 0xFFFFFFFFu;
+    uint32_t writeMask = 0xFFFFFFFFu;
+
+    bool operator==(const StencilFace& o) const {
+        return compareOp == o.compareOp && failOp == o.failOp &&
+               passDepthFailOp == o.passDepthFailOp && passOp == o.passOp &&
+               compareMask == o.compareMask && writeMask == o.writeMask;
+    }
+};
+
+// 一条图形管线所需的全部状态（Vulkan 数值，已做过 GL→VK 翻译）。
+// 调用方用 Hash() 做 cache 键，命中则复用，未命中再建管线。
+struct PipelineKey {
+    // 输入装配
+    int topology = (int)VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;  // VkPrimitiveTopology
+    bool primitiveRestart = false;
+
+    // 光栅化
+    int cullMode = (int)VK_CULL_MODE_NONE;              // VkCullModeFlags
+    int frontFace = (int)VK_FRONT_FACE_COUNTER_CLOCKWISE;  // VkFrontFace（已按 Y 翻转修正）
+    bool depthBiasEnable = false;                        // GL_POLYGON_OFFSET_FILL
+    float depthBiasConstant = 0.0f;
+    float depthBiasSlope = 0.0f;
+    bool rasterizerDiscard = false;                      // GL_RASTERIZER_DISCARD
+    float lineWidth = 1.0f;                              // 需要 wideLines 特性才生效
+
+    // 深度
+    bool depthTestEnable = false;
+    bool depthWriteEnable = false;
+    int depthCompareOp = (int)VK_COMPARE_OP_LESS;        // VkCompareOp
+
+    // 模板
+    bool stencilTestEnable = false;
+    StencilFace frontStencil;
+    StencilFace backStencil;
+
+    // 混合（GL 的 RGB/alpha 通道各自独立的因子与方程）
+    bool blendEnable = false;
+    int srcColorBlendFactor = (int)VK_BLEND_FACTOR_ONE;   // VkBlendFactor
+    int dstColorBlendFactor = (int)VK_BLEND_FACTOR_ZERO;
+    int colorBlendOp = (int)VK_BLEND_OP_ADD;              // VkBlendOp
+    int srcAlphaBlendFactor = (int)VK_BLEND_FACTOR_ONE;
+    int dstAlphaBlendFactor = (int)VK_BLEND_FACTOR_ZERO;
+    int alphaBlendOp = (int)VK_BLEND_OP_ADD;
+    uint32_t colorWriteMask = 0xF;                       // GL_COLOR_WRITEMASK
+
+    // 附件格式（管线兼容性）
+    Formats formats;
+
+    bool operator==(const PipelineKey& o) const;
+    bool operator!=(const PipelineKey& o) const { return !(*this == o); }
+    uint64_t Hash() const;
+};
+
+// ---------------- 初始化 / 尺寸 ----------------
+
+// 恢复所有 GLES 默认值；viewport/scissor 归零，面尺寸记 0。
+void Reset();
+
+// 恢复默认值，同时把 viewport/scissor 设为整窗（surfaceWidth/surfaceHeight）。
+// 上下文创建后调用一次最省事。
+void ResetToDefaults(int surfaceWidth, int surfaceHeight);
+
+// 交换链重建/窗口缩放时调用。只有 viewport/scissor 仍等于"上一次的整窗值"时才跟随更新，
+// 不会覆盖游戏自己设过的视图矩形。
+void ResizeSurface(int surfaceWidth, int surfaceHeight);
+
+// ---------------- 能力开关（GL_ENABLE_BIT） ----------------
+
+// 未知 cap 按规范记 GL_INVALID_ENUM 且不改状态，返回 false。
+bool SetCapability(int cap, bool enabled);
+// glIsEnabled 语义：未知 cap 记 GL_INVALID_ENUM 并返回 false。
+bool IsEnabled(int cap);
+// 是否为已知的（可 enable/disable 的）cap。
+bool IsCapability(int cap);
+
+// ---------------- 混合 ----------------
+
+bool BlendFunc(int sfactor, int dfactor);
+bool BlendFuncSeparate(int srcRGB, int dstRGB, int srcAlpha, int dstAlpha);
+bool BlendEquation(int mode);
+bool BlendEquationSeparate(int rgb, int alpha);
+void BlendColor(float r, float g, float b, float a);
+
+// OpenFL/Flixel 走预乘 alpha，正确的混合是 ONE / ONE_MINUS_SRC_ALPHA。
+// 等价于 enable(BLEND) + BlendFuncSeparate(ONE, ONE_MINUS_SRC_ALPHA, ONE, ONE_MINUS_SRC_ALPHA)。
+// 供主线在"游戏没有显式设置混合"的时候兜底。
+void EnablePremultipliedAlphaBlend();
+
+// ---------------- 深度 ----------------
+
+bool DepthFunc(int func);
+void DepthMask(bool flag);
+// zNear/zFar 按规范 clamp 到 [0,1]；zNear > zFar 记 GL_INVALID_VALUE 且不改状态。
+bool DepthRangef(float zNear, float zFar);
+
+// ---------------- 模板 ----------------
+
+// face 取 GL_FRONT / GL_BACK / GL_FRONT_AND_BACK。
+bool StencilFunc(int func, int ref, int mask);
+bool StencilFuncSeparate(int face, int func, int ref, int mask);
+void StencilMask(int mask);
+void StencilMaskSeparate(int face, int mask);
+bool StencilOp(int sfail, int dpfail, int dppass);
+bool StencilOpSeparate(int face, int sfail, int dpfail, int dppass);
+
+// ---------------- 光栅化 ----------------
+
+bool CullFace(int mode);
+bool FrontFace(int mode);
+void PolygonOffset(float factor, float units);
+// width <= 0 记 GL_INVALID_VALUE。
+bool LineWidth(float width);
+void ColorMask(bool red, bool green, bool blue, bool alpha);
+// value clamp 到 [0,1]。
+void SampleCoverage(float value, bool invert);
+
+// ---------------- 视口 / 剪裁 / 清除值 ----------------
+
+bool Viewport(int x, int y, int width, int height);
+bool Scissor(int x, int y, int width, int height);
+void ClearColor(float red, float green, float blue, float alpha);
+void ClearDepthf(float depth);
+void ClearStencil(int stencil);
+
+// ---------------- 绘制拓扑（进入管线键） ----------------
+
+// GL 没有"持久拓扑"这个概念，但管线里 topology 是创建期状态。
+// 主线在 draw 前调一次本函数即可；复位默认 GL_TRIANGLES。
+bool SetDrawMode(int glMode);
+// GL_TRIANGLE_FAN / GL_LINE_LOOP 在 Vulkan 里没有对应拓扑，需要调用方自行拆成列表。
+bool DrawModeNeedsEmulation(int glMode);
+
+// ---------------- 查询（glGet*） ----------------
+
+// mainline 只应把本模块认识的 pname 路由进来；先用 HandlesPname 判断，
+// 其它 pname（MAX_TEXTURE_SIZE 之类）继续走原有路径。
+bool HandlesPname(int pname);
+// 多分量 pname 的标量版本按 GL 语义只回第一个分量。
+bool QueryBoolean(int pname, bool* out);
+// 返回写入的 int 个数，0 表示不支持（同时记 GL_INVALID_ENUM）。
+int QueryInteger(int pname, int* out, int maxCount);
+// 返回写入的 float 个数，0 表示不支持（同时记 GL_INVALID_ENUM）。
+int QueryFloat(int pname, float* out, int maxCount);
+
+void GetClearColor(float out[4]);
+float GetClearDepth();
+int GetClearStencil();
+void GetBlendColor(float out[4]);
+void GetScissorBox(int out[4]);
+void GetViewportBox(int out[4]);
+float GetLineWidth();
+// face 取 GL_FRONT / GL_BACK；用于 vkCmdSetStencilReference。
+int GetStencilRef(int face);
+bool GetColorMask(int* out4);
+bool GetDepthRangef(float out2[2]);
+
+// ---------------- Vulkan 动态状态 ----------------
+
+// GL 的 y 轴朝上、Vulkan 朝下：返回的 scissor 已翻到左上原点，并 clamp 到目标尺寸。
+// scissor test 关闭时返回整目标矩形（Vulkan 没有"关闭 scissor"这个管线状态）。
+VkRect2D GetVulkanScissor(int targetWidth, int targetHeight);
+// 同样做 y 翻转；depth 固定 [0,1]。
+VkViewport GetVulkanViewport(int targetHeight);
+
+// vk_renderer 当前在 DrawRaw 里做了 y 取反（py -> 1 - py*2/h），
+// 这会让三角形绕序整体反转，所以默认要把 GL 的 frontFace 取反后再写进管线。
+// 若主线改成负高度 viewport 而不在顶点上翻转，把这里设成 false。
+void SetClipSpaceYFlip(bool flip);
+bool GetClipSpaceYFlip();
+
+// GL 绘制模式 → VkPrimitiveTopology。needsEmulation 可为 nullptr，
+// 返回 true 表示没有等价拓扑（fan / line loop），拓扑值给的是可用的近似。
+int VkTopology(int glMode, bool* needsEmulation);
+
+// ---------------- 管线键 ----------------
+
+// 按当前状态生成键（不做缓存）。
+PipelineKey CurrentPipelineKey(const Formats& formats);
+// 带缓存版本：状态版本号与 formats 都没变时直接返回上次算好的键。
+// 适合每帧/每批次调用，返回引用，生命周期直到下次状态变化。
+const PipelineKey& CachedPipelineKey(const Formats& formats);
+// 任一影响管线的状态变化都会 +1；不随 scissor/viewport/blendColor/stencilRef 变化。
+uint64_t Version();
+
+// 把键填进 Vulkan 创建结构体；调用方只需再补 stage / layout / renderPass。
+void FillInputAssembly(const PipelineKey& key, VkPipelineInputAssemblyStateCreateInfo* out);
+void FillRasterization(const PipelineKey& key, VkPipelineRasterizationStateCreateInfo* out);
+void FillDepthStencil(const PipelineKey& key, VkPipelineDepthStencilStateCreateInfo* out);
+void FillColorBlendAttachment(const PipelineKey& key, VkPipelineColorBlendAttachmentState* out);
+void FillMultisample(const PipelineKey& key, VkPipelineMultisampleStateCreateInfo* out);
+
+// ---------------- 错误码（供 glGetError 使用） ----------------
+
+// 与 GL 一致：已有错误时新错误被丢弃，直到被 TakeError 取走。
+void SetError(int glError);
+int PeekError();
+int TakeError();
+
+} // namespace glstate
+} // namespace lime
