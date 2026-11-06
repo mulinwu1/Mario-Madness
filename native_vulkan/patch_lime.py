@@ -71,7 +71,7 @@ else:
 print("done")
 
 # 4) 激活 Vulkan：窗口创建后初始化，ContextFlip 里提交
-sdl = os.path.join(LIME, "project", "src", "backends", "sdl", "SDLWindow.cpp")
+sdl = os.path.join(LIME, "project", "src", "backend", "sdl", "SDLWindow.cpp")
 if os.path.exists(sdl):
     s = open(sdl, encoding="utf-8").read()
     if "gl_vk_c.h" in s:
