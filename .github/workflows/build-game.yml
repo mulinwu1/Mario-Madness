@@ -87,6 +87,20 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $inc "rapidjson") | Out-Null
           Copy-Item "$rj\include\rapidjson\*" (Join-Path $inc "rapidjson") -Recurse -Force
 
+      # 只产出 exe，本地已有完整 assets。
+      # 清空大资源目录，避免 lime 在 Windows runner 上搬运 1.8GB 小文件（这是卡住的根因）
+      - name: Trim heavy assets
+        shell: pwsh
+        run: |
+          foreach ($d in @('assets\songs', 'assets\shared', 'assets\videos')) {
+            if (Test-Path $d) {
+              $mb = [math]::Round(((Get-ChildItem $d -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum) / 1MB, 1)
+              Write-Host "$d = ${mb}MB -> emptied"
+              Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            New-Item -ItemType Directory -Force -Path $d | Out-Null
+          }
+
       - name: Build game
         shell: pwsh
         run: |
