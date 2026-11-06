@@ -18,6 +18,11 @@ jobs:
     needs: build-lime-vulkan
     runs-on: windows-latest
     timeout-minutes: 120
+    # 工具链版本进缓存 key：haxe/lime/hxcpp 任一升级，旧的编译缓存与 obj 都不该复用
+    env:
+      HAXE_VERSION: 4.2.5
+      LIME_VERSION: 8.0.2
+      HXCPP_VERSION: 4.3.2
     steps:
       # 编游戏需要 source/ 和 assets/，不能用稀疏检出
       - name: Checkout
@@ -169,9 +174,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: hxcpp-cache
-          key: hxcpp-cc-${{ runner.os }}-${{ hashFiles('source/**', 'Project.xml') }}-v2
+          key: hxcpp-cc-${{ runner.os }}-haxe${{ env.HAXE_VERSION }}-lime${{ env.LIME_VERSION }}-hxcpp${{ env.HXCPP_VERSION }}-${{ hashFiles('source/**', 'Project.xml') }}-v3
           restore-keys: |
-            hxcpp-cc-${{ runner.os }}-
+            hxcpp-cc-${{ runner.os }}-haxe${{ env.HAXE_VERSION }}-lime${{ env.LIME_VERSION }}-hxcpp${{ env.HXCPP_VERSION }}-
 
       # obj/bin 必须用精确 key：hxcpp 靠 mtime 判断是否重编，拿别处的 obj 会在源码变更时
       # 静默产出错误的 exe，所以源码哈希一变就完全不复用
@@ -179,18 +184,63 @@ jobs:
         uses: actions/cache@v4
         with:
           path: export\release\windows
-          key: mario-obj-v2-${{ runner.os }}-${{ hashFiles('source/**', 'Project.xml') }}
+          key: mario-obj-v3-${{ runner.os }}-haxe${{ env.HAXE_VERSION }}-lime${{ env.LIME_VERSION }}-hxcpp${{ env.HXCPP_VERSION }}-${{ hashFiles('source/**', 'Project.xml') }}
+
+      # hxcpp 只给声明了 <cache value="true"/> 的 file group 用编译缓存；hxcpp 自带的 std 组已开，
+      # 游戏自己的 app 组在 lime 的 hxcpp 模板里没开 → 补上，否则 HXCPP_COMPILE_CACHE 对游戏源码完全无效
+      - name: Enable hxcpp compile cache for app file groups
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $limeRoot = "$env:USERPROFILE\haxelib\lime\8,0,2"
+          if (-not (Test-Path $limeRoot)) { throw "haxelib lime 8.0.2 not found: $limeRoot" }
+          $templates = @(Get-ChildItem (Join-Path $limeRoot 'templates') -Recurse -Filter 'Build.xml' -File -ErrorAction SilentlyContinue)
+          if ($templates.Count -eq 0) { throw "no hxcpp Build.xml template under $limeRoot\templates" }
+          $total = 0
+          foreach ($t in $templates) {
+            $xml = Get-Content $t.FullName -Raw
+            if ([string]::IsNullOrWhiteSpace($xml)) { continue }
+            $sb = New-Object System.Text.StringBuilder
+            $last = 0
+            $hit = 0
+            foreach ($m in [regex]::Matches($xml, '<files\s+[^>]*>')) {
+              $null = $sb.Append($xml.Substring($last, $m.Index - $last))
+              $null = $sb.Append($m.Value)
+              $rest = $xml.Substring($m.Index + $m.Length, [math]::Min(200, $xml.Length - ($m.Index + $m.Length)))
+              # 组里首屏已有 cache 就不重复插（hxcpp 的 std 组本来就带）
+              if ($rest -notmatch '<cache') {
+                $null = $sb.Append("`n      <cache value=`"true`" />")
+                $hit++
+              }
+              $last = $m.Index + $m.Length
+            }
+            $null = $sb.Append($xml.Substring($last))
+            if ($hit -gt 0) {
+              [IO.File]::WriteAllText($t.FullName, $sb.ToString())
+              $total += $hit
+              Write-Host "patched $hit file group(s) in $($t.FullName)"
+            }
+          }
+          if ($total -eq 0) {
+            # haxelib 缓存命中时模板可能已被上一轮补过，这里不算失败
+            Write-Host "all file groups already have <cache>; nothing to patch"
+          } else {
+            Write-Host "hxcpp compile cache enabled on $total file group(s)"
+          }
 
       - name: Build game
         shell: pwsh
         run: |
           # 源码（source/**、Project.xml）没变且上一轮产物在缓存里 → 直接复用，
           # 跳过 assets 清空、haxe 资源导出、hxcpp 编译三块；这是第二次构建快的关键
+          Write-Host "runner cores: $env:NUMBER_OF_PROCESSORS (HXCPP_COMPILE_THREADS set to max(cores,2))"
+          Write-Host "hxcpp compile cache dir: $env:GITHUB_WORKSPACE\hxcpp-cache"
           $outDir = "export\release\windows"
           $stamp = Join-Path $outDir '.build-stamp'
           $priorExe = Get-ChildItem $outDir -Recurse -Filter 'Mario.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
           if ((Test-Path $stamp) -and ((Get-Content $stamp -Raw).Trim() -eq $env:GITHUB_SHA) -and $priorExe) {
             Write-Host "=== cache hit: source unchanged (commit $env:GITHUB_SHA) ==="
+            "=== cache hit: source unchanged (commit $env:GITHUB_SHA) ===" | Add-Content build.log
             Copy-Item $env:VULKAN_LIME_NDLL (Join-Path $priorExe.Directory.FullName 'lime.ndll') -Force
             Write-Host "reused exe: $($priorExe.FullName) (mtime $($priorExe.LastWriteTime))"
             return
@@ -246,6 +296,14 @@ jobs:
           if (-not $builtExe) { throw "no Mario.exe produced under $outDir" }
           Copy-Item $env:VULKAN_LIME_NDLL (Join-Path $builtExe.Directory.FullName 'lime.ndll') -Force
           Set-Content -Path $stamp -Value $env:GITHUB_SHA -NoNewline
+          # 证据：lime 生成的 Build.xml 里确实带上了 cache 标记
+          $genXml = Get-ChildItem $outDir -Recurse -Filter 'Build.xml' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($genXml) {
+            $g = Get-Content $genXml.FullName -Raw
+            Write-Host "generated $($genXml.FullName): <cache> tags=$(([regex]::Matches($g,'<cache')).Count)"
+          } else {
+            Write-Host "WARN: no generated Build.xml found under $outDir"
+          }
           Write-Host "=== output tree ==="
           Get-ChildItem $outDir -ErrorAction SilentlyContinue | Select-Object Name, Length | Format-Table -AutoSize
           Write-Host "=== all exe/ndll under export ==="
