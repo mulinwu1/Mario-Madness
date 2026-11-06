@@ -1,5 +1,5 @@
 #pragma once
-#include <system/CFFI.h>
+#include <hxcpp.h>
 
 namespace lime {
 
