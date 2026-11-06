@@ -30,6 +30,9 @@ public:
                     float u0, float v0, float u1, float v1);
     void EndFrame();
 
+    // raw vertex submission (GL-style): verts are x,y,u,v float4 per vertex
+    void DrawRaw(uint32_t texId, const float* verts, int vertexCount);
+
     // offscreen render target (FBO equivalent)
     // returns id usable with BindTarget, or 0 on failure. id can also be used as a texture.
     uint32_t CreateRenderTarget(int w, int h);
