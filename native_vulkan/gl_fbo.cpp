@@ -111,6 +111,8 @@ int g_boundRbo = 0;
 
 // 当前真正打开帧的目标：0 = 后缓冲，>=1000 = 离屏 RT
 uint32_t g_currentTarget = 0;
+// 本帧最后渲染过的离屏目标（即使之后又绑回了后缓冲，最后画面还在它里面）
+uint32_t g_lastTarget = 0;
 bool g_backbufferOpen = false;
 
 // ---------------------------------------------------------------- 小工具
@@ -270,6 +272,7 @@ void BindDrawFbo (int framebuffer) {
     Fbo& f = g_fbos[(size_t)framebuffer];
     if (r->BindRenderTarget (f.rtId, c[0], c[1], c[2], c[3])) {
         g_currentTarget = f.rtId;
+        g_lastTarget = f.rtId;
     }
 }
 
@@ -665,10 +668,32 @@ void gl_vk_present_frame () {
                 r->DrawRaw (src, quad, 6);
                 g_backbufferOpen = true;
             }
+        } else if (g_lastTarget >= 1000 && !r->FrameHasGeometry ()) {
+            // 已经绑回后缓冲但这一帧没往它上面画任何东西：把最后一张离屏图补上，
+            // 否则屏幕只剩清屏色（这就是长时间黑屏的直接原因）
+            uint32_t src = g_lastTarget;
+            float c[4];
+            GetClearColor (c);
+            int tw = 0, th = 0;
+            if (r->GetRenderTargetSize (src, &tw, &th) && tw > 0 && th > 0) {
+                float W = (float)r->ScreenWidth ();
+                float H = (float)r->ScreenHeight ();
+                float quad[24] = {
+                    0.0f, 0.0f, 0.0f, 0.0f,
+                    W,    0.0f, (float)tw, 0.0f,
+                    0.0f, H,    0.0f, (float)th,
+                    0.0f, H,    0.0f, (float)th,
+                    W,    0.0f, (float)tw, 0.0f,
+                    W,    H,    (float)tw, (float)th,
+                };
+                r->DrawRaw (src, quad, 6);
+                g_backbufferOpen = true;
+            }
         }
         r->EndFrame ();
     }
     g_currentTarget = 0;
+    g_lastTarget = 0;
     g_backbufferOpen = false;
     // 帧结束后绘制目标回到后缓冲，避免跨帧残留指向已提交的离屏目标
     g_boundDrawFbo = 0;

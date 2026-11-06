@@ -34,6 +34,8 @@ public:
     int ScreenWidth() const;
     int ScreenHeight() const;
     bool GetRenderTargetSize(uint32_t id, int* w, int* h) const;
+    // 当前已打开帧里是否已经有待提交的几何（present 时判断要不要补合成）
+    bool FrameHasGeometry() const;
 
     // raw vertex submission (GL-style): verts are x,y,u,v float4 per vertex
     void DrawRaw(uint32_t texId, const float* verts, int vertexCount);
