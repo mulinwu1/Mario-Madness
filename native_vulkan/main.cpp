@@ -70,10 +70,18 @@ int main() {
     enumDev(inst, &n, devs.data());
     if (n == 0) { printf("[vk] no devices\n"); return 1; }
 
-    VkPhysicalDevice phys = devs[0];
+    VkPhysicalDevice phys = nullptr;
+    for (auto& d : devs) {
+        VkPhysicalDeviceProperties pp{};
+        getProps(d, &pp);
+        printf("[vk] candidate: %s  type=%d\n", pp.deviceName, (int)pp.deviceType);
+        if (pp.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) phys = d;
+    }
+    if (!phys) phys = devs[0];
+
     VkPhysicalDeviceProperties props{};
     getProps(phys, &props);
-    printf("[vk] device: %s  API %u.%u.%u\n", props.deviceName,
+    printf("[vk] selected: %s  API %u.%u.%u\n", props.deviceName,
         VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion),
         VK_VERSION_PATCH(props.apiVersion));
 
