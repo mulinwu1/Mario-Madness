@@ -254,7 +254,6 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     }
 
     VkPhysicalDeviceMemoryProperties memProps{};
-    getMemProps(o.phys, &memProps);
     uint32_t n = 0;
     enumDev(o.inst, &n, nullptr);
     std::vector<VkPhysicalDevice> devs(n);
