@@ -50,7 +50,7 @@
 	
 	<!-- <define name="PRELOAD_ALL" /> -->
 	<!-- 默认关闭预加载：1.8GB assets 会让 Haxe 编译器 OOM，改为运行时从 assets/ 读取 -->
-	<define name="PRELOAD_ALL" unless="web" />
+	<define name="PRELOAD_ALL" if="preload_all" />
 	<define name="NO_PRELOAD_ALL" unless="PRELOAD_ALL"/>
 	
 	<library name="videos"        preload="true" />
