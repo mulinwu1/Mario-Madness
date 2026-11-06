@@ -18,26 +18,54 @@ CORE = [
     "lime_gl_draw_elements",
 ]
 
+# 自动扫描我们自己的 vulkan 源文件，凡是里面定义了同名 lime_gl_*，
+# 一律视为“由我们接管”，把 lime 原实现摘掉，避免同一 ndll 里重复定义。
+# 这样 FBO / 纹理参数 / 状态机 / shader 各路上线时不需要再手工维护名字清单。
+VULKAN_DIR = os.path.join(LIME, "project", "src", "graphics", "vulkan")
+DEF_RE = re.compile(
+    r"^\s*(?:void|int|bool|float|double|value)\s+(lime_gl_[A-Za-z0-9_]+)\s*\(",
+    re.M,
+)
+
+
+def collect_more():
+    names = set()
+    if not os.path.isdir(VULKAN_DIR):
+        return names
+    for fn in os.listdir(VULKAN_DIR):
+        if not fn.endswith(".cpp"):
+            continue
+        try:
+            src = open(os.path.join(VULKAN_DIR, fn), encoding="utf-8").read()
+        except OSError:
+            continue
+        for m in DEF_RE.finditer(src):
+            names.add(m.group(1))
+    return names
+
+
+extra = collect_more()
+if extra:
+    for n in sorted(extra):
+        if n not in CORE:
+            CORE.append(n)
+    print("auto-collected vulkan entrypoints:", len(extra))
+
+
 p = os.path.join(LIME, "project", "src", "graphics", "opengl", "OpenGLBindings.cpp")
 text = open(p, encoding="utf-8").read()
 
 # 1) remove the original implementations we replace
 removed = 0
+RET = r"(?:void|int|bool|float|double|value)"
 for name in CORE:
-    pat = re.compile(r"\n\tvoid\s+" + name + r"\s*\([^)]*\)\s*\{.*?\n\t\}\n", re.S)
+    pat = re.compile(r"\n\t" + RET + r"\s+" + name + r"\s*\([^)]*\)\s*\{.*?\n\t\}\n", re.S)
     new_text, n = pat.subn("\n", text, count=1)
     if n:
         removed += 1
         text = new_text
     else:
-        # try int-returning variant
-        pat2 = re.compile(r"\n\tint\s+" + name + r"\s*\([^)]*\)\s*\{.*?\n\t\}\n", re.S)
-        new_text, n2 = pat2.subn("\n", text, count=1)
-        if n2:
-            removed += 1
-            text = new_text
-        else:
-            print("WARN: could not remove", name)
+        print("WARN: could not remove", name)
 print("removed implementations:", removed, "/", len(CORE))
 
 # 2) add include for our declarations so DEFINE_PRIME sees them
@@ -56,6 +84,10 @@ b = os.path.join(LIME, "project", "Build.xml")
 xml = open(b, encoding="utf-8").read()
 inject = """		<file name="src/graphics/vulkan/vk_renderer.cpp" />
 		<file name="src/graphics/vulkan/gl_core.cpp" />
+		<file name="src/graphics/vulkan/gl_vk_contract.cpp" />
+		<file name="src/graphics/vulkan/gl_fbo.cpp" />
+		<file name="src/graphics/vulkan/gl_texture_params.cpp" />
+		<file name="src/graphics/vulkan/gl_state.cpp" />
 """
 anchor = '<file name="src/graphics/Image.cpp" />'
 if "vk_renderer.cpp" in xml:
