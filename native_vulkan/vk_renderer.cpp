@@ -1060,16 +1060,33 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount) {
         h = (float)o.targets[ti].h;
     }
     if (w <= 0 || h <= 0) return;
+
+    // 采样源尺寸：uv 归一化要用（有的路径传进来的 uv 是像素值而不是 0..1）
+    float tw = 0.0f, th = 0.0f;
+    if (texId >= 1000) {
+        uint32_t ti = texId - 1000;
+        tw = (float)o.targets[ti].w;
+        th = (float)o.targets[ti].h;
+    } else {
+        tw = (float)o.textures[texId - 1].w;
+        th = (float)o.textures[texId - 1].h;
+    }
+
     vertsPtr->reserve(vertsPtr->size() + (size_t)vertexCount * 4);
     for (int i = 0; i < vertexCount; i++) {
         float px = verts[i * 4 + 0];
         float py = verts[i * 4 + 1];
+        float u = verts[i * 4 + 2];
+        float v = verts[i * 4 + 3];
         vertsPtr->push_back(px * 2.0f / w - 1.0f);
         // Vulkan 的 NDC y=+1 在屏幕底部，GL/OpenFL 的 y=0 在顶部，所以直接把像素 y 映射进
         // [-1,+1] 即可（不能再取 1 - ...，否则整帧上下镜像）
         vertsPtr->push_back(py * 2.0f / h - 1.0f);
-        vertsPtr->push_back(verts[i * 4 + 2]);
-        vertsPtr->push_back(verts[i * 4 + 3]);
+        // uv 超出 0..1 说明传进来的是像素坐标，按采样源尺寸归一化，否则采样越界全黑
+        if (u > 1.001f || u < -1.001f) u = tw > 0 ? u / tw : 1.0f;
+        if (v > 1.001f || v < -1.001f) v = th > 0 ? v / th : 1.0f;
+        vertsPtr->push_back(u);
+        vertsPtr->push_back(v);
     }
 }
 
@@ -1079,6 +1096,16 @@ void VkRenderer::BeginFrame(float r, float g, float b, float a) {
 
 bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float a) {
     Impl& o = *impl;
+    // 同一目标重复绑定（OpenFL 每个 pass 开头都会 glClear，gl_vk_handle_clear 又会 Bind 一次）
+    // 不能清空已经累积的顶点，否则整条 filter 链最后合成时 verts=0，屏幕只剩清屏色。
+    // 这里只更新清屏色，等 EndFrame 时真正清屏。
+    if (o.frameOpen && o.currentTarget == id) {
+        o.clearR = r;
+        o.clearG = g;
+        o.clearB = b;
+        o.clearA = a;
+        return true;
+    }
     o.currentTarget = id;
     o.clearR = r;
     o.clearG = g;
