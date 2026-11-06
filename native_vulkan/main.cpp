@@ -614,6 +614,7 @@ int main() {
     uint32_t idx = 0;
     DWORD lastFps = GetTickCount();
     int frames = 0;
+    float t = 0.0f;
 
     while (run) {
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -628,6 +629,7 @@ int main() {
 
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         beginCB(cb, &bi);
+        t += 0.016f;
 
         VkClearValue cv{};
         cv.color.float32[0] = 0.04f;
