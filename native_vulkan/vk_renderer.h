@@ -40,6 +40,8 @@ public:
     uint32_t LastGeometryTarget() const;
     // present 收尾时复位，避免跨帧取到上一帧的目标
     void ResetLastGeometryTarget();
+    // 当前提交帧号，用于把截图与日志行对齐
+    uint64_t FrameIndex() const;
 
     // raw vertex submission (GL-style): verts are x,y,u,v float4 per vertex
     void DrawRaw(uint32_t texId, const float* verts, int vertexCount);

@@ -5,6 +5,7 @@
 #include <vulkan/vulkan.h>
 #include <cstring>
 #include <cstdio>
+#include <ctime>
 
 #define MAX_SPRITES 4096
 #define MAX_TEXTURES 512
@@ -31,6 +32,9 @@ struct RenderTarget {
     int w = 0, h = 0;
     bool used = false;
     std::vector<float> verts;
+    // 取证用：创建帧号 / 最后一次"真的有顶点"的提交帧号（0 = 从未写过）
+    uint64_t createdFrame = 0;
+    uint64_t lastWriteFrame = 0;
 };
 
 struct VkRenderer::Impl {
@@ -1119,6 +1123,15 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount) {
         uint32_t ti = texId - 1000;
         tw = (float)o.targets[ti].w;
         th = (float)o.targets[ti].h;
+        // 取证：采样的离屏源是否真的被写过、创建于哪一帧（判断"采样空目标"）
+        static uint64_t s_sampleLog = 0;
+        if (s_sampleLog < 20000) {
+            fprintf(stderr, "[vkdraw] sample src=%u cur=%u srcLastWrite=%llu srcCreated=%llu\n",
+                    texId, o.currentTarget,
+                    (unsigned long long)o.targets[ti].lastWriteFrame,
+                    (unsigned long long)o.targets[ti].createdFrame);
+            s_sampleLog++;
+        }
     } else {
         tw = (float)o.textures[texId - 1].w;
         th = (float)o.textures[texId - 1].h;
@@ -1219,6 +1232,10 @@ bool VkRenderer::FrameHasGeometry() const {
 
 uint32_t VkRenderer::LastGeometryTarget() const {
     return impl->lastGeomTarget;
+}
+
+uint64_t VkRenderer::FrameIndex() const {
+    return g_drawFrame;
 }
 
 void VkRenderer::ResetLastGeometryTarget() {
@@ -1388,6 +1405,9 @@ uint32_t VkRenderer::CreateRenderTarget(int w, int h) {
     t.w = w;
     t.h = h;
     t.used = true;
+    t.createdFrame = g_drawFrame;
+    fprintf(stderr, "[vk] rt new id=%u %dx%d f=%llu\n", 1000 + idx, w, h,
+            (unsigned long long)g_drawFrame);
     return 1000 + idx;
 }
 
@@ -1398,6 +1418,8 @@ void VkRenderer::DestroyRenderTarget(uint32_t id) {
     if (ti >= o.targets.size()) return;
     RenderTarget& t = o.targets[ti];
     if (!t.used) return;
+    fprintf(stderr, "[vk] rt del id=%u %dx%d f=%llu lastWrite=%llu\n", id, t.w, t.h,
+            (unsigned long long)g_drawFrame, (unsigned long long)t.lastWriteFrame);
     if (t.fb) o.destroyFramebuffer(o.dev, t.fb, nullptr);
     if (t.rp) o.destroyRenderPass(o.dev, t.rp, nullptr);
     if (t.view) o.destroyImageView(o.dev, t.view, nullptr);
@@ -1441,6 +1463,27 @@ void VkRenderer::EndFrame() {
         static uint64_t s_frames = 0;
         s_frames++;
         g_drawFrame = s_frames;
+        // 每次提交一条不门控的 summary（含离屏目标），用于把黑帧对齐到具体提交：
+        // delsample = 距该目标上次真正写入的帧数（-1 = 从未写过）
+        static uint64_t s_submitLog = 0;
+        if (s_submitLog < 30000) {
+            long long delsample = -1;
+            uint64_t created = 0;
+            if (o.currentTarget >= 1000) {
+                uint32_t ti = o.currentTarget - 1000;
+                if (ti < o.targets.size() && o.targets[ti].used) {
+                    created = o.targets[ti].createdFrame;
+                    if (o.targets[ti].lastWriteFrame != 0) {
+                        delsample = (long long)(s_frames - o.targets[ti].lastWriteFrame);
+                    }
+                    if (totalVerts > 0) o.targets[ti].lastWriteFrame = s_frames;
+                }
+            }
+            fprintf(stderr, "[vk] submit frame=%llu t=%lld tgt=%u verts=%zu ranges=%zu delsample=%lld created=%llu\n",
+                    (unsigned long long)s_frames, (long long)time(nullptr), o.currentTarget,
+                    totalVerts, ranges.size(), delsample, (unsigned long long)created);
+            s_submitLog++;
+        }
         if (s_frames == 1 || s_frames % 30 == 0 || o.currentTarget == 0) {
             float first[4] = {0, 0, 0, 0};
             if (totalVerts > 0) memcpy(first, o.vbPtr, sizeof(first));

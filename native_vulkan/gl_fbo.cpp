@@ -646,7 +646,8 @@ bool gl_vk_handle_clear () {
 void gl_vk_present_frame () {
     VkRenderer* r = gl_vk_get_renderer ();
     if (r) {
-        fprintf (stderr, "[glvk] present cur=%u last=%u pending=%d\n",
+        fprintf (stderr, "[glvk] present f=%llu cur=%u last=%u pending=%d\n",
+                 (unsigned long long)r->FrameIndex (),
                  g_currentTarget, g_lastTarget, (int)r->FrameHasGeometry ());
         // 关键：OpenFL 的整帧常常停在最后一个离屏目标上，如果直接 EndFrame，
         // 渲染结果只留在 FBO 里，后缓冲从来没被画过 → 屏幕只有清屏色（黑屏）。
