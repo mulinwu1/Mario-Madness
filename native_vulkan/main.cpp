@@ -6,6 +6,8 @@
 #include <vulkan/vulkan.h>
 #include <stdio.h>
 #include <vector>
+#include <string>
+#include <cstring>
 
 static HWND g_hwnd;
 static const int W = 1280, H = 720;
@@ -27,9 +29,30 @@ static HWND MakeWin() {
         CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, 0, 0, wc.hInstance, 0);
 }
 
+static std::string ExeDir() {
+    char p[MAX_PATH];
+    GetModuleFileNameA(nullptr, p, MAX_PATH);
+    std::string s(p);
+    size_t pos = s.find_last_of("\\/");
+    return pos == std::string::npos ? std::string("") : s.substr(0, pos + 1);
+}
+
+static std::vector<char> ReadFile(const std::string& path) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return {};
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    rewind(f);
+    std::vector<char> buf(sz);
+    if (sz > 0) fread(buf.data(), 1, sz, f);
+    fclose(f);
+    return buf;
+}
+
 int main() {
     g_hwnd = MakeWin();
     if (!g_hwnd) { printf("[vk] window failed\n"); return 1; }
+    std::string baseDir = ExeDir();
 
     HMODULE dll = LoadLibraryA("vulkan-1.dll");
     if (!dll) { printf("[vk] vulkan-1.dll missing\n"); return 1; }
@@ -52,6 +75,7 @@ int main() {
 
     auto enumDev = (PFN_vkEnumeratePhysicalDevices)gipa(inst, "vkEnumeratePhysicalDevices");
     auto getProps = (PFN_vkGetPhysicalDeviceProperties)gipa(inst, "vkGetPhysicalDeviceProperties");
+    auto getMemProps = (PFN_vkGetPhysicalDeviceMemoryProperties)gipa(inst, "vkGetPhysicalDeviceMemoryProperties");
     auto getQFP = (PFN_vkGetPhysicalDeviceQueueFamilyProperties)gipa(inst, "vkGetPhysicalDeviceQueueFamilyProperties");
     auto getSurfSupport = (PFN_vkGetPhysicalDeviceSurfaceSupportKHR)gipa(inst, "vkGetPhysicalDeviceSurfaceSupportKHR");
     auto createSurface = (PFN_vkCreateWin32SurfaceKHR)gipa(inst, "vkCreateWin32SurfaceKHR");
@@ -59,7 +83,7 @@ int main() {
     auto getSurfFormats = (PFN_vkGetPhysicalDeviceSurfaceFormatsKHR)gipa(inst, "vkGetPhysicalDeviceSurfaceFormatsKHR");
     auto createDevice = (PFN_vkCreateDevice)gipa(inst, "vkCreateDevice");
 
-    if (!enumDev || !getProps || !getQFP || !getSurfSupport || !createSurface || !createDevice) {
+    if (!enumDev || !getProps || !getMemProps || !getQFP || !getSurfSupport || !createSurface || !createDevice) {
         printf("[vk] missing instance functions\n");
         return 1;
     }
@@ -84,6 +108,16 @@ int main() {
     printf("[vk] selected: %s  API %u.%u.%u\n", props.deviceName,
         VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion),
         VK_VERSION_PATCH(props.apiVersion));
+
+    VkPhysicalDeviceMemoryProperties memProps{};
+    getMemProps(phys, &memProps);
+
+    auto findMemType = [&](uint32_t bits, VkMemoryPropertyFlags flags) -> uint32_t {
+        for (uint32_t i = 0; i < 32; i++) {
+            if ((bits & (1u << i)) && (memProps.memoryTypes[i].propertyFlags & flags) == flags) return i;
+        }
+        return 0;
+    };
 
     VkWin32SurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
     sci.hinstance = GetModuleHandle(nullptr);
@@ -233,6 +267,147 @@ int main() {
     VkCommandBuffer cb = nullptr;
     allocCB(dev, &cbi, &cb);
 
+    // ---------- shaders ----------
+    auto createShader = (PFN_vkCreateShaderModule)gipa(inst, "vkCreateShaderModule");
+    auto createPL = (PFN_vkCreatePipelineLayout)gipa(inst, "vkCreatePipelineLayout");
+    auto createPipe = (PFN_vkCreateGraphicsPipelines)gipa(inst, "vkCreateGraphicsPipelines");
+    auto createBuf = (PFN_vkCreateBuffer)gipa(inst, "vkCreateBuffer");
+    auto getBufReqs = (PFN_vkGetBufferMemoryRequirements)gipa(inst, "vkGetBufferMemoryRequirements");
+    auto allocMem = (PFN_vkAllocateMemory)gipa(inst, "vkAllocateMemory");
+    auto bindBufMem = (PFN_vkBindBufferMemory)gipa(inst, "vkBindBufferMemory");
+    auto mapMem = (PFN_vkMapMemory)gipa(inst, "vkMapMemory");
+    auto unmapMem = (PFN_vkUnmapMemory)gipa(inst, "vkUnmapMemory");
+    auto bindPipe = (PFN_vkCmdBindPipeline)gipa(inst, "vkCmdBindPipeline");
+    auto bindVB = (PFN_vkCmdBindVertexBuffers)gipa(inst, "vkCmdBindVertexBuffers");
+    auto cmdDraw = (PFN_vkCmdDraw)gipa(inst, "vkCmdDraw");
+
+    VkShaderModule vsMod = VK_NULL_HANDLE, fsMod = VK_NULL_HANDLE;
+    auto codeVS = ReadFile(baseDir + "shader.vert.spv");
+    auto codeFS = ReadFile(baseDir + "shader.frag.spv");
+    if (codeVS.empty() || codeFS.empty()) {
+        printf("[vk] shader spv missing, expected in %s\n", baseDir.c_str());
+        return 1;
+    }
+    VkShaderModuleCreateInfo smci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    smci.codeSize = codeVS.size();
+    smci.pCode = (const uint32_t*)codeVS.data();
+    createShader(dev, &smci, nullptr, &vsMod);
+    smci.codeSize = codeFS.size();
+    smci.pCode = (const uint32_t*)codeFS.data();
+    createShader(dev, &smci, nullptr, &fsMod);
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vsMod;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fsMod;
+    stages[1].pName = "main";
+
+    VkVertexInputBindingDescription vbind{};
+    vbind.binding = 0;
+    vbind.stride = sizeof(float) * 5;
+    vbind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription vattr[2]{};
+    vattr[0].location = 0;
+    vattr[0].binding = 0;
+    vattr[0].format = VK_FORMAT_R32G32_SFLOAT;
+    vattr[0].offset = 0;
+    vattr[1].location = 1;
+    vattr[1].binding = 0;
+    vattr[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    vattr[1].offset = sizeof(float) * 2;
+
+    VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    vi.vertexBindingDescriptionCount = 1;
+    vi.pVertexBindingDescriptions = &vbind;
+    vi.vertexAttributeDescriptionCount = 2;
+    vi.pVertexAttributeDescriptions = vattr;
+
+    VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkViewport vp{0, 0, (float)ext2.width, (float)ext2.height, 0, 1};
+    VkRect2D sc{{0, 0}, ext2};
+    VkPipelineViewportStateCreateInfo vps{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    vps.viewportCount = 1;
+    vps.pViewports = &vp;
+    vps.scissorCount = 1;
+    vps.pScissors = &sc;
+
+    VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState cba{};
+    cba.colorWriteMask = 0xF;
+    cba.blendEnable = VK_FALSE;
+
+    VkPipelineColorBlendStateCreateInfo cbs{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    cbs.attachmentCount = 1;
+    cbs.pAttachments = &cba;
+
+    VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    VkPipelineLayout pl = VK_NULL_HANDLE;
+    createPL(dev, &plci, nullptr, &pl);
+
+    VkGraphicsPipelineCreateInfo gp{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    gp.stageCount = 2;
+    gp.pStages = stages;
+    gp.pVertexInputState = &vi;
+    gp.pInputAssemblyState = &ia;
+    gp.pViewportState = &vps;
+    gp.pRasterizationState = &rs;
+    gp.pMultisampleState = &ms;
+    gp.pColorBlendState = &cbs;
+    gp.layout = pl;
+    gp.renderPass = rp;
+    gp.subpass = 0;
+
+    VkPipeline pipe = VK_NULL_HANDLE;
+    if (createPipe(dev, VK_NULL_HANDLE, 1, &gp, nullptr, &pipe) != VK_SUCCESS) {
+        printf("[vk] pipeline failed\n");
+        return 1;
+    }
+
+    // ---------- vertex buffer ----------
+    float verts[] = {
+         0.0f, -0.55f,  1.0f, 0.25f, 0.25f,
+         0.55f, 0.45f,  0.25f, 1.0f, 0.25f,
+        -0.55f, 0.45f,  0.25f, 0.25f, 1.0f
+    };
+
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = sizeof(verts);
+    bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkBuffer vb = VK_NULL_HANDLE;
+    createBuf(dev, &bci, nullptr, &vb);
+
+    VkMemoryRequirements mr{};
+    getBufReqs(dev, vb, &mr);
+
+    VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    mai.allocationSize = mr.size;
+    mai.memoryTypeIndex = findMemType(mr.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VkDeviceMemory vbMem = VK_NULL_HANDLE;
+    allocMem(dev, &mai, nullptr, &vbMem);
+    bindBufMem(dev, vb, vbMem, 0);
+
+    void* ptr = nullptr;
+    mapMem(dev, vbMem, 0, mr.size, 0, &ptr);
+    memcpy(ptr, verts, sizeof(verts));
+    unmapMem(dev, vbMem);
+
     auto acquire = (PFN_vkAcquireNextImageKHR)gipa(inst, "vkAcquireNextImageKHR");
     auto present = (PFN_vkQueuePresentKHR)gipa(inst, "vkQueuePresentKHR");
     auto submit = (PFN_vkQueueSubmit)gipa(inst, "vkQueueSubmit");
@@ -266,9 +441,9 @@ int main() {
 
         t += 0.016f;
         VkClearValue cv{};
-        cv.color.float32[0] = 0.05f + 0.25f * (0.5f + 0.5f * (float)((int)(t * 4) % 2));
-        cv.color.float32[1] = 0.10f;
-        cv.color.float32[2] = 0.55f;
+        cv.color.float32[0] = 0.04f;
+        cv.color.float32[1] = 0.05f;
+        cv.color.float32[2] = 0.10f;
         cv.color.float32[3] = 1.0f;
 
         VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -278,7 +453,12 @@ int main() {
         rbi.renderArea.extent = ext2;
         rbi.clearValueCount = 1;
         rbi.pClearValues = &cv;
+
         beginRP(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+        bindPipe(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+        VkDeviceSize off = 0;
+        bindVB(cb, 0, 1, &vb, &off);
+        cmdDraw(cb, 3, 1, 0, 0);
         endRP(cb);
         endCB(cb);
 
