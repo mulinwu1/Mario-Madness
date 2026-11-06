@@ -1,7 +1,10 @@
 name: Build Lime Vulkan Native
 
+# workflow_call：由 build-game.yml 作为前置 job 复用，产出的 artifact 在同一次 run 内
+# 直接给游戏构建 job 下载，不需要跨 run / release 传文件
 on:
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   build:
@@ -118,7 +121,11 @@ jobs:
             Get-Item $ndll | Select-Object FullName, Length
             $bytes = [IO.File]::ReadAllBytes($ndll)
             $txt = [Text.Encoding]::ASCII.GetString($bytes)
-            Write-Host "vkCreateInstance occurrences: $(([regex]::Matches($txt,'vkCreateInstance')).Count)"
+            $vkCount = ([regex]::Matches($txt,'vkCreateInstance')).Count
+            Write-Host "vkCreateInstance occurrences: $vkCount"
+            Write-Host "sha256: $((Get-FileHash $ndll -Algorithm SHA256).Hash)"
+            # 供 build-game.yml 侧核对 artifact 确实是 Vulkan 版
+            if ($vkCount -lt 1) { Write-Host "not a vulkan ndll"; exit 1 }
           } else {
             Write-Host "lime.ndll NOT produced"
             exit 1
