@@ -151,7 +151,9 @@ jobs:
         shell: pwsh
         run: |
           Push-Location C:\lime-src
-          haxelib run lime rebuild windows
+          # 只出 x64：glslang 官方包只有 x86_64 库，32 位 ndll 链接会 LNK4272；
+          # 游戏本身跑 Windows64，不需要 Windows/lime.ndll
+          haxelib run lime rebuild windows -64
           $code = $LASTEXITCODE
           Pop-Location
           Write-Host "lime rebuild exit=$code"
