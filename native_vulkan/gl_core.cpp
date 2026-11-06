@@ -92,13 +92,13 @@ void lime_gl_scissor(int x, int y, int width, int height) {
 int lime_gl_create_texture() {
     int name = g_nextTexName++;
     EnsureSize(g_texVk, (size_t)name + 1, 0);
-    EnsureSize(g_texBound, (size_t)name + 1, 0);
+    if (g_texBound.size() < (size_t)name + 1) g_texBound.resize((size_t)name + 1, 0);
     g_texVk[name] = 0;
     return name;
 }
 
 void lime_gl_bind_texture(int target, int texture) {
-    EnsureSize(g_texBound, (size_t)texture + 1, 0);
+    if (g_texBound.size() < (size_t)texture + 1) g_texBound.resize((size_t)texture + 1, 0);
     g_texBound[(size_t)g_activeUnit] = texture;
 }
 
