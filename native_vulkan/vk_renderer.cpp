@@ -1,4 +1,5 @@
 #include "vk_renderer.h"
+#include "vk_shaders_spv.h"
 #define VK_USE_PLATFORM_WIN32_KHR
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -125,6 +126,7 @@ static PFN_vkCmdBeginRenderPass g_beginRP;
 static PFN_vkCmdEndRenderPass g_endRP;
 static PFN_vkBeginCommandBuffer g_beginCB;
 static PFN_vkEndCommandBuffer g_endCB;
+static PFN_vkResetCommandBuffer g_resetCB;
 static PFN_vkQueueSubmit g_submit;
 static PFN_vkQueueWaitIdle g_waitIdle;
 static PFN_vkAcquireNextImageKHR g_acquire;
@@ -254,6 +256,7 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     g_endRP = (PFN_vkCmdEndRenderPass)o.gipa(o.inst, "vkCmdEndRenderPass");
     g_beginCB = (PFN_vkBeginCommandBuffer)o.gipa(o.inst, "vkBeginCommandBuffer");
     g_endCB = (PFN_vkEndCommandBuffer)o.gipa(o.inst, "vkEndCommandBuffer");
+    g_resetCB = (PFN_vkResetCommandBuffer)o.gipa(o.inst, "vkResetCommandBuffer");
     g_submit = (PFN_vkQueueSubmit)o.gipa(o.inst, "vkQueueSubmit");
     g_waitIdle = (PFN_vkQueueWaitIdle)o.gipa(o.inst, "vkQueueWaitIdle");
     g_acquire = (PFN_vkAcquireNextImageKHR)o.gipa(o.inst, "vkAcquireNextImageKHR");
@@ -466,6 +469,9 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     auto vsCode = ReadFileLocal(base + "shader.vert.spv");
     auto fsCode = ReadFileLocal(base + "crt_test.spv");
     if (fsCode.empty()) fsCode = ReadFileLocal(base + "shader.frag.spv");
+    // 外部 .spv 不存在时用 ndll 内嵌的同一份字节码，避免“缺文件就起不来”
+    if (vsCode.empty()) vsCode.assign((const char*)kVkVertSpv, (const char*)kVkVertSpv + sizeof(kVkVertSpv));
+    if (fsCode.empty()) fsCode.assign((const char*)kVkFragSpv, (const char*)kVkFragSpv + sizeof(kVkFragSpv));
     if (vsCode.empty() || fsCode.empty()) { o.lastError = "spv missing"; return false; }
     VkShaderModuleCreateInfo smci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     smci.codeSize = vsCode.size();
@@ -1059,7 +1065,9 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount) {
         float px = verts[i * 4 + 0];
         float py = verts[i * 4 + 1];
         vertsPtr->push_back(px * 2.0f / w - 1.0f);
-        vertsPtr->push_back(1.0f - py * 2.0f / h);
+        // Vulkan 的 NDC y=+1 在屏幕底部，GL/OpenFL 的 y=0 在顶部，所以直接把像素 y 映射进
+        // [-1,+1] 即可（不能再取 1 - ...，否则整帧上下镜像）
+        vertsPtr->push_back(py * 2.0f / h - 1.0f);
         vertsPtr->push_back(verts[i * 4 + 2]);
         vertsPtr->push_back(verts[i * 4 + 3]);
     }
@@ -1263,9 +1271,15 @@ void VkRenderer::EndFrame() {
         }
     }
 
+    // 每帧必须复位：没复位时第二帧起 vkBeginCommandBuffer 会静默失败（画面只更新第一帧）
+    g_resetCB(o.cmd, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    g_beginCB(o.cmd, &bi);
-
+    VkResult br = g_beginCB(o.cmd, &bi);
+    if (br != VK_SUCCESS) {
+        fprintf(stderr, "[vk] begin command buffer failed: %d\n", (int)br);
+        o.frameOpen = false;
+        return;
+    }
     VkClearValue cv{};
     cv.color.float32[0] = o.clearR;
     cv.color.float32[1] = o.clearG;
