@@ -31,9 +31,8 @@ struct Formats {
     bool operator!=(const Formats& o) const { return !(*this == o); }
 };
 
-// 单面模板状态（Vulkan 数值）。ref 不在其中：GL 的前/后引用值可以不同，
-// 而 Vulkan 的 vkCmdSetStencilReference 是按面设置的动态状态，
-// 放进 key 会让每个引用值都新建一条管线，所以单独用 GetStencilRef() 取。
+// 单面模板状态（Vulkan 数值）。ref 不在这里：本阶段强制前后两面同值（见 GetStencilRef），
+// 且 ref 在 Vulkan 里是动态状态，放进 key 会让每个引用值都新建一条管线。
 struct StencilFace {
     int compareOp = (int)VK_COMPARE_OP_ALWAYS;      // VkCompareOp
     int failOp = (int)VK_STENCIL_OP_KEEP;           // VkStencilOp
@@ -76,6 +75,7 @@ struct PipelineKey {
     StencilFace backStencil;
 
     // 混合（GL 的 RGB/alpha 通道各自独立的因子与方程）
+    // 注意：只建模单个颜色附件（attachment0）；MRT 的逐附件混合/掩码不在本阶段范围内。
     bool blendEnable = false;
     int srcColorBlendFactor = (int)VK_BLEND_FACTOR_ONE;   // VkBlendFactor
     int dstColorBlendFactor = (int)VK_BLEND_FACTOR_ZERO;
@@ -83,7 +83,7 @@ struct PipelineKey {
     int srcAlphaBlendFactor = (int)VK_BLEND_FACTOR_ONE;
     int dstAlphaBlendFactor = (int)VK_BLEND_FACTOR_ZERO;
     int alphaBlendOp = (int)VK_BLEND_OP_ADD;
-    uint32_t colorWriteMask = 0xF;                       // GL_COLOR_WRITEMASK
+    uint32_t colorWriteMask = 0xF;                       // GL_COLOR_WRITEMASK（仅 attachment0）
 
     // 附件格式（管线兼容性）
     Formats formats;
@@ -138,6 +138,9 @@ bool DepthRangef(float zNear, float zFar);
 // ---------------- 模板 ----------------
 
 // face 取 GL_FRONT / GL_BACK / GL_FRONT_AND_BACK。
+// 注意：本阶段前后两面的 ref 强制同值——传进来的 ref 会同时写到两面，
+// 这样提交时一次 vkCmdSetStencilReference(VK_STENCIL_FACE_FRONT_AND_BACK, ...) 就够，
+// 不需要为不同的前后 ref 建管线变体。func 与 mask 仍按面独立。
 bool StencilFunc(int func, int ref, int mask);
 bool StencilFuncSeparate(int face, int func, int ref, int mask);
 void StencilMask(int mask);
@@ -191,7 +194,7 @@ void GetBlendColor(float out[4]);
 void GetScissorBox(int out[4]);
 void GetViewportBox(int out[4]);
 float GetLineWidth();
-// face 取 GL_FRONT / GL_BACK；用于 vkCmdSetStencilReference。
+// 前后强制同值，face 参数保留只为接口对齐；提交时用 FRONT_AND_BACK。
 int GetStencilRef(int face);
 bool GetColorMask(int* out4);
 bool GetDepthRangef(float out2[2]);
@@ -206,9 +209,20 @@ VkViewport GetVulkanViewport(int targetHeight);
 
 // vk_renderer 当前在 DrawRaw 里做了 y 取反（py -> 1 - py*2/h），
 // 这会让三角形绕序整体反转，所以默认要把 GL 的 frontFace 取反后再写进管线。
-// 若主线改成负高度 viewport 而不在顶点上翻转，把这里设成 false。
+// 若主线改成负高度 viewport 而不在顶点上翻转，把这里设成 false。（默认 true，保持取反）
 void SetClipSpaceYFlip(bool flip);
 bool GetClipSpaceYFlip();
+
+// ---------------- Vulkan 合法性钳制 / 警告 ----------------
+
+// Vulkan 不接受的 GL 混合因子组合会被钳制成等价或最接近的合法值，
+// 并按"同一组合只警告一次"回调；不会改动 GL 查询状态，也不记 GL 错误。
+typedef void (*WarningCallback)(const char* message);
+void SetWarningCallback(WarningCallback callback);  // 传 nullptr 恢复默认（stderr）
+
+// dual-source blending（GL_SRC1_* 因子）默认关闭（本阶段按 ES3.0 对待）。
+// 关闭时 SRC1_* 会被钳制成对应的 SRC_* 并警告一次；打开则需要管线/着色器侧支持。
+void SetDualSourceBlendEnabled(bool enabled);
 
 // GL 绘制模式 → VkPrimitiveTopology。needsEmulation 可为 nullptr，
 // 返回 true 表示没有等价拓扑（fan / line loop），拓扑值给的是可用的近似。

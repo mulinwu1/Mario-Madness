@@ -1,6 +1,8 @@
 #include "gl_state.h"
 
+#include <cstdio>
 #include <cstring>
+#include <unordered_set>
 
 namespace lime {
 namespace glstate {
@@ -160,7 +162,6 @@ enum CapSlot {
 
 struct FaceState {
     int func = kAlways;
-    int ref = 0;
     unsigned valueMask = 0xFFFFFFFFu;
     unsigned writeMask = 0xFFFFFFFFu;
     int sfail = kKeep;
@@ -189,9 +190,10 @@ struct State {
     bool depthMask = true;
     float depthRange[2] = {0.0f, 1.0f};
 
-    // 前后两面的模板状态初值相同
+    // 前后两面的 func/mask/op 各自独立，但 ref 按本阶段约定强制同值
     FaceState frontStencil;
     FaceState backStencil;
+    int stencilRef = 0;
 
     int scissorBox[4] = {0, 0, 0, 0};
     int viewportBox[4] = {0, 0, 0, 0};
@@ -217,6 +219,10 @@ State g_state;
 uint64_t g_version = 0;
 int g_error = 0;
 bool g_yFlip = true;  // 与 vk_renderer DrawRaw 的 y 取反一致
+
+WarningCallback g_warnCallback = nullptr;  // nullptr 时写 stderr
+bool g_dualSource = false;                 // 本阶段按 ES3.0 对待，默认无 dual-source
+std::unordered_set<uint64_t> g_warnedBlendCombos;
 
 PipelineKey g_cachedKey;
 Formats g_cachedFormats;
@@ -461,6 +467,67 @@ void NormalizeBlendForOp(VkBlendOp op, int& src, int& dst) {
     }
 }
 
+// ---------------- Vulkan 非法混合组合的钳制 ----------------
+
+// alpha 通道的因子不能引用颜色，映射到对应的 alpha 因子（语义上最接近）
+int ClampAlphaFactor(int f) {
+    switch (f) {
+        case kSrcColor: return kSrcAlpha;
+        case kOneMinusSrcColor: return kOneMinusSrcAlpha;
+        case kDstColor: return kDstAlpha;
+        case kOneMinusDstColor: return kOneMinusDstAlpha;
+        case kSrc1Color: return kSrc1Alpha;
+        case kOneMinusSrc1Color: return kOneMinusSrc1Alpha;
+        default: return f;
+    }
+}
+
+// SRC1_*（dual-source）降级到对应的 SRC_*
+int ClampDualSourceFactor(int f) {
+    switch (f) {
+        case kSrc1Color: return kSrcColor;
+        case kOneMinusSrc1Color: return kOneMinusSrcColor;
+        case kSrc1Alpha: return kSrcAlpha;
+        case kOneMinusSrc1Alpha: return kOneMinusSrcAlpha;
+        default: return f;
+    }
+}
+
+uint64_t BlendComboSignature(int sc, int dc, int sa, int da) {
+    return ((uint64_t)(sc & 0xFFFF) << 48) | ((uint64_t)(dc & 0xFFFF) << 32) |
+           ((uint64_t)(sa & 0xFFFF) << 16) | (uint64_t)(da & 0xFFFF);
+}
+
+void WarnBlendClampedOnce(int sc, int dc, int sa, int da) {
+    if (!g_warnedBlendCombos.insert(BlendComboSignature(sc, dc, sa, da)).second) return;
+    char msg[224];
+    snprintf(msg, sizeof(msg),
+             "[gl_state] GL blend 组合 srcRGB=0x%04X dstRGB=0x%04X srcAlpha=0x%04X dstAlpha=0x%04X "
+             "在 Vulkan 中不合法，已钳制为合法值",
+             (unsigned)sc, (unsigned)dc, (unsigned)sa, (unsigned)da);
+    if (g_warnCallback) g_warnCallback(msg);
+    else fprintf(stderr, "%s\n", msg);
+}
+
+// 按 Vulkan 的硬限制修正因子；GL 查询状态保持原值，只影响送进管线的键
+void SanitizeBlendFactors(int rawSc, int rawDc, int rawSa, int rawDa,
+                          int& sc, int& dc, int& sa, int& da) {
+    sc = rawSc;
+    dc = rawDc;
+    sa = ClampAlphaFactor(rawSa);
+    da = ClampAlphaFactor(rawDa);
+    // dstColor 不能用第二源因子（Vulkan 只允许源侧引用 SRC1）
+    dc = ClampDualSourceFactor(dc);
+    if (!g_dualSource) {
+        sc = ClampDualSourceFactor(sc);
+        sa = ClampDualSourceFactor(sa);
+        da = ClampDualSourceFactor(da);
+    }
+    if (sc != rawSc || dc != rawDc || sa != rawSa || da != rawDa) {
+        WarnBlendClampedOnce(rawSc, rawDc, rawSa, rawDa);
+    }
+}
+
 // ---------------- 哈希 ----------------
 
 uint64_t Fnv(uint64_t h, uint64_t v) {
@@ -681,20 +748,24 @@ bool StencilFuncSeparate(int face, int func, int ref, int mask) {
     if (ref > 255) ref = 255;  // 规范：clamp 到模板缓冲位宽，按 8bit 处理
 
     bool changed = false;
+    // 本阶段前后 ref 强制同值：不管 face 取什么，ref 都写到单一槽位
+    if (g_state.stencilRef != ref) {
+        g_state.stencilRef = ref;
+        changed = true;
+    }
     FaceState* faces[2] = {nullptr, nullptr};
     int n = 0;
     if (face == kFront || face == kFrontAndBack) faces[n++] = &g_state.frontStencil;
     if (face == kBack || face == kFrontAndBack) faces[n++] = &g_state.backStencil;
     for (int i = 0; i < n; i++) {
         FaceState& f = *faces[i];
-        if (f.func != func || f.ref != ref || f.valueMask != (unsigned)mask) {
+        if (f.func != func || f.valueMask != (unsigned)mask) {
             f.func = func;
-            f.ref = ref;
             f.valueMask = (unsigned)mask;
             changed = true;
         }
     }
-    // ref 不进管线键，但为了简单统一，这里仍然计入版本号（ref 变化极少）
+    // ref 是动态状态，本不该动版本号；但这里统一处理，且 ref 变化很少
     if (changed) g_version++;
     return true;
 }
@@ -920,14 +991,14 @@ int QueryInteger(int pname, int* out, int maxCount) {
         case kPnameDepthWritemask: out[0] = g_state.depthMask ? 1 : 0; return 1;
         case kPnameStencilClearValue: out[0] = g_state.clearStencil; return 1;
         case kPnameStencilFunc: out[0] = g_state.frontStencil.func; return 1;
-        case kPnameStencilRef: out[0] = g_state.frontStencil.ref; return 1;
+        case kPnameStencilRef: out[0] = g_state.stencilRef; return 1;
         case kPnameStencilValueMask: out[0] = (int)g_state.frontStencil.valueMask; return 1;
         case kPnameStencilWritemask: out[0] = (int)g_state.frontStencil.writeMask; return 1;
         case kPnameStencilFail: out[0] = g_state.frontStencil.sfail; return 1;
         case kPnameStencilPassDepthFail: out[0] = g_state.frontStencil.dpfail; return 1;
         case kPnameStencilPassDepthPass: out[0] = g_state.frontStencil.dppass; return 1;
         case kPnameStencilBackFunc: out[0] = g_state.backStencil.func; return 1;
-        case kPnameStencilBackRef: out[0] = g_state.backStencil.ref; return 1;
+        case kPnameStencilBackRef: out[0] = g_state.stencilRef; return 1;
         case kPnameStencilBackValueMask: out[0] = (int)g_state.backStencil.valueMask; return 1;
         case kPnameStencilBackWritemask: out[0] = (int)g_state.backStencil.writeMask; return 1;
         case kPnameStencilBackFail: out[0] = g_state.backStencil.sfail; return 1;
@@ -1018,8 +1089,8 @@ void GetViewportBox(int out[4]) {
 float GetLineWidth() { return g_state.lineWidth; }
 
 int GetStencilRef(int face) {
-    if (face == kBack) return g_state.backStencil.ref;
-    return g_state.frontStencil.ref;
+    (void)face;  // 本阶段前后同值
+    return g_state.stencilRef;
 }
 
 bool GetColorMask(int* out4) {
@@ -1089,6 +1160,15 @@ void SetClipSpaceYFlip(bool flip) {
 
 bool GetClipSpaceYFlip() { return g_yFlip; }
 
+void SetWarningCallback(WarningCallback callback) { g_warnCallback = callback; }
+
+void SetDualSourceBlendEnabled(bool enabled) {
+    if (g_dualSource != enabled) {
+        g_dualSource = enabled;
+        g_version++;  // SRC1 因子是否被钳制会改变管线键
+    }
+}
+
 int VkTopology(int glMode, bool* needsEmulation) {
     return (int)ToVkTopology(glMode, needsEmulation);
 }
@@ -1128,10 +1208,17 @@ PipelineKey CurrentPipelineKey(const Formats& formats) {
     k.blendEnable = IsEnabledSlot(CS_Blend);
     k.colorBlendOp = (int)ToVkBlendOp(g_state.blendEqRgb);
     k.alphaBlendOp = (int)ToVkBlendOp(g_state.blendEqAlpha);
-    k.srcColorBlendFactor = (int)ToVkBlendFactor(g_state.blendSrcRgb);
-    k.dstColorBlendFactor = (int)ToVkBlendFactor(g_state.blendDstRgb);
-    k.srcAlphaBlendFactor = (int)ToVkBlendFactor(g_state.blendSrcAlpha);
-    k.dstAlphaBlendFactor = (int)ToVkBlendFactor(g_state.blendDstAlpha);
+    int sc = 0;
+    int dc = 0;
+    int sa = 0;
+    int da = 0;
+    // Vulkan 不接受的 GL 组合在这里钳制并警告一次（GL 状态本身不变）
+    SanitizeBlendFactors(g_state.blendSrcRgb, g_state.blendDstRgb, g_state.blendSrcAlpha,
+                         g_state.blendDstAlpha, sc, dc, sa, da);
+    k.srcColorBlendFactor = (int)ToVkBlendFactor(sc);
+    k.dstColorBlendFactor = (int)ToVkBlendFactor(dc);
+    k.srcAlphaBlendFactor = (int)ToVkBlendFactor(sa);
+    k.dstAlphaBlendFactor = (int)ToVkBlendFactor(da);
     NormalizeBlendForOp((VkBlendOp)k.colorBlendOp, k.srcColorBlendFactor, k.dstColorBlendFactor);
     NormalizeBlendForOp((VkBlendOp)k.alphaBlendOp, k.srcAlphaBlendFactor, k.dstAlphaBlendFactor);
 
@@ -1257,7 +1344,8 @@ void FillDepthStencil(const PipelineKey& key, VkPipelineDepthStencilStateCreateI
     front.compareOp = (VkCompareOp)key.frontStencil.compareOp;
     front.compareMask = key.frontStencil.compareMask;
     front.writeMask = key.frontStencil.writeMask;
-    front.reference = 0;  // 动态状态：提交时用 vkCmdSetStencilReference 设 GetStencilRef
+    front.reference = 0;  // 动态状态：提交时用 vkCmdSetStencilReference(FRONT_AND_BACK, GetStencilRef)
+    // 本阶段前后 ref 强制同值，所以一次 FRONT_AND_BACK 的 set 就覆盖两面
 
     VkStencilOpState& back = out->back;
     back.failOp = (VkStencilOp)key.backStencil.failOp;
