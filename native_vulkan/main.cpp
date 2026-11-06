@@ -299,7 +299,8 @@ int main() {
     VkShaderModuleCreateInfo smci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     VkShaderModule vsMod = VK_NULL_HANDLE, fsMod = VK_NULL_HANDLE;
     auto codeVS = ReadFile(baseDir + "shader.vert.spv");
-    auto codeFS = ReadFile(baseDir + "shader.frag.spv");
+    auto codeFS = ReadFile(baseDir + "crt_test.spv");
+    if (codeFS.empty()) codeFS = ReadFile(baseDir + "shader.frag.spv");
     if (codeVS.empty() || codeFS.empty()) {
         printf("[vk] shader spv missing in %s\n", baseDir.c_str());
         return 1;
@@ -446,24 +447,49 @@ int main() {
     createSampler(dev, &smpci, nullptr, &smp);
 
     // descriptor
-    VkDescriptorSetLayoutBinding dslb{};
-    dslb.binding = 0;
-    dslb.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    dslb.descriptorCount = 1;
-    dslb.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutBinding dslb[2]{};
+    dslb[0].binding = 0;
+    dslb[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    dslb[0].descriptorCount = 1;
+    dslb[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    dslb[1].binding = 1;
+    dslb[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    dslb[1].descriptorCount = 1;
+    dslb[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
     VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    dslci.bindingCount = 1;
-    dslci.pBindings = &dslb;
+    dslci.bindingCount = 2;
+    dslci.pBindings = dslb;
     VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
     createDSL(dev, &dslci, nullptr, &dsl);
 
-    VkDescriptorPoolSize dps{};
-    dps.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    dps.descriptorCount = 1;
+    // UBO: res(8) sHardScan(4) kHardPix(4) kWarp(8) kMaskDark(4) kMaskLight(4) openfl_TextureSize(8) -> 48 bytes pad
+    VkBufferCreateInfo ubci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    ubci.size = 64;
+    ubci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    VkBuffer ubo = VK_NULL_HANDLE;
+    createBuf(dev, &ubci, nullptr, &ubo);
+    VkMemoryRequirements umr{};
+    getBufReqs(dev, ubo, &umr);
+    VkMemoryAllocateInfo umai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    umai.allocationSize = umr.size;
+    umai.memoryTypeIndex = findMemType(umr.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VkDeviceMemory uboMem = VK_NULL_HANDLE;
+    allocMem(dev, &umai, nullptr, &uboMem);
+    bindBufMem(dev, ubo, uboMem, 0);
+    void* uboPtr = nullptr;
+    mapMem(dev, uboMem, 0, umr.size, 0, &uboPtr);
+
+    VkDescriptorPoolSize dps[2]{};
+    dps[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    dps[0].descriptorCount = 1;
+    dps[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    dps[1].descriptorCount = 1;
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = 1;
-    dpci.poolSizeCount = 1;
-    dpci.pPoolSizes = &dps;
+    dpci.poolSizeCount = 2;
+    dpci.pPoolSizes = dps;
     VkDescriptorPool dp = VK_NULL_HANDLE;
     createDP(dev, &dpci, nullptr, &dp);
 
@@ -478,13 +504,26 @@ int main() {
     dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     dii.imageView = texView;
     dii.sampler = smp;
-    VkWriteDescriptorSet wds{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    wds.dstSet = ds;
-    wds.dstBinding = 0;
-    wds.descriptorCount = 1;
-    wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    wds.pImageInfo = &dii;
-    updateDS(dev, 1, &wds, 0, nullptr);
+
+    VkDescriptorBufferInfo dbi{};
+    dbi.buffer = ubo;
+    dbi.offset = 0;
+    dbi.range = 64;
+
+    VkWriteDescriptorSet wds[2]{};
+    wds[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wds[0].dstSet = ds;
+    wds[0].dstBinding = 0;
+    wds[0].descriptorCount = 1;
+    wds[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wds[0].pImageInfo = &dii;
+    wds[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wds[1].dstSet = ds;
+    wds[1].dstBinding = 1;
+    wds[1].descriptorCount = 1;
+    wds[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    wds[1].pBufferInfo = &dbi;
+    updateDS(dev, 2, wds, 0, nullptr);
 
     // ---------- pipeline ----------
     VkPipelineShaderStageCreateInfo stages[2]{};
@@ -630,6 +669,20 @@ int main() {
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         beginCB(cb, &bi);
         t += 0.016f;
+
+        {
+            float* u = (float*)uboPtr;
+            u[0] = (float)tw;
+            u[1] = (float)th;
+            u[2] = -8.0f;
+            u[3] = -2.0f;
+            u[4] = 0.0f;
+            u[5] = 100.0f / 24.0f;
+            u[6] = 0.5f;
+            u[7] = 1.5f;
+            u[8] = (float)tw;
+            u[9] = (float)th;
+        }
 
         VkClearValue cv{};
         cv.color.float32[0] = 0.04f;
