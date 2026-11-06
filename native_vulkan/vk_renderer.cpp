@@ -137,6 +137,9 @@ static PFN_vkCreateGraphicsPipelines g_createPipe;
 
 static PFN_vkGetInstanceProcAddr g_gipa = nullptr;
 
+// 提交计数：DrawRaw 的取证日志按它分组，判断“同一帧内”的绘制
+static uint64_t g_drawFrame = 0;
+
 static uint32_t FindMemType(const VkPhysicalDeviceMemoryProperties& mp, uint32_t bits, VkMemoryPropertyFlags flags) {
     for (uint32_t i = 0; i < 32; i++) {
         if ((bits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & flags) == flags) return i;
@@ -881,6 +884,21 @@ bool VkRenderer::SetTextureSampler(uint32_t texId, int minFilter, int magFilter,
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     sci.magFilter = GlFilterToVk(magFilter);
     sci.minFilter = GlFilterToVk(minFilter);
+    // 诊断：实测游戏的采样方式（每个纹理 id 首次设置或参数变化时打印一次）
+    if (texId < 1024) {
+        static uint64_t s_sig[1024] = {0};
+        static bool s_seen[1024] = {false};
+        uint64_t sig = ((uint64_t)(uint32_t)minFilter << 48) | ((uint64_t)(uint32_t)magFilter << 32) |
+                       ((uint64_t)(uint32_t)wrapS << 16) | (uint32_t)wrapT;
+        if (!s_seen[texId] || s_sig[texId] != sig) {
+            s_seen[texId] = true;
+            s_sig[texId] = sig;
+            fprintf(stderr, "[sampler] tex=%u min=0x%x(%s) mag=0x%x(%s) wrapS=0x%x wrapT=0x%x\n",
+                    texId, minFilter, GlFilterToVk(minFilter) == VK_FILTER_NEAREST ? "NEAREST" : "LINEAR",
+                    magFilter, GlFilterToVk(magFilter) == VK_FILTER_NEAREST ? "NEAREST" : "LINEAR",
+                    wrapS, wrapT);
+        }
+    }
     // 目前纹理只有 1 级 mip，mip 模式保持 NEAREST 并把 maxLod 钳到 0，
     // 否则采样器会去取不存在的 level 导致黑边/全黑
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
@@ -1104,16 +1122,72 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount) {
         th = (float)o.textures[texId - 1].h;
     }
 
+    // 采样方式实测：多数贴图是 LINEAR。像素坐标 uv 正好落在帧边界时，双线性
+    // 会混入相邻格（表现为贴图四周一圈异色边框）。按 min 侧 +0.5、max 侧 -0.5
+    // 内缩半像素，使采样点落在首/末纹素中心；只对像素坐标 uv 生效。
+    float uMin = 0, uMax = 0, vMin = 0, vMax = 0;
+    bool pixelUv = false;
+    if (vertexCount > 0) {
+        uMin = uMax = verts[2];
+        vMin = vMax = verts[3];
+        for (int i = 0; i < vertexCount; i++) {
+            float u = verts[i * 4 + 2];
+            float v = verts[i * 4 + 3];
+            if (u > 1.001f || u < -1.001f || v > 1.001f || v < -1.001f) pixelUv = true;
+            if (u < uMin) uMin = u;
+            if (u > uMax) uMax = u;
+            if (v < vMin) vMin = v;
+            if (v > vMax) vMax = v;
+        }
+    }
+
+    // 取证：每次绘制一条紧凑记录（纹理 id/尺寸、uv 范围、顶点包围盒、是否触发
+    // 归一化分支、uv 是否覆盖整张贴图）。前 12 帧全量，之后只打"覆盖整图"的嫌疑绘制
+    {
+        float xMin = verts[0], xMax = verts[0], yMin = verts[1], yMax = verts[1];
+        for (int i = 0; i < vertexCount; i++) {
+            float x = verts[i * 4 + 0];
+            float y = verts[i * 4 + 1];
+            if (x < xMin) xMin = x; if (x > xMax) xMax = x;
+            if (y < yMin) yMin = y; if (y > yMax) yMax = y;
+        }
+        // norm=1 表示走了像素坐标分支（uv 已按纹理尺寸归一化并内缩）；
+        // whole=1 表示 uv 跨度接近整张贴图 → 该绘制很可能把整图铺进四边形
+        bool spansWhole = false;
+        if (!pixelUv) spansWhole = (uMax - uMin) >= 0.9f && (vMax - vMin) >= 0.9f;
+        else if (tw > 0 && th > 0) spansWhole = (uMax - uMin) >= tw * 0.9f && (vMax - vMin) >= th * 0.9f;
+        static uint64_t s_logged = 0;
+        if (s_logged < 6000 && (g_drawFrame <= 12 || spansWhole)) {
+            fprintf(stderr, "[vkdraw] f=%llu cur=%u tex=%u tsz=%.0fx%.0f n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] norm=%d whole=%d\n",
+                    (unsigned long long)g_drawFrame, o.currentTarget, texId, tw, th, vertexCount,
+                    uMin, uMax, vMin, vMax, xMin, xMax, yMin, yMax,
+                    pixelUv ? 1 : 0, spansWhole ? 1 : 0);
+            s_logged++;
+        }
+    }
+
     vertsPtr->reserve(vertsPtr->size() + (size_t)vertexCount * 15);
     for (int i = 0; i < vertexCount; i++) {
         float px = verts[i * 4 + 0];
         float py = verts[i * 4 + 1];
         float u = verts[i * 4 + 2];
         float v = verts[i * 4 + 3];
-        // 像素坐标直接进顶点：像素→NDC 的换算由 UBO 里的投影矩阵完成
-        // uv 超出 0..1 说明传进来的是像素坐标，按采样源尺寸归一化，否则采样越界全黑
-        if (u > 1.001f || u < -1.001f) u = tw > 0 ? u / tw : 1.0f;
-        if (v > 1.001f || v < -1.001f) v = th > 0 ? v / th : 1.0f;
+        if (pixelUv) {
+            // 内缩与归一化必须一起做：若先 +0.5 再判断 |u|>1.001，min=0 的
+            // 顶点会变成 0.5 而躲过归一化，整屏采样错位
+            float eu = u, ev = v;
+            if (u <= uMin + 1e-3f && u < uMax) eu = u + 0.5f;
+            else if (u >= uMax - 1e-3f) eu = u - 0.5f;
+            if (v <= vMin + 1e-3f && v < vMax) ev = v + 0.5f;
+            else if (v >= vMax - 1e-3f) ev = v - 0.5f;
+            u = tw > 0 ? eu / tw : 1.0f;
+            v = th > 0 ? ev / th : 1.0f;
+        } else {
+            // 像素坐标直接进顶点：像素→NDC 的换算由 UBO 里的投影矩阵完成
+            // uv 超出 0..1 说明传进来的是像素坐标，按采样源尺寸归一化，否则采样越界全黑
+            if (u > 1.001f || u < -1.001f) u = tw > 0 ? u / tw : 1.0f;
+            if (v > 1.001f || v < -1.001f) v = th > 0 ? v / th : 1.0f;
+        }
         PushLimeVertex(*vertsPtr, px, py, u, v);
     }
 }
@@ -1348,6 +1422,7 @@ void VkRenderer::EndFrame() {
     {
         static uint64_t s_frames = 0;
         s_frames++;
+        g_drawFrame = s_frames;
         if (s_frames == 1 || s_frames % 30 == 0 || o.currentTarget == 0) {
             float first[4] = {0, 0, 0, 0};
             if (totalVerts > 0) memcpy(first, o.vbPtr, sizeof(first));
