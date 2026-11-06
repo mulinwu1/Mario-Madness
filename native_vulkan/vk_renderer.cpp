@@ -1153,6 +1153,12 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
         o.clearA = a;
         return true;
     }
+    // 切换目标前先把旧离屏 pass 真正提交进旧 FBO：否则整帧所有 pass 的顶点
+    // 会被攒到 present 那一刻、用最后一张图（后缓冲）的投影一次性画出去，
+    // 表现为帧间闪烁、元素位置偏移、贴图边缘露出。
+    if (o.frameOpen && o.currentTarget != id && o.currentTarget >= 1000 && FrameHasGeometry()) {
+        EndFrame ();
+    }
     o.currentTarget = id;
     o.clearR = r;
     o.clearG = g;

@@ -26,19 +26,19 @@ jobs:
     steps:
       # 编游戏需要 source/ 和 assets/，不能用稀疏检出
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
       # artifact 是 run 级别的，同一个 run 里前置 job 上传后可直接下载
       - name: Download Vulkan lime ndll
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: lime-vulkan-ndll
           path: lime-vulkan-artifact
 
       - name: Restore haxelib cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~\haxelib
           key: game-haxelib-${{ runner.os }}-v1
@@ -175,7 +175,7 @@ jobs:
 
       # hxcpp 编译缓存是内容哈希寻址的（HXCPP_COMPILE_CACHE），源码改动后仍能复用未变的编译单元
       - name: Restore hxcpp compile cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: hxcpp-cache
           key: hxcpp-cc-${{ runner.os }}-haxe${{ env.HAXE_VERSION }}-lime${{ env.LIME_VERSION }}-hxcpp${{ env.HXCPP_VERSION }}-${{ hashFiles('source/**', 'Project.xml') }}-v3
@@ -185,7 +185,7 @@ jobs:
       # obj/bin 必须用精确 key：hxcpp 靠 mtime 判断是否重编，拿别处的 obj 会在源码变更时
       # 静默产出错误的 exe，所以源码哈希一变就完全不复用
       - name: Restore build output cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: export\release\windows
           key: mario-obj-v3-${{ runner.os }}-haxe${{ env.HAXE_VERSION }}-lime${{ env.LIME_VERSION }}-hxcpp${{ env.HXCPP_VERSION }}-${{ hashFiles('source/**', 'Project.xml') }}
@@ -324,7 +324,7 @@ jobs:
 
       - name: Upload build log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-log
           path: |
@@ -383,7 +383,7 @@ jobs:
           Set-Content -Path pkg\RUNNING.txt -Value $lines -Encoding UTF8
 
       - name: Upload runnable package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mario-vulkan-win64
           path: pkg/*
