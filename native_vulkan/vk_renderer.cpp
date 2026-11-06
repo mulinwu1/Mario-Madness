@@ -1158,13 +1158,6 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
     o.clearG = g;
     o.clearB = b;
     o.clearA = a;
-    // 临时调试：后缓冲清成紫色，用来区分“呈现/清屏是否通”和“绘制内容是否黑”
-    if (id == 0) {
-        o.clearR = 0.45f;
-        o.clearG = 0.0f;
-        o.clearB = 0.45f;
-        o.clearA = 1.0f;
-    }
     // 注意：切换目标时不能清空顶点列表。OpenFL 的 filter 链最后一个 pass 常常是
     // “先绑后缓冲、再画一张全屏 quad”，一清就把这批顶点吃掉 → 屏幕只剩清屏色。
     // 顶点在 EndFrame 提交后由 EndFrame 自己清。
