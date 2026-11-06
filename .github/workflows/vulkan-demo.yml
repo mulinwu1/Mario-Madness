@@ -36,6 +36,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "vert failed" }
           & $gl -V native_vulkan\shader.frag -o native_vulkan\shader.frag.spv
           if ($LASTEXITCODE -ne 0) { throw "frag failed" }
+          & $gl -V native_vulkan\crt_test.frag -o native_vulkan\crt_test.spv
+          if ($LASTEXITCODE -ne 0) { throw "crt_test.frag failed (GLSL 120 -> 450 conversion broken)" }
+          Write-Host "crt_test.frag compiled OK"
           Get-ChildItem native_vulkan\*.spv | Select-Object Name, Length
 
       - name: Compile exe
