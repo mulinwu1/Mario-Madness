@@ -282,6 +282,12 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     }
     if (!o.phys) o.phys = devs[0];
     getMemProps(o.phys, &memProps);
+    {
+        VkPhysicalDeviceProperties sp{};
+        getProps(o.phys, &sp);
+        fprintf(stderr, "[vk] device=%s type=%d api=%u.%u.%u\n", sp.deviceName, (int)sp.deviceType,
+                VK_VERSION_MAJOR(sp.apiVersion), VK_VERSION_MINOR(sp.apiVersion), VK_VERSION_PATCH(sp.apiVersion));
+    }
 
     VkWin32SurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
     sci.hinstance = GetModuleHandle(nullptr);
@@ -568,6 +574,8 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     o.vbPtr = (float*)vp2;
 
     o.textures.resize(MAX_TEXTURES);
+    fprintf(stderr, "[vk] init ok swapchain=%ux%u images=%zu format=%d\n",
+            o.extent.width, o.extent.height, o.swapImages.size(), (int)o.colorFormat);
     return true;
 }
 

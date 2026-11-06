@@ -7,10 +7,13 @@
 #include <vector>
 #include <cstring>
 #include <cstdint>
+#include <cstdio>
 
 namespace lime {
 
 static VkRenderer* g_renderer = nullptr;
+static uint64_t g_draws = 0;
+static uint64_t g_presents = 0;
 
 static float g_clearR = 0.0f, g_clearG = 0.0f, g_clearB = 0.0f, g_clearA = 1.0f;
 static int g_vpX = 0, g_vpY = 0, g_vpW = 0, g_vpH = 0;
@@ -120,6 +123,7 @@ void gl_vk_init(void* hwnd, int width, int height) {
     VkRenderer* r = new VkRenderer();
     if (r->Init((HWND)hwnd, width, height)) {
         g_renderer = r;
+        fprintf(stderr, "[glvk] renderer ready %dx%d hwnd=%p\n", width, height, hwnd);
         // FBO / 纹理参数模块靠这两个契约拿到纹素与清屏色
         gl_vk_install_core_state(&S_STATE);
         gl_vk_install_renderer_ext(&EXT);
@@ -127,6 +131,7 @@ void gl_vk_init(void* hwnd, int width, int height) {
         glstate::ResetToDefaults(width, height);
         glstate::SetWarningCallback(nullptr);
     } else {
+        fprintf(stderr, "[glvk] init failed: %s\n", r->LastError());
         delete r;
     }
 }
@@ -137,6 +142,11 @@ bool gl_vk_active() { return g_renderer != nullptr; }
 void gl_vk_end_frame() {
     // 统一走 gl_fbo 的帧收尾：它负责离屏目标与后缓冲的切换，再调 VkRenderer::EndFrame
     gl_vk_present_frame();
+    g_presents++;
+    if (g_presents % 60 == 0) {
+        fprintf(stderr, "[glvk] presents=%llu draws=%llu\n",
+                (unsigned long long)g_presents, (unsigned long long)g_draws);
+    }
 }
 
 void gl_vk_shutdown() {
@@ -374,6 +384,7 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
     if (texName <= 0 || texName >= (int)g_texVk.size()) return;
     uint32_t vkTex = g_texVk[(size_t)texName];
     if (!vkTex) return;
+    g_draws++;
     g_renderer->DrawRaw(vkTex, out.data(), count);
 }
 
@@ -413,6 +424,7 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
     if (texName <= 0 || texName >= (int)g_texVk.size()) return;
     uint32_t vkTex = g_texVk[(size_t)texName];
     if (!vkTex) return;
+    g_draws++;
     g_renderer->DrawRaw(vkTex, out.data(), count);
 }
 

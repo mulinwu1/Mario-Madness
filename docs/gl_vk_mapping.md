@@ -409,7 +409,7 @@ powershell -ExecutionPolicy Bypass -File tools\coverage\coverage.ps1 -Markdown  
 
 | 优先级 | 模块 | 缺口 | 影响 |
 | --- | --- | --- | --- |
-| P0 | shader/program | 77/77 空桩 | 没有 GLSL→SPIR-V、没有 pipeline 创建；任何带 shader 的绘制都无法成立，是当前最大单点 |
+| P0 | shader/program | 77/77 空桩 | 没有 GLSL→SPIR-V、没有 pipeline 创建；任何带 shader 的绘制都无法成立，是当前最大单点。**运行时真正必需的只有 19 个，见第 13 节** |
 | P0 | FBO/renderbuffer | 24/24 空桩 | 后处理、CRT/辉光、终曲全链路依赖离屏；`check_framebuffer_status` 返回 0 会让上层直接跳过 |
 | P1 | 纹理 | 22/27 空桩 | 子图更新（Haxe 图集动态打包）、mipmap、过滤/包裹参数、压缩纹理全部缺失 |
 | P1 | 缓冲/顶点 | 45/55 空桩 | 索引/实例化/VAO/UBO 缺失；当前 `bufferData` 只在 CPU 侧，GPU 上没有任何 `VkBuffer` |
@@ -424,11 +424,14 @@ powershell -ExecutionPolicy Bypass -File tools\coverage\coverage.ps1 -Markdown  
 
 | 文件 | 覆盖内容 | 本地实测 |
 | --- | --- | --- |
+| `gl_shader.cpp` | 71/77 个 shader/program 入口（glslang 运行时 GLSL→SPIR-V、`VkShaderModule`、pipeline/descriptor/uniform buffer 的创建与缓存） | 剩下 6 个仍空桩：`get_program_binary`、`program_binary`、`program_parameteri`、`release_shader_compiler`、`shader_binary`、`uniform_block_binding`，全部属于第 13.3 节判定为运行时不需要的组；**第 13 节的 19 个必需入口已全部落地** |
 | `gl_fbo.cpp` | 22/24 个 FBO/renderbuffer 入口的真实现（`create/bind/delete framebuffer`、`renderbuffer_storage`、`framebuffer_texture2D/layer`、`blit_framebuffer`、`invalidate_*`、查询类等） | 仅剩 `read_buffer`、`read_pixels` 仍是空桩 |
 | `gl_state.h` / `gl_state.cpp` | 状态机内部实现（Cap/BlendFactor/BlendOp/CompareOp/StencilOp 的枚举映射与状态快照），**尚未提供 `lime_gl_*` 入口**，所以统计脚本在本文件中扫不到入口定义 | 0 个入口 |
 | `gl_texture_params.cpp` | 纹理参数（过滤/包裹/LOD/各向异性）的枚举映射与校验内部实现，同样尚未挂到 `lime_gl_*` 入口 | 0 个入口 |
 
-按本地目录（含上述未提交文件）重跑脚本的实测值：`269` 个入口中真实现 `45`、空桩 `224`，总体真实现率 `16.7%`，FBO/renderbuffer 模块 `91.7%`。合入 `main` 后请以此为准并更新第 1 节总览。
+按本地目录（含上述未提交文件）重跑脚本的实测值：`269` 个入口中真实现 `122`、空桩 `147`，总体真实现率 `45.4%`；分模块为 状态 `8/30`、纹理 `5/27`、缓冲/顶点 `10/55`、shader/program `71/77`（92.2%）、FBO/renderbuffer `22/24`（91.7%）、其他 `6/56`（10.7%）。合入 `main` 后请以此为准并更新第 1 节总览。
+
+> `lime_gl_get_error` 在本地 `gl_core.cpp` 中已从"恒返回 0"改为真实现（对应第 9 节陷阱 6 的处理），但这属于并行会话的源码改动，本节只记录、不代改。
 
 > 注意：`gl_fbo.cpp` 与 `gl_stubs.cpp` 目前同时存在同名定义，未删除桩函数前会链接冲突；这类清理属于写源码的会话职责，本文档不代改。
 
@@ -438,3 +441,132 @@ powershell -ExecutionPolicy Bypass -File tools\coverage\coverage.ps1 -Markdown  
 - 新增 `gl_shader.cpp` / `gl_fbo.cpp` / `gl_state.cpp` / `gl_texture.cpp` 等文件后，直接重跑 `tools/coverage/coverage.ps1`，脚本会自动扫描并归入对应模块，无需改脚本。
 - 本表的"状态"列若与脚本输出不一致，以脚本为准并同步更新本表。
 - 表内所有"Vulkan 落点"均为设计落点，不代表已实现；已实现的以 `gl_core.cpp` 实际代码为准。
+
+## 13. shader/program 最小必需集合（运行时实测）
+
+**结论：77 个入口里，本作 2D 运行时真正会走到的只有 19 个；其余 58 个即使一直是空桩，也不影响游戏启动和绘制。** 按 `main @ af103da` 快照是 `0/19`；本地并行会话的 `gl_shader.cpp` 已把 19 个全部落地（见 13.6），剩余 6 个空桩恰好全部落在排除表里。
+
+### 13.1 判定方法
+
+不看 GL 规范清单猜，只用游戏实际链接的编译产物做证据：
+
+| 证据 | 内容 |
+| --- | --- |
+| `angle_full/obj/src/lime/_internal/backend/native/NativeOpenGLRenderContext.cpp` | Haxe→C++ 的真实链接物，每个方法体都直接调 `NativeCFFI_obj::lime_gl_*`。例如 `useProgram` 在 HXLINE 3143 调 `lime_gl_use_program`，`getShaderParameter` 在 2025 调 `lime_gl_get_shaderi`，`uniformMatrix4fv` 在 3111 调 `lime_gl_uniform_matrix4fv`。 |
+| `angle_full/obj/src/openfl/display/Shader.cpp` | 2D shader 的完整生命周期：322 创建、323 传源、324 编译、325 取日志、326 查编译状态、348 建 program、355 绑属性、360/361 挂载、362 链接、364 查链接状态、367 取链接日志、438 sampler 用 `uniform1i`、524~564 查 uniform/attrib 位置。 |
+| `openfl/display/ShaderParameter*.cpp` | uniform 分发：`uniform1f/2f/3f/4f`、`uniform1i/2i/3i/4i`、矩阵经 `WebGLRenderContext_Impl__obj::uniformMatrix4fv(gl,…)` 转发（`WebGL2RenderContext_Impl_.cpp` 再调 `this1->uniformMatrix4fv`）。 |
+| `openfl/display/OpenGLRenderer.cpp` | 552/579 行 `context3D->setProgram(shader->program)` 是每帧换 shader 的入口；546 行 `setProgram(null)` 也会走到 `useProgram`。 |
+| `src/*.hx` + 编译产物 16 个 `*Shader.cpp` | 游戏实际实例化的 shader 清单，见 13.2 的 uniform 类型统计。 |
+
+统计口径：排除 lime 自己的定义/包装层（`_internal/backend/native`、`GL.cpp`、`WebGL*RenderContext_Impl_`、`OpenGLES3RenderContext_Impl_`），并排除 `openfl/display3D`（本作是 2D 渲染，不走 Stage3D）。在这个范围内，上述 19 个是唯一有调用点的集合。
+
+> 行号约定：下文 `Shader.cpp:322` 指出现在编译产物里的 `HXLINE(322)`，对应 openfl `Shader.hx` 第 322 行；`OpenGLRenderer.cpp:552` 等同理。
+
+复跑方式（在 `angle_full/obj/src` 下重跑即可，无需改脚本）：
+
+```powershell
+# 统计 2D 路径中各 GL 方法的调用点，确认 19 个之外无命中
+$p = "C:\Users\yuu\Documents\Trae-CN\temp_20261106_01\angle_full\obj\src"
+Get-ChildItem $p -Recurse -Filter *.cpp |
+  Where-Object { $_.FullName -notmatch 'lime\\_internal|display3D' -and
+                 $_.Name -notmatch '^(GL|OpenGLES3RenderContext_Impl_|WebGL2RenderContext_Impl_)\.cpp$' } |
+  Select-String -Pattern '->([A-Za-z0-9_]+)\(' -AllMatches |
+  ForEach-Object { $_.Matches } |
+  ForEach-Object { $_.Groups[1].Value } |
+  Group-Object | Sort-Object Count -Descending | Format-Table Count,Name -AutoSize
+```
+
+### 13.2 最小必需集合（19 个）
+
+#### A. 编译链（5）
+
+| 入口 | 运行时触发点 | 为什么必需 | 补齐要点 |
+| --- | --- | --- | --- |
+| `lime_gl_create_shader` | Shader.cpp:322 `gl->createShader(type)` | 每个 shader 的第一个对象 | 分配 GL 名字 + 记录 VS/FS 类型；`VkShaderModule` 留到 SPIR-V 就绪再建 |
+| `lime_gl_shader_source` | Shader.cpp:323 | 必须保存 GLSL 源，translator 的输入 | 存源串，不改写；ES 1.00 写法留给编译阶段规整 |
+| `lime_gl_compile_shader` | Shader.cpp:324 | GLSL→SPIR-V 的落点 | 接 glslang/shaderc，缓存 SPIR-V 与错误串；失败也要缓存日志 |
+| `lime_gl_get_shader_info_log` | Shader.cpp:325（**无条件调用**，不是仅错误分支） | 返回必须可拼进 String，返回 NULL 有崩溃风险 | 返回缓存串，成功时返回空串而不是 `nullptr` |
+| `lime_gl_get_shaderi` | Shader.cpp:326 查 `COMPILE_STATUS` | 编译失败会直接走 `return null` 分支 | 从 shim 元数据返回状态，不要依赖 Vk 查询接口 |
+
+#### B. 链接链（6）
+
+| 入口 | 运行时触发点 | 为什么必需 | 补齐要点 |
+| --- | --- | --- | --- |
+| `lime_gl_create_program` | Shader.cpp:348 | program 对象入口 | 分配名字；同时建 `VkPipelineLayout`（descriptor set layout 先定 1 sampler + 1 uniform 块） |
+| `lime_gl_attach_shader` | Shader.cpp:360/361（VS、FS 各一次） | 记录两段 shader 归属 | 只记关联，不建对象 |
+| `lime_gl_bind_attrib_location` | Shader.cpp:355 `bindAttribLocation(program,0,name)` | 2D 渲染器固定 aPosition=0；位置在链接前锁定 | 写进 program 的 attribute 表，pipeline 的 vertex input 与之一致 |
+| `lime_gl_link_program` | Shader.cpp:362 | 唯一的 pipeline 创建时机 | 用两段 SPIR-V 建 module + graphics pipeline；也可延迟到首次 draw 并缓存 |
+| `lime_gl_get_program_info_log` | Shader.cpp:367 | 与 shader 日志同理，链接失败时拼接错误 | 缓存 pipeline/链接错误串 |
+| `lime_gl_get_programi` | Shader.cpp:364 查 `LINK_STATUS` | 链接失败会提前返回 | 返回 shim 元数据里的链接状态 |
+
+#### C. 位置查询（2）
+
+| 入口 | 运行时触发点 | 为什么必需 | 补齐要点 |
+| --- | --- | --- | --- |
+| `lime_gl_get_attrib_location` | Shader.cpp:528/540/552/564（4 次） | 渲染器要靠它给 position/textureCoord 找槽位 | 反射表查找；已 `bind` 的优先，未 `bind` 的按声明顺序 |
+| `lime_gl_get_uniform_location` | Shader.cpp:524/536/548/560（4 次） | 后续所有 uniform 写入都以返回值为 key | 返回 shim 自增 id，内部映射到 SPIR-V 的 set/binding/offset；不要直接暴露 GL 风格索引 |
+
+#### D. 绑定与 uniform 上传（6）
+
+| 入口 | 运行时触发点 | 为什么必需 | 补齐要点 |
+| --- | --- | --- | --- |
+| `lime_gl_use_program` | OpenGLRenderer.cpp:552/579 → `setProgram` → NativeOpenGLRenderContext HXLINE 3140~3143 | 每帧换 shader；`setProgram(null)` 也会传 0 | 切换 current program；draw 前 `vkCmdBindPipeline` + `vkCmdBindDescriptorSets` |
+| `lime_gl_uniform1f` | ShaderParameter*.cpp（所有标量 float：`iTime`/`stronk`/`brightness`/`time`/…） | 全作 shader 的标量参数都走这里 | 写 uniform 影子块（std140）或 push constant |
+| `lime_gl_uniform2f` | 所有 `vec2`：`pixel`、`res`、`kWarp`、`uBlocksize`，以及 OpenFL 自动注入的 `openfl_TextureSize` | 分辨率/像素尺寸类 shader 全依赖它 | 按 8 字节对齐写入 |
+| `lime_gl_uniform3f` | `SilhouetteShader.col`（PlayState:4587/4588 实际使用）、`ColorSwapShader.uTime`（编译产物中存在，`src/` 子集未直接引用） | 全部着色器中仅这两处声明 `vec3` | std140 的 vec3 占 16 字节，不能按 12 字节紧凑写 |
+| `lime_gl_uniform1i` | ① Shader.cpp:438 sampler2D 的纹理单元；② 所有 `bool` uniform（`hasTransform`/`openfl_HasColorTransform` 等按 0/1 传）；③ `WiggleShader.effectType` | 一个入口承担 sampler/bool/int 三种语义 | 按 uniform 反射类型分流：sampler → 记 unit，绘制时绑 descriptor；bool/int → 写整型字段 |
+| `lime_gl_uniform_matrix4fv` | `ShaderParameter.cpp` 的 MATRIX4x4 分支 → `WebGLRenderContext_Impl_.cpp:175` → `WebGL2RenderContext_Impl_.cpp:4873` → `lime_gl_uniform_matrix4fv` | `openfl_Matrix` 每帧更新，是所有 2D 绘制的基础 | `transpose=false` 时按列主序直接拷进 std140（GL 与 SPIR-V 都是列主序） |
+
+> 运行时实测的 uniform 类型只有：`bool`、`float`、`vec2`、`vec3`、`sampler2D`、`mat4`；`int` 仅 1 个（Wiggle）。没有 `vec4`、`ivec2/3/4`、`uvec*`、`mat2/mat3`。这就是 19 项封顶的直接原因。
+
+### 13.3 排除的 58 个
+
+| 组 | 数量 | 入口 | 排除依据 |
+| --- | --- | --- | --- |
+| 生命周期/有效性 | 5 | `lime_gl_detach_shader`、`lime_gl_delete_shader`、`lime_gl_delete_program`、`lime_gl_is_shader`、`lime_gl_is_program` | 2D 路径只创建不销毁；编译产物里这些调用只出现在 lime 自己的包装层和 display3D 的 `Program3D`。泄漏可延后处理 |
+| 诊断查询 | 4 | `lime_gl_get_shader_source`、`lime_gl_get_shaderiv`、`lime_gl_get_programiv`、`lime_gl_get_attached_shaders` | Shader.cpp 只用标量形态的 `getShaderParameter`/`getProgramParameter`，从不回读源或附件列表 |
+| 反射 / UBO | 8 | `lime_gl_get_active_uniform`、`lime_gl_get_active_uniform_block_name`、`lime_gl_get_active_uniform_blocki`、`lime_gl_get_active_uniform_blockiv`、`lime_gl_get_uniform_block_index`、`lime_gl_get_active_uniformsiv`、`lime_gl_uniform_block_binding`、`lime_gl_get_frag_data_location` | 本作没有 UBO、没有 SSBO、没有 MRT；frag 输出固定 location 0。反射表在 shim 内部做即可，不需要这些对外入口 |
+| 二进制 / 离线编译 | 5 | `lime_gl_release_shader_compiler`、`lime_gl_program_parameteri`、`lime_gl_program_binary`、`lime_gl_get_program_binary`、`lime_gl_shader_binary` | 运行时不做 program 缓存/加载，每次启动重新编译 |
+| uniform 回读 | 6 | `lime_gl_get_uniformf`、`lime_gl_get_uniformfv`、`lime_gl_get_uniformi`、`lime_gl_get_uniformiv`、`lime_gl_get_uniformui`、`lime_gl_get_uniformuiv` | 无调用点；Vulkan 也无法回读已提交的 uniform，只能读影子副本 |
+| float 数组 | 4 | `lime_gl_uniform1fv`、`lime_gl_uniform2fv`、`lime_gl_uniform3fv`、`lime_gl_uniform4fv` | 没有 `float[]` uniform；数组写入是按分量走 `uniform*` 的 |
+| int 向量标量 | 3 | `lime_gl_uniform2i`、`lime_gl_uniform3i`、`lime_gl_uniform4i` | 没有 `ivec2/3/4`；int uniform 只有 1 个标量（Wiggle `effectType`） |
+| int 数组 | 4 | `lime_gl_uniform1iv`、`lime_gl_uniform2iv`、`lime_gl_uniform3iv`、`lime_gl_uniform4iv` | 同上，无 `ivec` 数组 |
+| uint 全部 | 8 | `lime_gl_uniform1ui`、`lime_gl_uniform1uiv`、`lime_gl_uniform2ui`、`lime_gl_uniform2uiv`、`lime_gl_uniform3ui`、`lime_gl_uniform3uiv`、`lime_gl_uniform4ui`、`lime_gl_uniform4uiv` | 全部 shader 源码中 `uvec`/`uint` uniform 数为 0 |
+| vec4 标量 | 1 | `lime_gl_uniform4f` | 唯一 `vec4` 是 `OverlayShader.uBlendColor`，但 `OverlayShader` 未出现在编译产物里（死代码）。若将来启用该 shader，这是第一个要补的 |
+| 矩阵变体 | 8 | `lime_gl_uniform_matrix2fv`、`lime_gl_uniform_matrix2x3fv`、`lime_gl_uniform_matrix2x4fv`、`lime_gl_uniform_matrix3fv`、`lime_gl_uniform_matrix3x2fv`、`lime_gl_uniform_matrix3x4fv`、`lime_gl_uniform_matrix4x2fv`、`lime_gl_uniform_matrix4x3fv` | 所有 shader 的矩阵只有 `mat4`（`openfl_Matrix`），其余矩阵类型编译产物中为 0 |
+| 其他单值 | 2 | `lime_gl_validate_program`、`lime_gl_get_shader_precision_format` | 无调用点；2D 渲染器不主动校验 program，也不查询精度 |
+
+### 13.4 补齐 19 个之后仍然画不出画面：前置依赖
+
+19 项只解决"shader 能编译、uniform 能上传、pipeline 能切换"。真正上屏还缺另外三组入口，**建议 shader 路与这三路同时排期**：
+
+| 依赖模块 | 必需入口 | 现状 | 说明 |
+| --- | --- | --- | --- |
+| 缓冲/顶点 | `create_buffer`、`bind_buffer`、`buffer_data`、`vertex_attrib_pointer`、`enable_vertex_attrib_array`、`disable_vertex_attrib_array`、`draw_arrays`、`draw_elements` | `buffer_data` 只写 CPU `vector`（GPU 无 `VkBuffer`）；属性入口是空桩 | `Shader.cpp:795-805` 在 shader 初始化时就 `createBuffer` + `bufferData`；`ShaderParameter` 每个参数都会 `vertexAttribPointer` + `enableVertexAttribArray`。没有真实 GPU 顶点缓冲，pipeline 的 vertex input 无法成立 |
+| 纹理 | `active_texture`、`bind_texture`、`tex_image_2d`、`tex_parameteri` | 前三个是"记录"或"真实现"，`tex_parameteri` 空桩 | `uniform1i` 只记 unit，最终要靠 descriptor 的 `imageView+sampler` 才能采样；sampler 参数缺失会导致过滤/包裹错误 |
+| 状态 | `enable`/`disable`（BLEND）、`blend_func`、`viewport`、`scissor`、`clear`/`clear_color` | 多为"记录"，pipeline 固定值覆盖 | 混合与裁剪直接决定画面正确性；viewport 若不提交，`vkCmdSetViewport` 永远是默认值 |
+| FBO/renderbuffer | `create_framebuffer`、`bind_framebuffer`、`framebuffer_texture2D`、`check_framebuffer_status`、`delete_framebuffer` | 远程 main 全空桩；本地 `gl_fbo.cpp` 已实现 22/24 | **本作的 shader 绝大多数以 `ShaderFilter` 形式挂在摄像机上**（PlayState 1314/2395/4587/5608/5659/5682 等），运行路径是"渲染到离屏 → 全屏 quad + shader → 合成"。`check_framebuffer_status` 返回 0 会让 OpenFL 直接跳过整个 filter 链，19 项补完也看不到任何后处理效果 |
+
+### 13.5 验收建议
+
+1. **单 shader 冒烟**：先拿 OpenFL 内置 `DisplayObjectShader`（只有 `openfl_Matrix` + `sampler2D` + `openfl_TextureSize`）画一个带纹理的三角形，验证 A+B+C+D 全链路；它不依赖 `src/*.hx` 里的任何自定义 shader。
+2. **自定义 shader 冒烟**：`AngelShader`（`iTime`/`stronk`/`pixel`）只覆盖 `uniform1f` + `uniform2f`，是最短的第二个验证点。
+3. **filter 冒烟**：`SilhouetteShader`（`uniform3f`）或 `BrightnessContrastShader` 挂 `ShaderFilter`，同时验证 FBO 与 sampler descriptor。
+4. **`WiggleShader`** 最后验：它是唯一用到 `uniform1i` 整型分支的 shader，可确认 sampler 与 int 两种语义没有被混在一起。
+
+> 覆盖率口径提醒：`tools/coverage/coverage.ps1` 仍按 `gl_compat.h` 的 77 个入口统计，这是为了和头文件一一对应、便于全量核对；**本节的 19 个是人工核定的"运行时必需集"，两者不是同一口径**。汇报进度时建议同时给两个数：`77 项里已补 X 个` 与 `19 项必需里已补 Y 个`。
+
+### 13.6 与本地实现的交叉验证
+
+写入本节时对本地 `native_vulkan/gl_shader.cpp`（2026-11-07 00:14）重跑脚本，结果与上面的运行时分析**边界完全重合**：
+
+| 项 | 实测 |
+| --- | --- |
+| 13.2 的 19 个必需入口 | 19/19 全部有实现（glslang 运行时编译 + `VkShaderModule` + pipeline/descriptor/uniform buffer） |
+| shader/program 模块剩余空桩 | 正好 6 个：`get_program_binary`、`program_binary`、`program_parameteri`、`release_shader_compiler`、`shader_binary`、`uniform_block_binding`——即 13.3 的"二进制/离线编译"5 个 + "反射/UBO"组的 `uniform_block_binding` |
+| 结论 | 不是巧合：实现者停手的位置，正好是运行时不需要的边界。剩余 6 个可以长期保持空桩 |
+
+两点提醒：
+
+1. **"19/19 已实现"不等于"shader 已能上屏"**：13.4 的缓冲/纹理/状态/FBO 依赖没打通时，`gl_shader.cpp` 建出来的 pipeline 仍不会被实际消费——当前 draw 路径还是 `VkRenderer::DrawRaw` 的固定 pipeline。下一步验收请按 13.5 的顺序走。
+2. **链接冲突**：上述 6 个入口在 `gl_shader.cpp` 与 `gl_stubs.cpp` 中同时存在定义，合并前需从 `gl_stubs.cpp` 删除，否则会重复符号（与第 12 节约定一致）。
