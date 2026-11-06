@@ -140,6 +140,8 @@ jobs:
           # vulkan_core.h 会引用 vk_video/ 下的视频编码头，两个目录都要复制
           Copy-Item vkh\include\vulkan C:\lime-src\project\include\ -Recurse -Force
           Copy-Item vkh\include\vk_video C:\lime-src\project\include\ -Recurse -Force
+          # hxcpp 编译只认 lime 自己的 -Iinclude，glslang 头也照同样方式落进去
+          Copy-Item C:\glslang\include\glslang C:\lime-src\project\include\ -Recurse -Force
           $env:LIME_SRC = "C:\lime-src"
           python native_vulkan\patch_lime.py
           haxelib dev lime C:\lime-src
