@@ -13,19 +13,19 @@ class YCBUEndingShader extends FlxShader
         #define LINES3 6.0
         #define MAX_LINES 20.0
 
-        const uint k = 1103515245U;
+        // const uint k = 1103515245U;  // ES 1.00 不支持 uint / 后缀 U，已移除
 
         uniform float seed;
 
         uniform float intensity;
 
         //prng func, from https://stackoverflow.com/a/52207531
-        vec3 hash(uvec3 x) {
-            x = ((x>>8U)^x.yzx)*k;
-            x = ((x>>8U)^x.yzx)*k;
-            x = ((x>>8U)^x.yzx)*k;
-            
-            return vec3(x)*(1.0/float(0xffffffffU));
+        // ES 1.00 不支持 uvec3 / 位移 / 按位异或，改用纯浮点 hash
+        vec3 hash(vec3 x) {
+            x = fract(x * 0.1031);
+            x += dot(x, x.yzx + 33.33);
+            x = fract((x.xxy + x.yzz) * x.zyx);
+            return fract(x * 43758.5453);
         }
 
         float offset(vec2 co) {
@@ -35,7 +35,7 @@ class YCBUEndingShader extends FlxShader
             return sin(co.y * (intensity - 0.6) * (intensity - 0.6));
         }
 
-        float random(in vec2 st) {
+        float random(vec2 st) {
             return fract(sin(dot(st.xy,
             vec2(12.9898,78.233)))*
             43758.5453123);
@@ -54,9 +54,10 @@ class YCBUEndingShader extends FlxShader
             float gl1 = glitch(uv, LINES1, floor(seed*2.0));
             float gl2 = glitch(uv, LINES2, floor(seed*5.0));
             float gl3 = glitch(uv, LINES3, floor(seed));
-            float d1 = round(gl1) * (gl1);
-            float d2 = round(gl2) * (gl2);
-            float d3 = round(gl3) * (0.75 - gl3);
+            // ES 1.00 没有 round()，用 floor(x + 0.5) 等价替代
+            float d1 = floor(gl1 + 0.5) * (gl1);
+            float d2 = floor(gl2 + 0.5) * (gl2);
+            float d3 = floor(gl3 + 0.5) * (0.75 - gl3);
             
             uv.x += d1;
             uv.x -= d2;
@@ -67,7 +68,7 @@ class YCBUEndingShader extends FlxShader
             float b = flixel_texture2D(bitmap, uv-(d1-d2+d3)/6.0).b;
             gl_FragColor = vec4(r, g, b, 1);
             if (intensity > 0.5) {
-                gl_FragColor = mix(gl_FragColor, vec4(hash(uvec3(fragCoord.xy, seed * 100.0)), 1), (intensity - 0.5) / 0.5);
+                gl_FragColor = mix(gl_FragColor, vec4(hash(vec3(fragCoord.xy, seed * 100.0)), 1), (intensity - 0.5) / 0.5);
                 float finalCol = gl_FragColor.r*0.59 + gl_FragColor.g*0.3 + gl_FragColor.b*0.11;
                 gl_FragColor = mix(gl_FragColor, vec4(finalCol, finalCol, finalCol, 1), (intensity - 0.5) / 0.5);
             }
