@@ -60,6 +60,10 @@ int main() {
         stbi_image_free(px);
     }
 
+    uint32_t rtId = renderer.CreateRenderTarget(1280, 720);
+    if (!rtId) { printf("[demo] render target failed\n"); return 1; }
+    printf("[demo] render target id=%u\n", rtId);
+
     MSG msg{};
     bool run = true;
     float t = 0.0f;
@@ -87,8 +91,8 @@ int main() {
         renderer.SetUniform(8, (float)texW[0]);
         renderer.SetUniform(9, (float)texH[0]);
 
-        renderer.BeginFrame(0.03f, 0.04f, 0.06f, 1.0f);
-
+        // pass 1: scene -> offscreen target
+        renderer.BindRenderTarget(rtId, 0.03f, 0.04f, 0.06f, 1.0f);
         for (int i = 0; i < 320; i++) {
             int g = i / 80;
             int k = i % 80;
@@ -97,8 +101,12 @@ int main() {
             float sz = 0.11f + 0.04f * (float)(k % 4);
             renderer.DrawSprite(texIds[g], px, py, sz, sz, 0.0f, 0.0f, 1.0f, 1.0f);
         }
+        renderer.PresentTarget();
 
-        renderer.EndFrame();
+        // pass 2: composite target onto backbuffer
+        renderer.BindRenderTarget(0, 0.0f, 0.0f, 0.0f, 1.0f);
+        renderer.DrawSprite(rtId, 0.0f, 0.0f, 2.0f, 2.0f, 0.0f, 0.0f, 1.0f, 1.0f);
+        renderer.PresentTarget();
 
         frames++;
         DWORD now = GetTickCount();
