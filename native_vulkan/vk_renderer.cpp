@@ -1151,8 +1151,9 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
     o.clearG = g;
     o.clearB = b;
     o.clearA = a;
-    for (auto& t : o.textures) t.verts.clear();
-    for (auto& t : o.targets) t.verts.clear();
+    // 注意：切换目标时不能清空顶点列表。OpenFL 的 filter 链最后一个 pass 常常是
+    // “先绑后缓冲、再画一张全屏 quad”，一清就把这批顶点吃掉 → 屏幕只剩清屏色。
+    // 顶点在 EndFrame 提交后由 EndFrame 自己清。
     if (id == 0) {
         VkResult ar = g_acquire(o.dev, o.swapchain, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE, &o.frameImageIndex);
         if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) return false;
@@ -1334,7 +1335,7 @@ void VkRenderer::EndFrame() {
     {
         static uint64_t s_frames = 0;
         s_frames++;
-        if (s_frames == 1 || s_frames % 60 == 0) {
+        if (s_frames == 1 || s_frames % 30 == 0 || o.currentTarget == 0) {
             float first[4] = {0, 0, 0, 0};
             if (totalVerts > 0) memcpy(first, o.vbPtr, sizeof(first));
             fprintf(stderr, "[vk] frame=%llu verts=%zu ranges=%zu target=%u first=(%.1f,%.1f,%.2f,%.2f)\n",
