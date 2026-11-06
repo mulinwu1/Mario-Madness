@@ -335,6 +335,11 @@ int lime_gl_create_buffer() {
 void lime_gl_bind_buffer(int target, int buffer) {
     if (target == 0x8892) g_boundArrayBuffer = buffer;
     else if (target == 0x8893) g_boundElementBuffer = buffer;
+    static int s_bindLog = 0;
+    if (s_bindLog < 60) {
+        fprintf(stderr, "[bindbuf] target=0x%x buf=%d\n", target, buffer);
+        s_bindLog++;
+    }
 }
 
 void lime_gl_buffer_data(int target, int size, double data, int usage) {
@@ -347,6 +352,15 @@ void lime_gl_buffer_data(int target, int size, double data, int usage) {
     b.data.assign((size_t)size, 0);
     const unsigned char* src = (const unsigned char*)(uintptr_t)data;
     if (src && size > 0) memcpy(b.data.data(), src, (size_t)size);
+    static int s_bdLog = 0;
+    if (s_bdLog < 40) {
+        const float* fp = (const float*)(uintptr_t)data;
+        bool canRead = src && size >= 16;
+        fprintf(stderr, "[bufdata] name=%d size=%d src=%p f0=%.2f f1=%.2f f2=%.2f f3=%.2f\n",
+                name, size, (void*)src, canRead ? fp[0] : 0.0f, canRead ? fp[1] : 0.0f,
+                canRead ? fp[2] : 0.0f, canRead ? fp[3] : 0.0f);
+        s_bdLog++;
+    }
 }
 
 void lime_gl_buffer_sub_data(int target, int offset, int size, double data) {
@@ -359,6 +373,15 @@ void lime_gl_buffer_sub_data(int target, int offset, int size, double data) {
     if (!src || size <= 0) return;
     if ((size_t)(offset + size) > b.data.size()) return;
     memcpy(b.data.data() + offset, src, (size_t)size);
+    static int s_bsLog = 0;
+    if (s_bsLog < 40) {
+        const float* fp = (const float*)src;
+        bool canRead = size >= 16;
+        fprintf(stderr, "[bufsub] name=%d off=%d size=%d f0=%.2f f1=%.2f f2=%.2f f3=%.2f\n",
+                name, offset, size, canRead ? fp[0] : 0.0f, canRead ? fp[1] : 0.0f,
+                canRead ? fp[2] : 0.0f, canRead ? fp[3] : 0.0f);
+        s_bsLog++;
+    }
 }
 
 void lime_gl_delete_buffer(int buffer) {
@@ -378,6 +401,12 @@ void lime_gl_vertex_attrib_pointer(int index, int size, int type, bool normalize
     // 没绑 VBO 时，offset 本身就是 client-side 数组的内存地址；不能拿它当字节偏移
     g_attrs[index].client = (g_boundArrayBuffer == 0);
     g_attrs[index].clientPtr = (uintptr_t)offset;
+    static int s_apLog = 0;
+    if (s_apLog < 60) {
+        fprintf(stderr, "[attrib] idx=%d size=%d type=0x%x stride=%d off=%.0f buf=%d en=%d\n",
+                index, size, type, stride, offset, g_boundArrayBuffer, g_attrs[index].enabled ? 1 : 0);
+        s_apLog++;
+    }
 }
 
 void lime_gl_enable_vertex_attrib_array(int index) {
@@ -561,6 +590,13 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
                      minX, maxX, minY, maxY, strideP, g_attrs[0].offset,
                      uvBuf, strideU, g_attrs[1].offset,
                      g_attrs[0].buffer, g_attrs[1].buffer, posClient ? 1 : 0, uvClient ? 1 : 0);
+            static int s_raw2 = 0;
+            if (s_raw2 < 6 && !posClient && pBytes >= pBase0 + 32) {
+                const float* f = (const float*)(pp + pBase0);
+                fprintf(stderr, "[rawpos] ie tex=%d off=%zu f=[%.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f]\n",
+                        texName, pBase0, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
+                s_raw2++;
+            }
         }
         s_uvdbg2++;
     }
