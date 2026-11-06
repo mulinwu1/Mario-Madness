@@ -659,7 +659,10 @@ void gl_vk_present_frame () {
             bool bound = r->BindRenderTarget (0, c[0], c[1], c[2], c[3]);
             // 源优先取真正写过几何的目标；只 clear 过、没写几何的目标会呈黑纹帧。
             uint32_t src = r->LastGeometryTarget ();
-            if (src < 1000) src = g_currentTarget;
+            if (src < 1000) {
+                src = g_currentTarget;
+                fprintf (stderr, "[glvk] blit fallback cur=%u -> src=%u\n", g_currentTarget, src);
+            }
             int tw = 0, th = 0;
             if (bound && r->GetRenderTargetSize (src, &tw, &th) && tw > 0 && th > 0) {
                 float W = (float)r->ScreenWidth ();
@@ -680,7 +683,13 @@ void gl_vk_present_frame () {
         } else if (g_lastTarget >= 1000 && !r->FrameHasGeometry ()) {
             // 已经绑回后缓冲但这一帧没往它上面画任何东西：把最后一张离屏图补上，
             // 否则屏幕只剩清屏色（这就是长时间黑屏的直接原因）
-            uint32_t src = g_lastTarget;
+            // 同一缺陷在这一支同样存在：g_lastTarget 只表示"最后绑定过"，与几何无关。
+            uint32_t src = r->LastGeometryTarget ();
+            if (src < 1000) {
+                src = g_lastTarget;
+                fprintf (stderr, "[glvk] blit fallback cur=0 last=%u -> src=%u\n",
+                         g_lastTarget, src);
+            }
             float c[4];
             GetClearColor (c);
             int tw = 0, th = 0;
@@ -702,6 +711,8 @@ void gl_vk_present_frame () {
             }
         }
         r->EndFrame ();
+        // 本帧结束即失效：下一帧必须由新的提交重新标记，避免取到上一帧的目标
+        r->ResetLastGeometryTarget ();
     }
     g_currentTarget = 0;
     g_lastTarget = 0;

@@ -38,6 +38,8 @@ public:
     bool FrameHasGeometry() const;
     // 最后一次真正收到顶点（vertexCount>0）并已提交的离屏目标（0 = 没有）
     uint32_t LastGeometryTarget() const;
+    // present 收尾时复位，避免跨帧取到上一帧的目标
+    void ResetLastGeometryTarget();
 
     // raw vertex submission (GL-style): verts are x,y,u,v float4 per vertex
     void DrawRaw(uint32_t texId, const float* verts, int vertexCount);

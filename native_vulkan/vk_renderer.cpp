@@ -1221,6 +1221,10 @@ uint32_t VkRenderer::LastGeometryTarget() const {
     return impl->lastGeomTarget;
 }
 
+void VkRenderer::ResetLastGeometryTarget() {
+    impl->lastGeomTarget = 0;
+}
+
 bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float a) {
     Impl& o = *impl;
     // 同一目标重复绑定（OpenFL 每个 pass 开头都会 glClear，gl_vk_handle_clear 又会 Bind 一次）
