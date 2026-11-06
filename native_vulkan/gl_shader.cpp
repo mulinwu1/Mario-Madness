@@ -15,7 +15,7 @@
 #include <cstddef>
 #include <stdint.h>
 
-#ifdef _MSC_VER
+#if defined (_MSC_VER) && defined (_WIN64)
 // glslang 16.6.0 官方静态库是 /MD 构建，直接链接进 /MT 的 lime.ndll 会报
 // LNK2038 RuntimeLibrary 不匹配；因此官方库由 glslang_shim 包成 lime_glslang.dll，
 // 这里只链它的 import lib（import lib 不携带 CRT 标记）。DLL 与 ndll 同目录部署。
@@ -952,6 +952,9 @@ static std::string BuildStageSource (const ScannedStage& stage, int shaderStage,
 // glslang 封装（运行时 GLSL -> SPIR-V）
 // ---------------------------------------------------------------------------
 
+#if defined (_WIN64)
+// 32 位 ndll 不跑 Vulkan 路径；glslang 官方包只有 x86_64 库，
+// 这些代码必须整体编译期剔除，否则 x86 链接会 LNK2019/LNK4272。
 static bool g_glslangReady = false;
 
 static void EnsureGlslang () {
@@ -964,8 +967,15 @@ static void EnsureGlslang () {
 	}
 
 }
+#endif
 
 static bool CompileStage (const std::string& code, int shaderStage, std::vector<uint32_t>* spirv, std::string* log) {
+
+#if !defined (_WIN64)
+	// 32 位 ndll 不跑 Vulkan 路径，直接判失败。
+	*log += "glslang unavailable (x86 build)";
+	return false;
+#else
 
 	EnsureGlslang ();
 
@@ -1045,6 +1055,7 @@ static bool CompileStage (const std::string& code, int shaderStage, std::vector<
 	glslang_program_delete (program);
 	glslang_shader_delete (shader);
 	return true;
+#endif
 
 }
 
@@ -2170,7 +2181,9 @@ void gl_shader_vk_register (const GLShaderVkContext* context) {
 
 	if (!context || !context->device || !context->getDeviceProcAddr) return;
 
+#if defined (_WIN64)
 	EnsureGlslang ();
+#endif
 
 	// 槽位/描述符属于旧设备，必须在换上下文之前销毁
 	if (g_vkReady && g_vkCtx.device != context->device) gl_shader_vk_unregister ();
