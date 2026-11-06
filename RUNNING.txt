@@ -1,0 +1,46 @@
+Mario Madness - Vulkan lime 测试说明
+================================================
+
+【测试目录】
+默认: <仓库根目录>\vk_test
+本机: C:\Users\yuu\Documents\Trae-CN\temp_20261106_01\vk_test
+（tools\deploy_vk_test.ps1 的 -TestDir 默认值就是 <仓库根>\vk_test）
+
+【启动】
+双击 vk_test\launch-vk.bat（会自动抓日志），或直接运行 vk_test\Mario.exe。
+exe 必须和 lime.ndll 在同一目录；assets/、mods/、manifest/、plugins/、libvlc*.dll
+由 deploy 脚本从基础目录 D:\mygame\Marios Madness 补齐（CI 产物里没有 1.75GB 素材）。
+
+【日志】
+vk_test\vk_stdout.log   —— 标准输出
+vk_test\vk_stderr.log   —— 标准错误（Vulkan 初始化失败、断言、崩溃信息通常在这里）
+launch-vk.bat 退出后会自动打印 stderr 末尾，并显示 exit code。
+
+【这次重点看什么（按优先级）】
+1) 能不能起来
+   - 进程存活超过 10 秒、出现游戏窗口 = 起来了
+   - 一闪就退：看 vk_stderr.log 最后 20 行和 launch-vk.bat 显示的 exit code
+   - exit code 0xC0000005(3221225477) / 0xC0000409 基本都是原生层崩溃
+
+2) 有没有黑屏
+   - 有窗口但全黑：说明 swapchain 建立了但没画出来，属于渲染层问题
+   - 完全没窗口：更可能是 Vulkan 设备/表面创建失败
+
+3) 帧率
+   - 用 Fraps/RTSS 或游戏内 FPS 显示看数值；目标是接近原 OpenGL 版本
+   - 明显掉帧先看是否每帧都在重建纹理/管线（后面会加日志计数）
+
+4) device lost
+   - vk_stderr.log / 系统事件日志里出现 VK_ERROR_DEVICE_LOST（-4）
+   - 常见诱因：一次性分配超大纹理；这类会用 8192->4096 降级兜底
+
+5) 日志里的代表性失败行
+   - "vulkan-1.dll missing"        -> 机器没装 Vulkan 运行时
+   - "instance failed"             -> 实例/扩展创建失败
+   - "no suitable GPU / surface"   -> 显卡或 surface 不支持
+   - "vkCreateInstance" 在 lime.ndll 里查不到 -> 拿到的不是 Vulkan 版 ndll（deploy 脚本会先校验这一步）
+
+【已知限制（这轮先别当 bug 报）】
+- 自定义 shader、FBO、顶点色、blend 语义还在收口，画面效果可能和原版不一致
+- 大纹理 8192x8192 会降级到 4096x4096
+- 安卓移植未开始（先 PC 验证）
