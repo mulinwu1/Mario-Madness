@@ -2478,7 +2478,8 @@ bool gl_shader_write_sampler (int program, bool offscreen, const char* name, VkI
 
 static std::string HxToString (HxString string) {
 
-	return std::string (string.__s.c_str ());
+	// hxcpp 的 HxString 是 const char*（不是带 __s 的包装类）
+	return string ? std::string (string) : std::string ();
 
 }
 
@@ -2561,7 +2562,13 @@ void lime_gl_compile_shader (int shader) {
 
 	std::string log;
 	target->compileOk = CompileSingleStage (target, &log);
-	if (!target->compileOk) target->log = log;
+	if (!target->compileOk) {
+
+		target->log = log;
+		fprintf (stderr, "[gl_shader] compile FAILED type=0x%x: %s\n", target->glType,
+			log.empty () ? "(no log)" : log.c_str ());
+
+	}
 
 }
 
@@ -2683,6 +2690,21 @@ void lime_gl_link_program (int program) {
 	if (!target) return;
 
 	target->linkOk = BuildProgram (target);
+
+	// 成功只报第一次（滤镜可能反复建 program，不能刷屏）；失败每次都报
+	static bool reportedFirstLink = false;
+	if (target->linkOk && !reportedFirstLink) {
+
+		reportedFirstLink = true;
+		fprintf (stderr, "[gl_shader] link ok program=%d uniforms=%d ubo=%u\n", program,
+			(int) target->uniforms.size (), target->uniformSize);
+
+	} else if (!target->linkOk) {
+
+		fprintf (stderr, "[gl_shader] link FAILED program=%d: %s\n", program,
+			target->log.empty () ? "(no log)" : target->log.c_str ());
+
+	}
 
 }
 
