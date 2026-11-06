@@ -1075,6 +1075,13 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount) {
         vertsPtr = &t.verts;
     }
     if (vertexCount <= 0) return;
+    if (o.currentTarget == 0) {
+        static int s_dbg = 0;
+        if (s_dbg < 12 || s_dbg % 120 == 0) {
+            fprintf(stderr, "[vk] draw->bb tex=%u n=%d\n", texId, vertexCount);
+        }
+        s_dbg++;
+    }
     // NDC 必须按“当前渲染目标”的尺寸换算；用交换链尺寸会让离屏 pass 整体错位
     float w = (float)o.extent.width;
     float h = (float)o.extent.height;
