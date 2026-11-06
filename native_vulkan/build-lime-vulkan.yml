@@ -8,13 +8,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
-      # 仓库有 1.8GB(assets)，编 lime 只需要 native_vulkan/ 几十 KB，稀疏检出可省掉几分钟
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            native_vulkan
-          sparse-checkout-cone-mode: false
 
       # 缓存三块最耗时的东西：haxelib 库、Vulkan 头、lime 源码(含 SDL 子模块)+编译中间产物
       # 命中后 clone / 下载 / SDL 重编都能跳过
@@ -96,11 +91,9 @@ jobs:
           }
           New-Item -ItemType Directory -Force -Path C:\lime-src\project\src\graphics\vulkan | Out-Null
           Copy-Item native_vulkan\vk_renderer.h, native_vulkan\vk_renderer.cpp, native_vulkan\gl_core.cpp, native_vulkan\gl_compat.h, native_vulkan\gl_vk_bridge.h C:\lime-src\project\src\graphics\vulkan\ -Force
-          if (-not (Test-Path C:\lime-src\project\include\vulkan\vulkan.h)) {
-            Copy-Item vkh\include\vulkan C:\lime-src\project\include\ -Recurse -Force
-          } else {
-            Write-Host "vulkan headers already in place"
-          }
+          # vulkan_core.h 会引用 vk_video/ 下的视频编码头，两个目录都要复制
+          Copy-Item vkh\include\vulkan C:\lime-src\project\include\ -Recurse -Force
+          Copy-Item vkh\include\vk_video C:\lime-src\project\include\ -Recurse -Force
           $env:LIME_SRC = "C:\lime-src"
           python native_vulkan\patch_lime.py
           haxelib dev lime C:\lime-src
