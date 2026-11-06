@@ -69,3 +69,52 @@ else:
     sys.exit(1)
 
 print("done")
+
+# 4) 激活 Vulkan：窗口创建后初始化，ContextFlip 里提交
+sdl = os.path.join(LIME, "project", "src", "backends", "sdl", "SDLWindow.cpp")
+if os.path.exists(sdl):
+    s = open(sdl, encoding="utf-8").read()
+    if "gl_vk_c.h" in s:
+        print("SDLWindow.cpp already patched")
+    else:
+        anchor = '#include "../../graphics/opengl/OpenGLBindings.h"'
+        if anchor in s:
+            s = s.replace(anchor, anchor + '\n#include "../../graphics/vulkan/gl_vk_c.h"', 1)
+        else:
+            print("WARN: SDLWindow include anchor not found")
+
+        create_anchor = "\t\tif (!sdlWindow) {"
+        inject_init = (
+            "\t\t#ifdef HX_WINDOWS\n"
+            "\t\t{\n"
+            "\t\t\tSDL_SysWMinfo wmInfo;\n"
+            "\t\t\tSDL_VERSION (&wmInfo.version);\n"
+            "\t\t\tif (sdlWindow && SDL_GetWindowWMInfo (sdlWindow, &wmInfo)) {\n"
+            "\t\t\t\tgl_vk_init ((void*)wmInfo.info.win.window, width, height);\n"
+            "\t\t\t}\n"
+            "\t\t}\n"
+            "\t\t#endif\n\n"
+        )
+        if create_anchor in s:
+            s = s.replace(create_anchor, inject_init + create_anchor, 1)
+        else:
+            print("WARN: SDLWindow create anchor not found")
+
+        flip_anchor = "void SDLWindow::ContextFlip () {"
+        inject_flip = (
+            "void SDLWindow::ContextFlip () {\n\n"
+            "\t\tif (gl_vk_active ()) {\n\n"
+            "\t\t\tgl_vk_end_frame ();\n"
+            "\t\t\treturn;\n\n"
+            "\t\t}\n"
+        )
+        if flip_anchor in s:
+            s = s.replace(flip_anchor, inject_flip, 1)
+        else:
+            print("WARN: ContextFlip anchor not found")
+
+        open(sdl, "w", encoding="utf-8").write(s)
+        print("patched SDLWindow.cpp for vulkan")
+else:
+    print("WARN: SDLWindow.cpp not found")
+
