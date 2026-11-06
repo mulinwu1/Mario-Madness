@@ -881,6 +881,21 @@ bool VkRenderer::SetTextureSampler(uint32_t texId, int minFilter, int magFilter,
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     sci.magFilter = GlFilterToVk(magFilter);
     sci.minFilter = GlFilterToVk(minFilter);
+    // 诊断：实测游戏的采样方式（每个纹理 id 首次设置或参数变化时打印一次）
+    if (texId < 1024) {
+        static uint64_t s_sig[1024] = {0};
+        static bool s_seen[1024] = {false};
+        uint64_t sig = ((uint64_t)(uint32_t)minFilter << 48) | ((uint64_t)(uint32_t)magFilter << 32) |
+                       ((uint64_t)(uint32_t)wrapS << 16) | (uint32_t)wrapT;
+        if (!s_seen[texId] || s_sig[texId] != sig) {
+            s_seen[texId] = true;
+            s_sig[texId] = sig;
+            fprintf(stderr, "[sampler] tex=%u min=0x%x(%s) mag=0x%x(%s) wrapS=0x%x wrapT=0x%x\n",
+                    texId, minFilter, GlFilterToVk(minFilter) == VK_FILTER_NEAREST ? "NEAREST" : "LINEAR",
+                    magFilter, GlFilterToVk(magFilter) == VK_FILTER_NEAREST ? "NEAREST" : "LINEAR",
+                    wrapS, wrapT);
+        }
+    }
     // 目前纹理只有 1 级 mip，mip 模式保持 NEAREST 并把 maxLod 钳到 0，
     // 否则采样器会去取不存在的 level 导致黑边/全黑
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
