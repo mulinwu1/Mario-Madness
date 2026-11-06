@@ -14,7 +14,7 @@ jobs:
       # 仓库有 1.8GB(assets)，编 lime 只需要 native_vulkan/，稀疏检出省掉 checkout 的大头
       # 它只影响 runner 上落地哪些文件，与 actions/cache 的三条缓存路径无关
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           sparse-checkout: |
             native_vulkan
@@ -23,7 +23,7 @@ jobs:
       # 缓存三块最耗时的东西：haxelib 库、Vulkan 头、lime 源码(含 SDL 子模块)+编译中间产物
       # 命中后 clone / 下载 / SDL 重编都能跳过
       - name: Restore build caches
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~\haxelib
@@ -177,7 +177,7 @@ jobs:
           }
 
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lime-vulkan-ndll
           path: |

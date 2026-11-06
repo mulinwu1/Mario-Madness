@@ -670,6 +670,8 @@ void gl_vk_present_frame () {
                 };
                 r->DrawRaw (src, quad, 6);
                 g_backbufferOpen = true;
+                fprintf (stderr, "[glvk] blit cur src=%u %dx%d -> %dx%d\n",
+                         src, tw, th, (int)W, (int)H);
             }
         } else if (g_lastTarget >= 1000 && !r->FrameHasGeometry ()) {
             // 已经绑回后缓冲但这一帧没往它上面画任何东西：把最后一张离屏图补上，
@@ -691,6 +693,8 @@ void gl_vk_present_frame () {
                 };
                 r->DrawRaw (src, quad, 6);
                 g_backbufferOpen = true;
+                fprintf (stderr, "[glvk] blit last src=%u %dx%d -> %dx%d\n",
+                         src, tw, th, (int)W, (int)H);
             }
         }
         r->EndFrame ();
