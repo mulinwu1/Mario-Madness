@@ -1,0 +1,22 @@
+LIBRARY lime_glslang
+EXPORTS
+	glslang_initialize_process
+	glslang_finalize_process
+	glslang_default_resource
+	glslang_shader_create
+	glslang_shader_set_options
+	glslang_shader_preprocess
+	glslang_shader_parse
+	glslang_shader_get_info_log
+	glslang_shader_get_info_debug_log
+	glslang_shader_delete
+	glslang_program_create
+	glslang_program_add_shader
+	glslang_program_link
+	glslang_program_get_info_log
+	glslang_program_get_info_debug_log
+	glslang_program_delete
+	glslang_program_SPIRV_generate
+	glslang_program_SPIRV_get_messages
+	glslang_program_SPIRV_get_size
+	glslang_program_SPIRV_get_ptr

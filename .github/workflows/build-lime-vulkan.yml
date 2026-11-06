@@ -29,6 +29,7 @@ jobs:
             ~\haxelib
             vkh
             C:\lime-src
+            C:\glslang
           key: lime-vk-v2-${{ runner.os }}
           restore-keys: |
             lime-vk-v2-
@@ -85,6 +86,42 @@ jobs:
           }
           Test-Path vkh\include\vulkan\vulkan.h
 
+      # glslang 16.6.0 官方 Windows 静态库是 /MD 构建，直接链接进 hxcpp 的 /MT ndll 会
+      # 报 LNK2038 RuntimeLibrary 不匹配。所以这里把官方库包成一个独立 DLL
+      # (lime_glslang.dll)，ndll 侧只链它的 import lib，两边 CRT 互不干扰。
+      - name: Fetch glslang 16.6.0 and build lime_glslang.dll
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = 'C:\glslang\glslang166.zip'
+          $hdr = 'C:\glslang\include\glslang\Include\glslang_c_interface.h'
+          if (-not (Test-Path $hdr)) {
+            New-Item -ItemType Directory -Force -Path C:\glslang | Out-Null
+            Invoke-WebRequest -Uri "https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-windows-x86_64-release.zip" -OutFile $zip -UseBasicParsing
+            Expand-Archive -Path $zip -DestinationPath C:\glslang -Force
+          } else {
+            Write-Host "glslang 16.6.0 cached"
+          }
+          foreach ($l in @('glslang.lib','glslang-default-resource-limits.lib','SPIRV-Tools.lib','SPIRV-Tools-opt.lib')) {
+            if (-not (Test-Path "C:\glslang\lib\$l")) { throw "glslang package missing $l" }
+          }
+          Write-Host "glslang.lib bytes: $((Get-Item 'C:\glslang\lib\glslang.lib').Length)"
+
+          if (-not (Test-Path 'C:\glslang\bin\lime_glslang.dll')) {
+            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            $vs = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+            $log = 'C:\glslang\shim_build.log'
+            cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cl /nologo /c /MD /O2 native_vulkan\glslang_shim.cpp /Fo:C:\glslang\glslang_shim.obj && link /nologo /DLL /out:C:\glslang\bin\lime_glslang.dll /implib:C:\glslang\lib\lime_glslang.lib /def:native_vulkan\glslang_shim.def C:\glslang\glslang_shim.obj C:\glslang\lib\glslang.lib C:\glslang\lib\glslang-default-resource-limits.lib C:\glslang\lib\SPIRV-Tools.lib C:\glslang\lib\SPIRV-Tools-opt.lib > $log 2>&1"
+            if ($LASTEXITCODE -ne 0) {
+              Get-Content $log
+              throw "lime_glslang.dll build failed ($LASTEXITCODE)"
+            }
+            Write-Host "lime_glslang.dll built"
+          } else {
+            Write-Host "lime_glslang.dll cached"
+          }
+          Get-Item C:\glslang\bin\lime_glslang.dll, C:\glslang\lib\lime_glslang.lib | Select-Object FullName, Length
+
       - name: Prepare lime source and inject vulkan
         shell: pwsh
         run: |
@@ -99,7 +136,7 @@ jobs:
             git -C C:\lime-src submodule update --init --recursive --depth 1
           }
           New-Item -ItemType Directory -Force -Path C:\lime-src\project\src\graphics\vulkan | Out-Null
-          Copy-Item native_vulkan\vk_shaders_spv.h, native_vulkan\vk_renderer.h, native_vulkan\vk_renderer.cpp, native_vulkan\gl_core.cpp, native_vulkan\gl_compat.h, native_vulkan\gl_vk_bridge.h, native_vulkan\gl_vk_c.h, native_vulkan\gl_vk_contract.h, native_vulkan\gl_vk_contract.cpp, native_vulkan\gl_fbo.cpp, native_vulkan\gl_texture_params.cpp, native_vulkan\gl_state.h, native_vulkan\gl_state.cpp C:\lime-src\project\src\graphics\vulkan\ -Force
+          Copy-Item native_vulkan\vk_shaders_spv.h, native_vulkan\vk_renderer.h, native_vulkan\vk_renderer.cpp, native_vulkan\gl_core.cpp, native_vulkan\gl_compat.h, native_vulkan\gl_vk_bridge.h, native_vulkan\gl_vk_c.h, native_vulkan\gl_vk_contract.h, native_vulkan\gl_vk_contract.cpp, native_vulkan\gl_fbo.cpp, native_vulkan\gl_texture_params.cpp, native_vulkan\gl_state.h, native_vulkan\gl_state.cpp, native_vulkan\gl_shader.h, native_vulkan\gl_shader.cpp C:\lime-src\project\src\graphics\vulkan\ -Force
           # vulkan_core.h 会引用 vk_video/ 下的视频编码头，两个目录都要复制
           Copy-Item vkh\include\vulkan C:\lime-src\project\include\ -Recurse -Force
           Copy-Item vkh\include\vk_video C:\lime-src\project\include\ -Recurse -Force
@@ -123,9 +160,13 @@ jobs:
             $txt = [Text.Encoding]::ASCII.GetString($bytes)
             $vkCount = ([regex]::Matches($txt,'vkCreateInstance')).Count
             Write-Host "vkCreateInstance occurrences: $vkCount"
+            $shimCount = ([regex]::Matches($txt,'lime_glslang.dll')).Count
+            Write-Host "lime_glslang.dll imports: $shimCount"
             Write-Host "sha256: $((Get-FileHash $ndll -Algorithm SHA256).Hash)"
             # 供 build-game.yml 侧核对 artifact 确实是 Vulkan 版
             if ($vkCount -lt 1) { Write-Host "not a vulkan ndll"; exit 1 }
+            # 没有这条 import 说明 gl_shader.cpp 没进链接，shader 还是 lime 的 no-op
+            if ($shimCount -lt 1) { Write-Host "gl_shader not linked (no lime_glslang.dll import)"; exit 1 }
           } else {
             Write-Host "lime.ndll NOT produced"
             exit 1
@@ -135,5 +176,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: lime-vulkan-ndll
-          path: C:\lime-src\ndll\Windows64\lime.ndll
+          path: |
+            C:\lime-src\ndll\Windows64\lime.ndll
+            C:\glslang\bin\lime_glslang.dll
           retention-days: 7

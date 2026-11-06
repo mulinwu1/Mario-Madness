@@ -97,6 +97,10 @@ jobs:
             throw "artifact lime-vulkan-ndll is not a Vulkan build (no vkCreateInstance)"
           }
           Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_LIME_NDLL=$src"
+          # glslang 的 shim dll：lime.ndll 通过 import lib 调它，运行时必须和 ndll 同目录
+          $shim = (Resolve-Path "lime-vulkan-artifact\lime_glslang.dll" -ErrorAction SilentlyContinue)
+          if (-not $shim) { throw "artifact lime-vulkan-ndll missing lime_glslang.dll" }
+          Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_LIME_SHIM=$($shim.Path)"
           # 缓存里若残留 lime dev 指向别的 runner 上的 C:\lime-src，会让 lime 直接找不到库
           $devFile = "$env:USERPROFILE\haxelib\.dev\lime"
           if (Test-Path $devFile) { Write-Host "removing stale lime dev entry"; Remove-Item $devFile -Force }
@@ -242,6 +246,7 @@ jobs:
             Write-Host "=== cache hit: source unchanged (commit $env:GITHUB_SHA) ==="
             "=== cache hit: source unchanged (commit $env:GITHUB_SHA) ===" | Add-Content build.log
             Copy-Item $env:VULKAN_LIME_NDLL (Join-Path $priorExe.Directory.FullName 'lime.ndll') -Force
+            Copy-Item $env:VULKAN_LIME_SHIM (Join-Path $priorExe.Directory.FullName 'lime_glslang.dll') -Force
             Write-Host "reused exe: $($priorExe.FullName) (mtime $($priorExe.LastWriteTime))"
             return
           }
@@ -295,6 +300,7 @@ jobs:
           $builtExe = Get-ChildItem $outDir -Recurse -Filter 'Mario.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $builtExe) { throw "no Mario.exe produced under $outDir" }
           Copy-Item $env:VULKAN_LIME_NDLL (Join-Path $builtExe.Directory.FullName 'lime.ndll') -Force
+          Copy-Item $env:VULKAN_LIME_SHIM (Join-Path $builtExe.Directory.FullName 'lime_glslang.dll') -Force
           Set-Content -Path $stamp -Value $env:GITHUB_SHA -NoNewline
           # 证据：lime 生成的 Build.xml 里确实带上了 cache 标记
           $genXml = Get-ChildItem $outDir -Recurse -Filter 'Build.xml' -File -ErrorAction SilentlyContinue | Select-Object -First 1

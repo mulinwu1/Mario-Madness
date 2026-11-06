@@ -15,6 +15,13 @@
 #include <cstddef>
 #include <stdint.h>
 
+#ifdef _MSC_VER
+// glslang 16.6.0 官方静态库是 /MD 构建，直接链接进 /MT 的 lime.ndll 会报
+// LNK2038 RuntimeLibrary 不匹配；因此官方库由 glslang_shim 包成 lime_glslang.dll，
+// 这里只链它的 import lib（import lib 不携带 CRT 标记）。DLL 与 ndll 同目录部署。
+#pragma comment (lib, "C:\\glslang\\lib\\lime_glslang.lib")
+#endif
+
 namespace lime {
 
 // ---------------------------------------------------------------------------
