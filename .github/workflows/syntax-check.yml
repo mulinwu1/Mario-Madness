@@ -44,8 +44,8 @@ jobs:
           $hxcppInc = "$env:USERPROFILE\haxelib\hxcpp\4,3,2\include"
           if (-not (Test-Path $hxcppInc)) { $hxcppInc = (Get-ChildItem "$env:USERPROFILE\haxelib\hxcpp" -Directory | Select-Object -First 1).FullName + "\include" }
           Write-Host "hxcpp include: $hxcppInc"
-          cl /c /EHsc /std:c++17 /I vkh\include /I C:\lime-src\project\include /I $hxcppInc native_vulkan\vk_renderer.cpp
+          cl /c /EHsc /std:c++17 /DHXCPP /I vkh\include /I C:\lime-src\project\include /I $hxcppInc native_vulkan\vk_renderer.cpp
           if ($LASTEXITCODE -ne 0) { throw "vk_renderer.cpp syntax error" }
-          cl /c /EHsc /std:c++17 /I vkh\include /I C:\lime-src\project\include /I $hxcppInc native_vulkan\gl_core.cpp
+          cl /c /EHsc /std:c++17 /DHXCPP /I vkh\include /I C:\lime-src\project\include /I $hxcppInc native_vulkan\gl_core.cpp
           if ($LASTEXITCODE -ne 0) { throw "gl_core.cpp syntax error" }
           Write-Host "SYNTAX OK"
