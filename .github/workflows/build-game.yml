@@ -121,6 +121,13 @@ jobs:
             Stop-Job $job
           }
           Remove-Job $job -Force
+          # 如果 haxelib 版 lime 缺 ndll，build 会隐式触发 rebuild（十几分钟且无输出）
+          Write-Host "=== lime ndll check ==="
+          $limeRoot = "$env:USERPROFILE\haxelib\lime\8,0,2"
+          Write-Host "lime root: $limeRoot"
+          Get-ChildItem "$limeRoot\ndll" -Recurse -File -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
+          Write-Host "Windows64 ndll exists: $(Test-Path "$limeRoot\ndll\Windows64\lime.ndll")"
+          Write-Host "Windows64-64 ndll exists: $(Test-Path "$limeRoot\ndll\Windows64-64\lime.ndll")"
 
       - name: Build game
         shell: pwsh
