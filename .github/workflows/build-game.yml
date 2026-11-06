@@ -107,9 +107,18 @@ jobs:
         shell: pwsh
         run: |
           $hx = (Get-Command haxelib).Source
-          Remove-Item build.log, build.err -ErrorAction SilentlyContinue
+          Remove-Item build.log, build.err, empty.stdin -ErrorAction SilentlyContinue
+          New-Item -ItemType File -Path empty.stdin | Out-Null
+          Write-Host "haxelib: $hx"
+          Write-Host "Project.xml exists: $(Test-Path Project.xml)"
+          Write-Host "lime run.n exists: $(Test-Path "$env:USERPROFILE\haxelib\lime\8,0,2\run.n")"
+          Write-Host "export dir exists: $(Test-Path export)"
+          Write-Host "haxelib list:"
+          haxelib list
+          # 关键：CI 没有终端，任何 readLine() 都会永久挂起。用空文件作为 stdin 立即返回 EOF
           $p = Start-Process -FilePath $hx -ArgumentList "run","lime","build","windows" `
-               -NoNewWindow -RedirectStandardOutput build.log -RedirectStandardError build.err -PassThru
+               -NoNewWindow -RedirectStandardOutput build.log -RedirectStandardError build.err `
+               -RedirectStandardInput empty.stdin -PassThru
           $deadline = (Get-Date).AddMinutes(40)
           while (-not $p.HasExited) {
             if ((Get-Date) -gt $deadline) {
