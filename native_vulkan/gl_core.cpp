@@ -419,13 +419,17 @@ void lime_gl_disable_vertex_attrib_array(int index) {
 
 void lime_gl_draw_arrays(int mode, int first, int count) {
     if (!g_renderer || count <= 0) return;
+    // lime/OpenFL 的属性槽位：loc0=Position，loc4=TexCoord（不是 loc1）。
+    // 旧实现按 loc1 读 uv，但游戏从不设置 loc1，于是回退读位置数据，
+    // 表现为整张图集被铺进单个精灵的四边形。uv 优先取 loc4。
+    int uvIdx = (g_attrs[4].size >= 2) ? 4 : 1;
     // 每个属性的数据源是设置指针时的 VBO（GL 语义），不一定是绘制时当前绑定的 VBO。
     // buffer==0 表示 client-side 数组：此时 offset 是内存地址，必须直接读；
     // 旧实现回退到位置 VBO，会把位置数据当 uv 读，表现为整张图集铺进精灵四边形
     bool posClient = g_attrs[0].buffer == 0 && g_attrs[0].clientPtr > 0x10000;
-    bool uvClient = g_attrs[1].buffer == 0 && g_attrs[1].clientPtr > 0x10000;
+    bool uvClient = g_attrs[uvIdx].buffer == 0 && g_attrs[uvIdx].clientPtr > 0x10000;
     int posBuf = posClient ? 0 : (g_attrs[0].buffer > 0 ? g_attrs[0].buffer : g_boundArrayBuffer);
-    int uvBuf = uvClient ? 0 : (g_attrs[1].buffer > 0 ? g_attrs[1].buffer : posBuf);
+    int uvBuf = uvClient ? 0 : (g_attrs[uvIdx].buffer > 0 ? g_attrs[uvIdx].buffer : posBuf);
     if (!posClient) {
         if (posBuf <= 0 || posBuf >= (int)g_buffers.size()) return;
         if (g_buffers[(size_t)posBuf].data.empty()) return;
@@ -438,18 +442,18 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
 
     int strideP = g_attrs[0].stride;
     if (strideP <= 0) strideP = 16;
-    int strideU = g_attrs[1].stride;
+    int strideU = g_attrs[uvIdx].stride;
     if (strideU <= 0) strideU = strideP;
 
     std::vector<float> out((size_t)count * 4);
     const unsigned char* pp = posClient
         ? (const unsigned char*)g_attrs[0].clientPtr : g_buffers[(size_t)posBuf].data.data();
     const unsigned char* pu = uvClient
-        ? (const unsigned char*)g_attrs[1].clientPtr : g_buffers[(size_t)uvBuf].data.data();
+        ? (const unsigned char*)g_attrs[uvIdx].clientPtr : g_buffers[(size_t)uvBuf].data.data();
     size_t pBytes = posClient ? 0 : g_buffers[(size_t)posBuf].data.size();
     size_t uBytes = uvClient ? 0 : g_buffers[(size_t)uvBuf].data.size();
     size_t pBase0 = posClient ? 0 : (size_t)g_attrs[0].offset;
-    size_t uBase0 = uvClient ? 0 : (size_t)g_attrs[1].offset;
+    size_t uBase0 = uvClient ? 0 : (size_t)g_attrs[uvIdx].offset;
     for (int i = 0; i < count; i++) {
         size_t base = (size_t)first + (size_t)i;
         size_t posOff = pBase0 + base * (size_t)strideP;
@@ -495,8 +499,8 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
             fprintf (stderr, "[gldraw] tex=%d size=%dx%d n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] pStride=%d pOff=%.0f uvBuf=%d uvStride=%d uvOff=%.0f pBufRaw=%d uBufRaw=%d posCli=%d uvCli=%d\n",
                      texName, tw, th, count, minU, maxU, minV, maxV,
                      minX, maxX, minY, maxY, strideP, g_attrs[0].offset,
-                     uvBuf, strideU, g_attrs[1].offset,
-                     g_attrs[0].buffer, g_attrs[1].buffer, posClient ? 1 : 0, uvClient ? 1 : 0);
+                     uvBuf, strideU, g_attrs[uvIdx].offset,
+                     g_attrs[0].buffer, g_attrs[uvIdx].buffer, posClient ? 1 : 0, uvClient ? 1 : 0);
         }
         s_uvdbg++;
     }
@@ -505,12 +509,14 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
 
 void lime_gl_draw_elements(int mode, int count, int type, double offset) {
     if (!g_renderer || count <= 0) return;
+    // lime/OpenFL 的 texcoord 在 loc4（loc1 从未被设置）：读 loc1 会拿到位置数据
+    int uvIdx = (g_attrs[4].size >= 2) ? 4 : 1;
     // 同上：pos / uv 各自读设置指针时的数据源；client-side 数组（buffer==0）
     // 的 offset 是内存地址，必须直接读，不能回退到位置 VBO
     bool posClient = g_attrs[0].buffer == 0 && g_attrs[0].clientPtr > 0x10000;
-    bool uvClient = g_attrs[1].buffer == 0 && g_attrs[1].clientPtr > 0x10000;
+    bool uvClient = g_attrs[uvIdx].buffer == 0 && g_attrs[uvIdx].clientPtr > 0x10000;
     int posBuf = posClient ? 0 : (g_attrs[0].buffer > 0 ? g_attrs[0].buffer : g_boundArrayBuffer);
-    int uvBuf = uvClient ? 0 : (g_attrs[1].buffer > 0 ? g_attrs[1].buffer : posBuf);
+    int uvBuf = uvClient ? 0 : (g_attrs[uvIdx].buffer > 0 ? g_attrs[uvIdx].buffer : posBuf);
     if (!posClient) {
         if (posBuf <= 0 || posBuf >= (int)g_buffers.size()) return;
         if (g_buffers[(size_t)posBuf].data.empty()) return;
@@ -526,7 +532,7 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
 
     int strideP = g_attrs[0].stride;
     if (strideP <= 0) strideP = 16;
-    int strideU = g_attrs[1].stride;
+    int strideU = g_attrs[uvIdx].stride;
     if (strideU <= 0) strideU = strideP;
     int idxSize = (type == 0x1403) ? 2 : 4; // GL_UNSIGNED_SHORT = 0x1403
 
@@ -535,11 +541,11 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
     const unsigned char* pp = posClient
         ? (const unsigned char*)g_attrs[0].clientPtr : g_buffers[(size_t)posBuf].data.data();
     const unsigned char* pu = uvClient
-        ? (const unsigned char*)g_attrs[1].clientPtr : g_buffers[(size_t)uvBuf].data.data();
+        ? (const unsigned char*)g_attrs[uvIdx].clientPtr : g_buffers[(size_t)uvBuf].data.data();
     size_t pBytes = posClient ? 0 : g_buffers[(size_t)posBuf].data.size();
     size_t uBytes = uvClient ? 0 : g_buffers[(size_t)uvBuf].data.size();
     size_t pBase0 = posClient ? 0 : (size_t)g_attrs[0].offset;
-    size_t uBase0 = uvClient ? 0 : (size_t)g_attrs[1].offset;
+    size_t uBase0 = uvClient ? 0 : (size_t)g_attrs[uvIdx].offset;
     size_t byteOff = (size_t)offset;
     for (int i = 0; i < count; i++) {
         size_t idxOff = byteOff + (size_t)i * (size_t)idxSize;
@@ -588,8 +594,8 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
             fprintf (stderr, "[gldraw/ie] tex=%d size=%dx%d n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] pStride=%d pOff=%.0f uvBuf=%d uvStride=%d uvOff=%.0f pBufRaw=%d uBufRaw=%d posCli=%d uvCli=%d\n",
                      texName, tw, th, count, minU, maxU, minV, maxV,
                      minX, maxX, minY, maxY, strideP, g_attrs[0].offset,
-                     uvBuf, strideU, g_attrs[1].offset,
-                     g_attrs[0].buffer, g_attrs[1].buffer, posClient ? 1 : 0, uvClient ? 1 : 0);
+                     uvBuf, strideU, g_attrs[uvIdx].offset,
+                     g_attrs[0].buffer, g_attrs[uvIdx].buffer, posClient ? 1 : 0, uvClient ? 1 : 0);
             static int s_raw2 = 0;
             if (s_raw2 < 6 && !posClient && pBytes >= pBase0 + 32) {
                 const float* f = (const float*)(pp + pBase0);
