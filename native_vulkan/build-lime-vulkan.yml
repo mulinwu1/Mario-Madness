@@ -1,0 +1,128 @@
+name: Build Lime Vulkan Native
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 缓存三块最耗时的东西：haxelib 库、Vulkan 头、lime 源码(含 SDL 子模块)+编译中间产物
+      # 命中后 clone / 下载 / SDL 重编都能跳过
+      - name: Restore build caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\haxelib
+            vkh
+            C:\lime-src
+          key: lime-vk-v2-${{ runner.os }}
+          restore-keys: |
+            lime-vk-v2-
+
+      - name: Install Haxe 4.2.5 and Neko
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path C:\haxe | Out-Null
+          New-Item -ItemType Directory -Force -Path C:\neko | Out-Null
+          if (-not (Test-Path C:\haxe\haxe.zip)) {
+            Invoke-WebRequest -Uri "https://github.com/HaxeFoundation/haxe/releases/download/4.2.5/haxe-4.2.5-win64.zip" -OutFile C:\haxe\haxe.zip -UseBasicParsing
+          }
+          if (-not (Test-Path C:\neko\neko.zip)) {
+            Invoke-WebRequest -Uri "https://github.com/HaxeFoundation/neko/releases/download/v2-3-0/neko-2.3.0-win64.zip" -OutFile C:\neko\neko.zip -UseBasicParsing
+          }
+          $haxeDir = (Get-ChildItem C:\haxe -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'haxe.exe') } | Select-Object -First 1).FullName
+          if (-not $haxeDir) { Expand-Archive -Path C:\haxe\haxe.zip -DestinationPath C:\haxe -Force }
+          $nekoDir = (Get-ChildItem C:\neko -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'neko.exe') } | Select-Object -First 1).FullName
+          if (-not $nekoDir) { Expand-Archive -Path C:\neko\neko.zip -DestinationPath C:\neko -Force }
+          $haxeDir = (Get-ChildItem C:\haxe -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'haxe.exe') } | Select-Object -First 1).FullName
+          $nekoDir = (Get-ChildItem C:\neko -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'neko.exe') } | Select-Object -First 1).FullName
+          Add-Content -Path $env:GITHUB_ENV -Value "NEKOPATH=$nekoDir"
+          Add-Content -Path $env:GITHUB_ENV -Value "HAXE_STD_PATH=$haxeDir\std"
+          Add-Content -Path $env:GITHUB_PATH -Value $haxeDir
+          Add-Content -Path $env:GITHUB_PATH -Value $nekoDir
+          $env:PATH = "$haxeDir;$nekoDir;$env:PATH"
+          $env:NEKOPATH = $nekoDir
+          $env:HAXE_STD_PATH = "$haxeDir\std"
+          haxe -version
+          neko -version
+          Write-Host "haxelib repo: $(haxelib config)"
+
+      - name: Install haxelibs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "haxelib repo: $(haxelib config)"
+          if (-not (Test-Path "$env:USERPROFILE\haxelib\hxcpp\.current")) { haxelib install hxcpp 4.3.2 }
+          else { Write-Host "hxcpp cached" }
+          if (-not (Test-Path "$env:USERPROFILE\haxelib\format\.current")) { haxelib install format }
+          else { Write-Host "format cached" }
+          if (-not (Test-Path "$env:USERPROFILE\haxelib\hxp\.current")) { haxelib install hxp }
+          else { Write-Host "hxp cached" }
+          haxelib list
+
+      - name: Fetch Vulkan Headers
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "vkh\include\vulkan\vulkan.h")) {
+            git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git vkh
+          } else {
+            Write-Host "Vulkan-Headers cached"
+          }
+          Test-Path vkh\include\vulkan\vulkan.h
+
+      - name: Prepare lime source and inject vulkan
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path "C:\lime-src\.git")) {
+            git clone --depth 1 --branch 8.0.2 --recursive --shallow-submodules https://github.com/openfl/lime.git C:\lime-src
+          } else {
+            Write-Host "lime source cached, resetting working tree"
+            git -C C:\lime-src checkout -- .
+            # 只清 untracked，不加 -x，保留 obj/ndll 等构建产物用于增量编译
+            git -C C:\lime-src clean -fd
+            git -C C:\lime-src submodule update --init --recursive --depth 1
+          }
+          New-Item -ItemType Directory -Force -Path C:\lime-src\project\src\graphics\vulkan | Out-Null
+          Copy-Item native_vulkan\vk_renderer.h, native_vulkan\vk_renderer.cpp, native_vulkan\gl_core.cpp, native_vulkan\gl_compat.h, native_vulkan\gl_vk_bridge.h C:\lime-src\project\src\graphics\vulkan\ -Force
+          if (-not (Test-Path C:\lime-src\project\include\vulkan\vulkan.h)) {
+            Copy-Item vkh\include\vulkan C:\lime-src\project\include\ -Recurse -Force
+          } else {
+            Write-Host "vulkan headers already in place"
+          }
+          $env:LIME_SRC = "C:\lime-src"
+          python native_vulkan\patch_lime.py
+          haxelib dev lime C:\lime-src
+          Get-ChildItem C:\lime-src\project\src\graphics\vulkan | Select-Object Name, Length
+
+      - name: Build lime native
+        shell: pwsh
+        run: |
+          Push-Location C:\lime-src
+          haxelib run lime rebuild windows
+          $code = $LASTEXITCODE
+          Pop-Location
+          Write-Host "lime rebuild exit=$code"
+          $ndll = "C:\lime-src\ndll\Windows64\lime.ndll"
+          if (Test-Path $ndll) {
+            Get-Item $ndll | Select-Object FullName, Length
+            $bytes = [IO.File]::ReadAllBytes($ndll)
+            $txt = [Text.Encoding]::ASCII.GetString($bytes)
+            Write-Host "vkCreateInstance occurrences: $(([regex]::Matches($txt,'vkCreateInstance')).Count)"
+          } else {
+            Write-Host "lime.ndll NOT produced"
+            exit 1
+          }
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: lime-vulkan-ndll
+          path: C:\lime-src\ndll\Windows64\lime.ndll
+          retention-days: 7
