@@ -1,0 +1,83 @@
+name: Build Lime Vulkan Native
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Haxe 4.2.5 and Neko
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path C:\haxe | Out-Null
+          New-Item -ItemType Directory -Force -Path C:\neko | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/HaxeFoundation/haxe/releases/download/4.2.5/haxe-4.2.5-win64.zip" -OutFile C:\haxe\haxe.zip -UseBasicParsing
+          Expand-Archive -Path C:\haxe\haxe.zip -DestinationPath C:\haxe -Force
+          Invoke-WebRequest -Uri "https://github.com/HaxeFoundation/neko/releases/download/v2-3-0/neko-2.3.0-win64.zip" -OutFile C:\neko\neko.zip -UseBasicParsing
+          Expand-Archive -Path C:\neko\neko.zip -DestinationPath C:\neko -Force
+          $haxeDir = (Get-ChildItem C:\haxe -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'haxe.exe') } | Select-Object -First 1).FullName
+          $nekoDir = (Get-ChildItem C:\neko -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'neko.exe') } | Select-Object -First 1).FullName
+          Add-Content -Path $env:GITHUB_ENV -Value "NEKOPATH=$nekoDir"
+          Add-Content -Path $env:GITHUB_ENV -Value "HAXE_STD_PATH=$haxeDir\std"
+          Add-Content -Path $env:GITHUB_PATH -Value $haxeDir
+          Add-Content -Path $env:GITHUB_PATH -Value $nekoDir
+          haxe -version
+          neko -version
+
+      - name: Install haxelibs
+        shell: pwsh
+        run: |
+          haxelib install hxcpp 4.3.2
+          haxelib install lime 8.0.2
+          haxelib list
+
+      - name: Fetch Vulkan Headers
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git vkh
+          Test-Path vkh\include\vulkan\vulkan.h
+
+      - name: Prepare lime source and inject vulkan
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git clone --depth 1 --branch 8.0.2 --recursive --shallow-submodules https://github.com/openfl/lime.git C:\lime-src
+          New-Item -ItemType Directory -Force -Path C:\lime-src\project\src\graphics\vulkan | Out-Null
+          Copy-Item native_vulkan\vk_renderer.h, native_vulkan\vk_renderer.cpp, native_vulkan\gl_core.cpp, native_vulkan\gl_stubs.cpp, native_vulkan\gl_compat.h, native_vulkan\gl_vk_bridge.h C:\lime-src\project\src\graphics\vulkan\ -Force
+          Copy-Item vkh\include\vulkan C:\lime-src\project\include\ -Recurse -Force
+          $env:LIME_SRC = "C:\lime-src"
+          python native_vulkan\patch_lime.py
+          haxelib dev lime C:\lime-src
+          Get-ChildItem C:\lime-src\project\src\graphics\vulkan | Select-Object Name, Length
+
+      - name: Build lime native
+        shell: pwsh
+        run: |
+          Push-Location C:\lime-src
+          haxelib run lime rebuild windows
+          $code = $LASTEXITCODE
+          Pop-Location
+          Write-Host "lime rebuild exit=$code"
+          $ndll = "C:\lime-src\ndll\Windows64\lime.ndll"
+          if (Test-Path $ndll) {
+            Get-Item $ndll | Select-Object FullName, Length
+            $bytes = [IO.File]::ReadAllBytes($ndll)
+            $txt = [Text.Encoding]::ASCII.GetString($bytes)
+            Write-Host "vkCreateInstance occurrences: $(([regex]::Matches($txt,'vkCreateInstance')).Count)"
+          } else {
+            Write-Host "lime.ndll NOT produced"
+            exit 1
+          }
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: lime-vulkan-ndll
+          path: C:\lime-src\ndll\Windows64\lime.ndll
+          retention-days: 7
