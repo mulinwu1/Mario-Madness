@@ -128,6 +128,9 @@ jobs:
           Get-ChildItem "$limeRoot\ndll" -Recurse -File -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
           Write-Host "Windows64 ndll exists: $(Test-Path "$limeRoot\ndll\Windows64\lime.ndll")"
           Write-Host "Windows64-64 ndll exists: $(Test-Path "$limeRoot\ndll\Windows64-64\lime.ndll")"
+          # 诊断模式：立即失败，让 job 3 分钟内结束，便于下载完整日志
+          Write-Host "=== diagnostic-only run, stopping here ==="
+          exit 1
 
       - name: Build game
         shell: pwsh
