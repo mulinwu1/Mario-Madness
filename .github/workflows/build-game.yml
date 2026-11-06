@@ -210,8 +210,12 @@ jobs:
               Write-Host "patched $hit file group(s) in $($t.FullName)"
             }
           }
-          if ($total -eq 0) { throw "no <files> group found in lime hxcpp templates; cannot enable compile cache" }
-          Write-Host "hxcpp compile cache enabled on $total file group(s)"
+          if ($total -eq 0) {
+            # haxelib 缂撳瓨鍛戒腑鏃舵ā鏉垮彲鑳藉凡琚笂涓€杞ˉ杩囷紝杩欓噷涓嶇畻澶辫触
+            Write-Host "all file groups already have <cache>; nothing to patch"
+          } else {
+            Write-Host "hxcpp compile cache enabled on $total file group(s)"
+          }
 
       - name: Build game
         shell: pwsh
