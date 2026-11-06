@@ -44,8 +44,19 @@ jobs:
           $hxcppInc = "$env:USERPROFILE\haxelib\hxcpp\4,3,2\include"
           if (-not (Test-Path $hxcppInc)) { $hxcppInc = (Get-ChildItem "$env:USERPROFILE\haxelib\hxcpp" -Directory | Select-Object -First 1).FullName + "\include" }
           Write-Host "hxcpp include: $hxcppInc"
-          cl /c /EHsc /std:c++17 /DHXCPP /I vkh\include /I C:\lime-src\project\include /I $hxcppInc native_vulkan\vk_renderer.cpp
-          if ($LASTEXITCODE -ne 0) { throw "vk_renderer.cpp syntax error" }
-          cl /c /EHsc /std:c++17 /DHXCPP /I vkh\include /I C:\lime-src\project\include /I $hxcppInc native_vulkan\gl_core.cpp
-          if ($LASTEXITCODE -ne 0) { throw "gl_core.cpp syntax error" }
+          $files = @(
+            'native_vulkan\vk_renderer.cpp',
+            'native_vulkan\gl_vk_contract.cpp',
+            'native_vulkan\gl_core.cpp',
+            'native_vulkan\gl_fbo.cpp',
+            'native_vulkan\gl_texture_params.cpp',
+            'native_vulkan\gl_state.cpp'
+          )
+          $failed = @()
+          foreach ($f in $files) {
+            Write-Host "== $f"
+            cl /c /EHsc /std:c++17 /DHXCPP /I vkh\include /I C:\lime-src\project\include /I $hxcppInc $f
+            if ($LASTEXITCODE -ne 0) { $failed += $f }
+          }
+          if ($failed.Count -gt 0) { throw ("syntax error: " + ($failed -join ', ')) }
           Write-Host "SYNTAX OK"
