@@ -3,14 +3,14 @@ name: Build Game Exe
 on:
   workflow_dispatch:
 
-# 闇€瑕?actions: read 鎵嶈兘鍦ㄥ悓涓€涓?run 閲屼笅杞藉墠涓€涓?job 鐨?artifact
+# 需要 actions: read 才能在同一个 run 里下载前一个 job 的 artifact
 permissions:
   contents: read
   actions: read
 
 jobs:
-  # 鍓嶇疆 job锛氬鐢?build-lime-vulkan.yml 缂栧嚭 Vulkan 鐗?lime.ndll
-  # 璇?workflow 鐨?Upload 姝ラ浜у嚭 artifact "lime-vulkan-ndll"锛宺un 鍐呰法 job 鍙
+  # 前置 job：复用 build-lime-vulkan.yml 编出 Vulkan 版 lime.ndll
+  # 该 workflow 的 Upload 步骤产出 artifact "lime-vulkan-ndll"，run 内跨 job 可见
   build-lime-vulkan:
     uses: ./.github/workflows/build-lime-vulkan.yml
 
@@ -18,17 +18,19 @@ jobs:
     needs: build-lime-vulkan
     runs-on: windows-latest
     timeout-minutes: 120
-    # 宸ュ叿閾剧増鏈繘缂撳瓨 key锛歨axe/lime/hxcpp 浠讳竴鍗囩骇锛屾棫鐨勭紪璇戠紦瀛樹笌 obj 閮戒笉璇ュ鐢?    env:
+    # 工具链版本进缓存 key：haxe/lime/hxcpp 任一升级，旧的编译缓存与 obj 都不该复用
+    env:
       HAXE_VERSION: 4.2.5
       LIME_VERSION: 8.0.2
       HXCPP_VERSION: 4.3.2
     steps:
-      # 缂栨父鎴忛渶瑕?source/ 鍜?assets/锛屼笉鑳界敤绋€鐤忔鍑?      - name: Checkout
+      # 编游戏需要 source/ 和 assets/，不能用稀疏检出
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      # artifact 鏄?run 绾у埆鐨勶紝鍚屼竴涓?run 閲屽墠缃?job 涓婁紶鍚庡彲鐩存帴涓嬭浇
+      # artifact 是 run 级别的，同一个 run 里前置 job 上传后可直接下载
       - name: Download Vulkan lime ndll
         uses: actions/download-artifact@v4
         with:
@@ -63,7 +65,7 @@ jobs:
           haxe -version
           neko -version
 
-      # 鐗堟湰閿佸畾鑷粨搴撴牴鐩綍鐨?complations_preset.bat
+      # 版本锁定自仓库根目录的 complations_preset.bat
       - name: Install haxelibs
         shell: pwsh
         run: |
@@ -82,8 +84,10 @@ jobs:
           haxelib install hxp
           haxelib list
 
-      # 鎶?artifact 閲岀殑 Vulkan 鐗?lime.ndll 鎹㈣繘 haxelib 瑁呯殑瀹樻柟 lime 8.0.2锛?      # patch_lime.py 鍙姩 C++锛圤penGLBindings.cpp / Build.xml / SDLWindow.cpp锛夛紝
-      # Haxe 渚?lime 婧愮爜涓庡畼鏂逛竴鑷达紝鎵€浠ヨ繖閲屼笉闇€瑕?haxelib dev锛屾崲浜岃繘鍒跺嵆鍙?      - name: Wire Vulkan lime ndll into haxelib lime
+      # 把 artifact 里的 Vulkan 版 lime.ndll 换进 haxelib 装的官方 lime 8.0.2：
+      # patch_lime.py 只动 C++（OpenGLBindings.cpp / Build.xml / SDLWindow.cpp），
+      # Haxe 侧 lime 源码与官方一致，所以这里不需要 haxelib dev，换二进制即可
+      - name: Wire Vulkan lime ndll into haxelib lime
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -93,13 +97,13 @@ jobs:
             throw "artifact lime-vulkan-ndll is not a Vulkan build (no vkCreateInstance)"
           }
           Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_LIME_NDLL=$src"
-          # 缂撳瓨閲岃嫢娈嬬暀 lime dev 鎸囧悜鍒殑 runner 涓婄殑 C:\lime-src锛屼細璁?lime 鐩存帴鎵句笉鍒板簱
+          # 缓存里若残留 lime dev 指向别的 runner 上的 C:\lime-src，会让 lime 直接找不到库
           $devFile = "$env:USERPROFILE\haxelib\.dev\lime"
           if (Test-Path $devFile) { Write-Host "removing stale lime dev entry"; Remove-Item $devFile -Force }
           $limeRoot = "$env:USERPROFILE\haxelib\lime\8,0,2"
           if (-not (Test-Path $limeRoot)) { throw "haxelib lime 8.0.2 not found: $limeRoot" }
           New-Item -ItemType Directory -Force -Path "$limeRoot\ndll\Windows64" | Out-Null
-          # 瀛樺湪鍑犱釜骞冲彴鐩綍灏辫鐩栧嚑涓紙Windows64 / Windows64-64 绛夛級锛岄伩鍏嶆紡鎺夌湡姝ｈ澶嶅埗杩涜緭鍑虹殑閭ｄ唤
+          # 存在几个平台目录就覆盖几个（Windows64 / Windows64-64 等），避免漏掉真正被复制进输出的那份
           $targets = @(Get-ChildItem "$limeRoot\ndll" -Recurse -Filter 'lime.ndll' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
           foreach ($t in $targets) {
             Copy-Item $src $t -Force
@@ -111,8 +115,10 @@ jobs:
           Write-Host "haxelib lime ndll sha256: $((Get-FileHash $primary -Algorithm SHA256).Hash)"
           Write-Host "artifact ndll sha256:     $((Get-FileHash $src -Algorithm SHA256).Hash)"
 
-      # hxcpp 鍙 .hxcpp_config.xml 閲岀殑 <set> 鎴?-D锛圔uildTool 鐢?mDefines 鍒ゆ柇
-      # HXCPP_COMPILE_CACHE锛屽厜璁剧幆澧冨彉閲忎笉浼氱敓鏁堬級锛涚嚎绋嬫暟榛樿 getNumberOfProcesses锛?      # 杩欓噷鏄惧紡鍐欐鏂逛究鏃ュ織鏍稿鏄惁鐢ㄦ弧 runner 鐨勬牳鏁?      - name: Configure hxcpp cache and compile threads
+      # hxcpp 只认 .hxcpp_config.xml 里的 <set> 或 -D（BuildTool 用 mDefines 判断
+      # HXCPP_COMPILE_CACHE，光设环境变量不会生效）；线程数默认 getNumberOfProcesses，
+      # 这里显式写死方便日志核对是否用满 runner 的核数
+      - name: Configure hxcpp cache and compile threads
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -137,7 +143,8 @@ jobs:
           Set-Content -Path $cfgPath -Value $text -NoNewline
           Write-Host "hxcpp config: threads=$threads cache=$cacheDir cacheMB=2048"
 
-      # discord_rpc 鐨?native 婧愮爜 haxelib 鍖呴噷缂哄け锛岄渶瑕佹墜宸ヨˉ榻?      - name: Patch discord_rpc native sources
+      # discord_rpc 的 native 源码 haxelib 包里缺失，需要手工补齐
+      - name: Patch discord_rpc native sources
         shell: pwsh
         run: |
           $drRoot = "$env:USERPROFILE\haxelib\discord_rpc"
@@ -162,7 +169,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $inc "rapidjson") | Out-Null
           Copy-Item "$rj\include\rapidjson\*" (Join-Path $inc "rapidjson") -Recurse -Force
 
-      # hxcpp 缂栬瘧缂撳瓨鏄唴瀹瑰搱甯屽鍧€鐨勶紙HXCPP_COMPILE_CACHE锛夛紝婧愮爜鏀瑰姩鍚庝粛鑳藉鐢ㄦ湭鍙樼殑缂栬瘧鍗曞厓
+      # hxcpp 编译缓存是内容哈希寻址的（HXCPP_COMPILE_CACHE），源码改动后仍能复用未变的编译单元
       - name: Restore hxcpp compile cache
         uses: actions/cache@v4
         with:
@@ -171,13 +178,17 @@ jobs:
           restore-keys: |
             hxcpp-cc-${{ runner.os }}-haxe${{ env.HAXE_VERSION }}-lime${{ env.LIME_VERSION }}-hxcpp${{ env.HXCPP_VERSION }}-
 
-      # obj/bin 蹇呴』鐢ㄧ簿纭?key锛歨xcpp 闈?mtime 鍒ゆ柇鏄惁閲嶇紪锛屾嬁鍒鐨?obj 浼氬湪婧愮爜鍙樻洿鏃?      # 闈欓粯浜у嚭閿欒鐨?exe锛屾墍浠ユ簮鐮佸搱甯屼竴鍙樺氨瀹屽叏涓嶅鐢?      - name: Restore build output cache
+      # obj/bin 必须用精确 key：hxcpp 靠 mtime 判断是否重编，拿别处的 obj 会在源码变更时
+      # 静默产出错误的 exe，所以源码哈希一变就完全不复用
+      - name: Restore build output cache
         uses: actions/cache@v4
         with:
           path: export\release\windows
           key: mario-obj-v3-${{ runner.os }}-haxe${{ env.HAXE_VERSION }}-lime${{ env.LIME_VERSION }}-hxcpp${{ env.HXCPP_VERSION }}-${{ hashFiles('source/**', 'Project.xml') }}
 
-      # hxcpp 鍙粰澹版槑浜?<cache value="true"/> 鐨?file group 鐢ㄧ紪璇戠紦瀛橈紱hxcpp 鑷甫鐨?std 缁勫凡寮€锛?      # 娓告垙鑷繁鐨?app 缁勫湪 lime 鐨?hxcpp 妯℃澘閲屾病寮€ 鈫?琛ヤ笂锛屽惁鍒?HXCPP_COMPILE_CACHE 瀵规父鎴忔簮鐮佸畬鍏ㄦ棤鏁?      - name: Enable hxcpp compile cache for app file groups
+      # hxcpp 只给声明了 <cache value="true"/> 的 file group 用编译缓存；hxcpp 自带的 std 组已开，
+      # 游戏自己的 app 组在 lime 的 hxcpp 模板里没开 → 补上，否则 HXCPP_COMPILE_CACHE 对游戏源码完全无效
+      - name: Enable hxcpp compile cache for app file groups
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -196,7 +207,7 @@ jobs:
               $null = $sb.Append($xml.Substring($last, $m.Index - $last))
               $null = $sb.Append($m.Value)
               $rest = $xml.Substring($m.Index + $m.Length, [math]::Min(200, $xml.Length - ($m.Index + $m.Length)))
-              # 缁勯噷棣栧睆宸叉湁 cache 灏变笉閲嶅鎻掞紙hxcpp 鐨?std 缁勬湰鏉ュ氨甯︼級
+              # 组里首屏已有 cache 就不重复插（hxcpp 的 std 组本来就带）
               if ($rest -notmatch '<cache') {
                 $null = $sb.Append("`n      <cache value=`"true`" />")
                 $hit++
@@ -211,7 +222,7 @@ jobs:
             }
           }
           if ($total -eq 0) {
-            # haxelib 缂撳瓨鍛戒腑鏃舵ā鏉垮彲鑳藉凡琚笂涓€杞ˉ杩囷紝杩欓噷涓嶇畻澶辫触
+            # haxelib 缓存命中时模板可能已被上一轮补过，这里不算失败
             Write-Host "all file groups already have <cache>; nothing to patch"
           } else {
             Write-Host "hxcpp compile cache enabled on $total file group(s)"
@@ -220,7 +231,8 @@ jobs:
       - name: Build game
         shell: pwsh
         run: |
-          # 婧愮爜锛坰ource/**銆丳roject.xml锛夋病鍙樹笖涓婁竴杞骇鐗╁湪缂撳瓨閲?鈫?鐩存帴澶嶇敤锛?          # 璺宠繃 assets 娓呯┖銆乭axe 璧勬簮瀵煎嚭銆乭xcpp 缂栬瘧涓夊潡锛涜繖鏄浜屾鏋勫缓蹇殑鍏抽敭
+          # 源码（source/**、Project.xml）没变且上一轮产物在缓存里 → 直接复用，
+          # 跳过 assets 清空、haxe 资源导出、hxcpp 编译三块；这是第二次构建快的关键
           Write-Host "runner cores: $env:NUMBER_OF_PROCESSORS (HXCPP_COMPILE_THREADS set to max(cores,2))"
           Write-Host "hxcpp compile cache dir: $env:GITHUB_WORKSPACE\hxcpp-cache"
           $outDir = "export\release\windows"
@@ -233,7 +245,8 @@ jobs:
             Write-Host "reused exe: $($priorExe.FullName) (mtime $($priorExe.LastWriteTime))"
             return
           }
-          # 鍐疯矾寰勬墠闇€瑕佹竻绌哄ぇ璧勬簮鐩綍锛歭ime 浼氭妸 assets 鎼繘 bin锛?.8GB 灏忔枃浠跺湪 runner 涓婃瀬鎱?          Get-ChildItem 'assets' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+          # 冷路径才需要清空大资源目录：lime 会把 assets 搬进 bin，1.8GB 小文件在 runner 上极慢
+          Get-ChildItem 'assets' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
             $mb = [math]::Round(((Get-ChildItem $_.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum) / 1MB, 1)
             Write-Host "$($_.Name) = ${mb}MB -> emptied"
             Get-ChildItem $_.FullName -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
@@ -248,7 +261,7 @@ jobs:
           Write-Host "haxelib list:"
           haxelib list
           $buildStart = Get-Date
-          # 鍏抽敭锛欳I 娌℃湁缁堢锛屼换浣?readLine() 閮戒細姘镐箙鎸傝捣銆傜敤绌烘枃浠朵綔涓?stdin 绔嬪嵆杩斿洖 EOF
+          # 关键：CI 没有终端，任何 readLine() 都会永久挂起。用空文件作为 stdin 立即返回 EOF
           $p = Start-Process -FilePath $hx -ArgumentList "run","lime","build","windows" `
                -NoNewWindow -RedirectStandardOutput build.log -RedirectStandardError build.err `
                -RedirectStandardInput empty.stdin -PassThru
@@ -268,20 +281,22 @@ jobs:
           }
           $code = $p.ExitCode
           Write-Host "exit code: $code"
-          # 姝ラ success 鈮?缂栬瘧 success锛氫箣鍓嶆病妫€鏌ラ€€鍑虹爜锛宭ime 澶辫触浣嗚剼鏈甯哥粨鏉燂紝
-          # Actions 浠嶆樉绀虹豢鑹诧紝鐧借窇浜嗗ソ鍑犺疆銆傝繖閲屽繀椤绘樉寮忓け璐ャ€?          if ($code -ne 0) {
+          # 步骤 success ≠ 编译 success：之前没检查退出码，lime 失败但脚本正常结束，
+          # Actions 仍显示绿色，白跑了好几轮。这里必须显式失败。
+          if ($code -ne 0) {
             Write-Host "=== build.log (tail 40) ==="
             Get-Content build.log -Tail 40 -ErrorAction SilentlyContinue
             Write-Host "=== build.err (tail 40) ==="
             Get-Content build.err -Tail 40 -ErrorAction SilentlyContinue
             throw "lime build failed, exit code $code"
           }
-          # lime 鎶?ndll 鏀惧埌 applicationDirectory锛坵indows 鐩爣鏄?<target>\bin锛夛紝
-          # 鐩存帴璐寸潃 exe 鏀撅紝淇濊瘉杩愯鐨勫氨鏄?Vulkan 鐗堬紱鍚屾椂鍐?build-stamp 渚涗笅娆″懡涓紦瀛?          $builtExe = Get-ChildItem $outDir -Recurse -Filter 'Mario.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          # lime 把 ndll 放到 applicationDirectory（windows 目标是 <target>\bin），
+          # 直接贴着 exe 放，保证运行的就是 Vulkan 版；同时写 build-stamp 供下次命中缓存
+          $builtExe = Get-ChildItem $outDir -Recurse -Filter 'Mario.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $builtExe) { throw "no Mario.exe produced under $outDir" }
           Copy-Item $env:VULKAN_LIME_NDLL (Join-Path $builtExe.Directory.FullName 'lime.ndll') -Force
           Set-Content -Path $stamp -Value $env:GITHUB_SHA -NoNewline
-          # 璇佹嵁锛歭ime 鐢熸垚鐨?Build.xml 閲岀‘瀹炲甫涓婁簡 cache 鏍囪
+          # 证据：lime 生成的 Build.xml 里确实带上了 cache 标记
           $genXml = Get-ChildItem $outDir -Recurse -Filter 'Build.xml' -File -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($genXml) {
             $g = Get-Content $genXml.FullName -Raw
@@ -293,7 +308,7 @@ jobs:
           Get-ChildItem $outDir -ErrorAction SilentlyContinue | Select-Object Name, Length | Format-Table -AutoSize
           Write-Host "=== all exe/ndll under export ==="
           Get-ChildItem 'export' -Recurse -Include *.exe, *.ndll -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
-          # 缂撳瓨閲岀殑鏃?exe 浼氱户缁埗閫犫€滄瀯寤烘垚鍔熲€濈殑鍋囪薄锛岃繖閲岀‘璁よ繖娆＄湡鐨勯噸鏂伴摼鎺ヨ繃
+          # 缓存里的旧 exe 会继续制造“构建成功”的假象，这里确认这次真的重新链接过
           $exe = Get-ChildItem $outDir -Recurse -Filter 'Mario.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $exe) { throw "Mario.exe not found under $outDir" }
           Write-Host "exe: $($exe.FullName) size=$($exe.Length) mtime=$($exe.LastWriteTime)"
@@ -312,7 +327,8 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      # 鎽婂钩鍒颁竴涓洰褰曞啀涓婁紶锛歛rtifact 瑙ｅ帇鍑烘潵灏辨槸 exe + ndll + dll锛屼笉鐢ㄥ啀鐚滃眰绾?      - name: Assemble package
+      # 摊平到一个目录再上传：artifact 解压出来就是 exe + ndll + dll，不用再猜层级
+      - name: Assemble package
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -328,8 +344,8 @@ jobs:
             Where-Object { $_.Extension -in '.dll', '.ico' } | ForEach-Object { Copy-Item $_.FullName pkg -Force }
           Get-ChildItem pkg | Select-Object Name, Length | Format-Table -AutoSize
 
-      # 浜х墿瑕佹槸銆岃兘鐩存帴璺戙€嶇殑涓€鍖咃細exe + Vulkan 鐗?lime.ndll + lime 甯﹀嚭鏉ョ殑杩愯鏃?dll
-      # assets/ 鍦?CI 閲岃娓呯┖锛?.75GB锛夛紝杩愯鏃堕潬鏈湴鍩虹鐩綍琛ワ紝鎷艰鐢?tools/deploy_vk_test.ps1 瀹屾垚
+      # 产物要是「能直接跑」的一包：exe + Vulkan 版 lime.ndll + lime 带出来的运行时 dll
+      # assets/ 在 CI 里被清空（1.75GB），运行时靠本地基础目录补，拼装由 tools/deploy_vk_test.ps1 完成
       - name: Write run notes
         shell: pwsh
         run: |
