@@ -51,6 +51,21 @@ if extra:
             CORE.append(n)
     print("auto-collected vulkan entrypoints:", len(extra))
 
+print("total replaced entrypoints:", len(CORE))
+
+# shader 子系统的关键入口必须全部被收集到，否则说明 gl_shader.cpp 没被扫到，
+# 或者链接前就被 Build.xml 排除了 —— 让 CI 直接失败比编出一个 no-op 的 ndll 好。
+CRITICAL = [
+    "lime_gl_create_shader", "lime_gl_shader_source", "lime_gl_compile_shader",
+    "lime_gl_create_program", "lime_gl_link_program", "lime_gl_use_program",
+    "lime_gl_get_uniform_location", "lime_gl_uniform1f", "lime_gl_uniform4fv",
+    "lime_gl_uniform_matrix4fv",
+]
+missing = [n for n in CRITICAL if n not in CORE]
+if missing:
+    print("ERROR: shader entrypoints missing from collected set:", missing)
+    sys.exit(1)
+
 
 p = os.path.join(LIME, "project", "src", "graphics", "opengl", "OpenGLBindings.cpp")
 text = open(p, encoding="utf-8").read()
@@ -84,6 +99,7 @@ b = os.path.join(LIME, "project", "Build.xml")
 xml = open(b, encoding="utf-8").read()
 inject = """		<file name="src/graphics/vulkan/vk_renderer.cpp" />
 		<file name="src/graphics/vulkan/gl_core.cpp" />
+		<file name="src/graphics/vulkan/gl_shader.cpp" />
 		<file name="src/graphics/vulkan/gl_vk_contract.cpp" />
 		<file name="src/graphics/vulkan/gl_fbo.cpp" />
 		<file name="src/graphics/vulkan/gl_texture_params.cpp" />

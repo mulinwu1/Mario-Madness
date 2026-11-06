@@ -5,14 +5,12 @@ namespace lime {
 
 void lime_gl_attach_shader (int program, int shader) {}
 void lime_gl_begin_query (int target, int query) {}
-void lime_gl_begin_transform_feedback (int primitiveNode) {}
 void lime_gl_bind_attrib_location (int program, int index, HxString name) {}
 void lime_gl_bind_buffer_base (int target, int index, int buffer) {}
 void lime_gl_bind_buffer_range (int target, int index, int buffer, double offset, int size) {}
 void lime_gl_bind_framebuffer (int target, int framebuffer) {}
 void lime_gl_bind_renderbuffer (int target, int renderbuffer) {}
 void lime_gl_bind_sampler (int unit, int sampler) {}
-void lime_gl_bind_transform_feedback (int target, int transformFeedback) {}
 void lime_gl_bind_vertex_array (int vertexArray) {}
 void lime_gl_blend_color (float r, float g, float b, float a) {}
 void lime_gl_blend_equation (int mode) {}
@@ -63,7 +61,6 @@ void lime_gl_draw_buffers (value buffers) {}
 void lime_gl_draw_elements_instanced (int mode, int count, int type, double offset, int instanceCount) {}
 void lime_gl_draw_range_elements (int mode, int start, int end, int count, int type, double offset) {}
 void lime_gl_end_query (int target) {}
-void lime_gl_end_transform_feedback () {}
 value lime_gl_fence_sync (int condition, int flags) { return 0; }
 void lime_gl_finish () {}
 void lime_gl_flush () {}
@@ -166,7 +163,6 @@ double lime_gl_map_buffer_range (int target, double offset, int length, int acce
 void lime_gl_object_deregister (value object) {}
 value lime_gl_object_from_id (int id, int type) { return 0; }
 value lime_gl_object_register (int id, int type, value object) { return 0; }
-void lime_gl_pause_transform_feedback () {}
 void lime_gl_pixel_storei (int pname, int param) {}
 void lime_gl_polygon_offset (float factor, float units) {}
 void lime_gl_program_binary (int program, int binaryFormat, double binary, int length) {}
@@ -176,7 +172,6 @@ void lime_gl_read_pixels (int x, int y, int width, int height, int format, int t
 void lime_gl_release_shader_compiler () {}
 void lime_gl_renderbuffer_storage (int target, int internalformat, int width, int height) {}
 void lime_gl_renderbuffer_storage_multisample (int target, int samples, int internalformat, int width, int height) {}
-void lime_gl_resume_transform_feedback () {}
 void lime_gl_sample_coverage (float val, bool invert) {}
 void lime_gl_sampler_parameterf (int sampler, int pname, float param) {}
 void lime_gl_sampler_parameteri (int sampler, int pname, int param) {}
@@ -195,7 +190,6 @@ void lime_gl_tex_storage_2d (int target, int level, int internalformat, int widt
 void lime_gl_tex_storage_3d (int target, int level, int internalformat, int width, int height, int depth) {}
 void lime_gl_tex_sub_image_2d (int target, int level, int xoffset, int yoffset, int width, int height, int format, int type, double data) {}
 void lime_gl_tex_sub_image_3d (int target, int level, int xoffset, int yoffset, int zoffset, int width, int height, int depth, int format, int type, double data) {}
-void lime_gl_transform_feedback_varyings (int program, value varyings, int bufferMode) {}
 void lime_gl_uniform1f (int location, float v0) {}
 void lime_gl_uniform1fv (int location, int count, double _value) {}
 void lime_gl_uniform1i (int location, int v0) {}
