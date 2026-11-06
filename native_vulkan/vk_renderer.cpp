@@ -19,6 +19,18 @@ struct TexSlot {
     std::vector<float> verts;
 };
 
+struct RenderTarget {
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    VkFramebuffer fb = VK_NULL_HANDLE;
+    VkRenderPass rp = VK_NULL_HANDLE;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    int w = 0, h = 0;
+    bool used = false;
+    std::vector<float> verts;
+};
+
 struct VkRenderer::Impl {
     HWND hwnd = nullptr;
     int width = 0, height = 0;
@@ -78,6 +90,8 @@ struct VkRenderer::Impl {
     float* uboPtr = nullptr;
 
     std::vector<TexSlot> textures;
+    std::vector<RenderTarget> targets;
+    uint32_t currentTarget = 0;
     uint32_t frameImageIndex = 0;
     bool frameOpen = false;
     float clearR = 0, clearG = 0, clearB = 0, clearA = 1;
@@ -404,11 +418,11 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
 
     VkDescriptorPoolSize dps[2]{};
     dps[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    dps[0].descriptorCount = MAX_TEXTURES;
+    dps[0].descriptorCount = MAX_TEXTURES * 2;
     dps[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    dps[1].descriptorCount = MAX_TEXTURES;
+    dps[1].descriptorCount = MAX_TEXTURES * 2;
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpci.maxSets = MAX_TEXTURES;
+    dpci.maxSets = MAX_TEXTURES * 2;
     dpci.poolSizeCount = 2;
     dpci.pPoolSizes = dps;
     g_createDP(o.dev, &dpci, nullptr, &o.descPool);
@@ -778,43 +792,227 @@ void VkRenderer::SetUniform(int index, float value) {
 void VkRenderer::DrawSprite(uint32_t texId, float x, float y, float w, float h,
                             float u0, float v0, float u1, float v1) {
     Impl& o = *impl;
-    if (texId == 0 || texId > o.textures.size()) return;
-    TexSlot& t = o.textures[texId - 1];
-    if (!t.used) return;
+    std::vector<float>* vertsPtr = nullptr;
+    if (texId >= 1000) {
+        uint32_t ti = texId - 1000;
+        if (ti >= o.targets.size() || !o.targets[ti].used) return;
+        if (o.currentTarget == texId) return; // no self sampling
+        vertsPtr = &o.targets[ti].verts;
+    } else {
+        if (texId == 0 || texId > o.textures.size()) return;
+        TexSlot& t = o.textures[texId - 1];
+        if (!t.used) return;
+        vertsPtr = &t.verts;
+    }
     float hw = w * 0.5f, hh = h * 0.5f;
     float qx[6] = {x - hw, x + hw, x + hw, x - hw, x + hw, x - hw};
     float qy[6] = {y - hh, y - hh, y + hh, y - hh, y + hh, y + hh};
     float qu[6] = {u0, u1, u1, u0, u1, u0};
     float qv[6] = {v0, v0, v1, v0, v1, v1};
     for (int i = 0; i < 6; i++) {
-        t.verts.push_back(qx[i]);
-        t.verts.push_back(qy[i]);
-        t.verts.push_back(qu[i]);
-        t.verts.push_back(qv[i]);
+        vertsPtr->push_back(qx[i]);
+        vertsPtr->push_back(qy[i]);
+        vertsPtr->push_back(qu[i]);
+        vertsPtr->push_back(qv[i]);
     }
+}
+
+void VkRenderer::BeginFrame(float r, float g, float b, float a) {
+    BindRenderTarget(0, r, g, b, a);
+}
+
+bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float a) {
+    Impl& o = *impl;
+    o.currentTarget = id;
+    o.clearR = r;
+    o.clearG = g;
+    o.clearB = b;
+    o.clearA = a;
+    for (auto& t : o.textures) t.verts.clear();
+    for (auto& t : o.targets) t.verts.clear();
+    if (id == 0) {
+        VkResult ar = g_acquire(o.dev, o.swapchain, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE, &o.frameImageIndex);
+        if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) return false;
+    } else {
+        uint32_t ti = id - 1000;
+        if (ti >= o.targets.size() || !o.targets[ti].used) return false;
+    }
+    o.frameOpen = true;
+    return true;
+}
+
+void VkRenderer::PresentTarget() {
+    EndFrame();
+}
+
+uint32_t VkRenderer::CreateRenderTarget(int w, int h) {
+    Impl& o = *impl;
+    o.targets.push_back(RenderTarget());
+    uint32_t idx = (uint32_t)o.targets.size() - 1;
+    RenderTarget& t = o.targets[idx];
+
+    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ici.extent = {(uint32_t)w, (uint32_t)h, 1};
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (g_createImage(o.dev, &ici, nullptr, &t.image) != VK_SUCCESS) {
+        o.targets.pop_back();
+        return 0;
+    }
+
+    VkMemoryRequirements imr{};
+    g_getImgReqs(o.dev, t.image, &imr);
+    VkPhysicalDeviceMemoryProperties mp{};
+    ((PFN_vkGetPhysicalDeviceMemoryProperties)g_gipa(o.inst, "vkGetPhysicalDeviceMemoryProperties"))(o.phys, &mp);
+    VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    mai.allocationSize = imr.size;
+    mai.memoryTypeIndex = FindMemType(mp, imr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (g_allocMem(o.dev, &mai, nullptr, &t.mem) != VK_SUCCESS) {
+        o.destroyImage(o.dev, t.image, nullptr);
+        o.targets.pop_back();
+        return 0;
+    }
+    g_bindImgMem(o.dev, t.image, t.mem, 0);
+
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vci.image = t.image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    vci.subresourceRange.levelCount = 1;
+    vci.subresourceRange.layerCount = 1;
+    g_createView(o.dev, &vci, nullptr, &t.view);
+
+    VkAttachmentDescription att{};
+    att.format = VK_FORMAT_R8G8B8A8_UNORM;
+    att.samples = VK_SAMPLE_COUNT_1_BIT;
+    att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    att.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkAttachmentReference ref{};
+    ref.attachment = 0;
+    ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkSubpassDescription sub{};
+    sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    sub.colorAttachmentCount = 1;
+    sub.pColorAttachments = &ref;
+    VkRenderPassCreateInfo rpci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    rpci.attachmentCount = 1;
+    rpci.pAttachments = &att;
+    rpci.subpassCount = 1;
+    rpci.pSubpasses = &sub;
+    auto createRP2 = (PFN_vkCreateRenderPass)g_gipa(o.inst, "vkCreateRenderPass");
+    createRP2(o.dev, &rpci, nullptr, &t.rp);
+
+    VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    fci.renderPass = t.rp;
+    fci.attachmentCount = 1;
+    fci.pAttachments = &t.view;
+    fci.width = (uint32_t)w;
+    fci.height = (uint32_t)h;
+    fci.layers = 1;
+    auto createFB2 = (PFN_vkCreateFramebuffer)g_gipa(o.inst, "vkCreateFramebuffer");
+    createFB2(o.dev, &fci, nullptr, &t.fb);
+
+    std::vector<VkDescriptorSetLayout> layouts(1, o.dsl);
+    VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    dsai.descriptorPool = o.descPool;
+    dsai.descriptorSetCount = 1;
+    dsai.pSetLayouts = layouts.data();
+    if (g_allocDS(o.dev, &dsai, &t.set) != VK_SUCCESS) {
+        o.destroyFramebuffer(o.dev, t.fb, nullptr);
+        o.destroyRenderPass(o.dev, t.rp, nullptr);
+        o.destroyImageView(o.dev, t.view, nullptr);
+        o.destroyImage(o.dev, t.image, nullptr);
+        o.freeMemory(o.dev, t.mem, nullptr);
+        o.targets.pop_back();
+        return 0;
+    }
+
+    VkDescriptorImageInfo dii{};
+    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dii.imageView = t.view;
+    dii.sampler = o.sampler;
+    VkDescriptorBufferInfo dbi{};
+    dbi.buffer = o.ubo;
+    dbi.offset = 0;
+    dbi.range = 256;
+    VkWriteDescriptorSet wds[2]{};
+    wds[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wds[0].dstSet = t.set;
+    wds[0].dstBinding = 0;
+    wds[0].descriptorCount = 1;
+    wds[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wds[0].pImageInfo = &dii;
+    wds[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wds[1].dstSet = t.set;
+    wds[1].dstBinding = 1;
+    wds[1].descriptorCount = 1;
+    wds[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    wds[1].pBufferInfo = &dbi;
+    g_updateDS(o.dev, 2, wds, 0, nullptr);
+
+    t.w = w;
+    t.h = h;
+    t.used = true;
+    return 1000 + idx;
+}
+
+void VkRenderer::DestroyRenderTarget(uint32_t id) {
+    Impl& o = *impl;
+    if (id < 1000) return;
+    uint32_t ti = id - 1000;
+    if (ti >= o.targets.size()) return;
+    RenderTarget& t = o.targets[ti];
+    if (!t.used) return;
+    if (t.fb) o.destroyFramebuffer(o.dev, t.fb, nullptr);
+    if (t.rp) o.destroyRenderPass(o.dev, t.rp, nullptr);
+    if (t.view) o.destroyImageView(o.dev, t.view, nullptr);
+    if (t.image) o.destroyImage(o.dev, t.image, nullptr);
+    if (t.mem) o.freeMemory(o.dev, t.mem, nullptr);
+    t = RenderTarget();
 }
 
 void VkRenderer::EndFrame() {
     Impl& o = *impl;
     if (!o.frameOpen) return;
 
-    // pack all texture batches into one vertex buffer
     float* dst = o.vbPtr;
-    struct DrawRange { uint32_t tex; size_t first; size_t count; };
+    struct DrawRange { VkDescriptorSet set; size_t first; size_t count; };
     std::vector<DrawRange> ranges;
     size_t totalVerts = 0;
-    for (uint32_t i = 0; i < o.textures.size(); i++) {
-        TexSlot& t = o.textures[i];
-        if (!t.used || t.verts.empty()) continue;
-        size_t vc = t.verts.size() / 4;
-        if (totalVerts + vc > (size_t)MAX_SPRITES * 6) break;
-        memcpy(dst + totalVerts * 4, t.verts.data(), t.verts.size() * sizeof(float));
-        ranges.push_back({i + 1, totalVerts, vc});
+
+    auto pushBatch = [&](std::vector<float>& v, VkDescriptorSet set) {
+        if (v.empty()) return;
+        size_t vc = v.size() / 4;
+        if (totalVerts + vc > (size_t)MAX_SPRITES * 6) return;
+        memcpy(dst + totalVerts * 4, v.data(), v.size() * sizeof(float));
+        ranges.push_back({set, totalVerts, vc});
         totalVerts += vc;
-    }
-    if (totalVerts == 0) {
-        o.frameOpen = false;
-        return;
+    };
+    for (auto& t : o.textures) if (t.used) pushBatch(t.verts, t.set);
+    for (auto& t : o.targets) if (t.used) pushBatch(t.verts, t.set);
+
+    VkFramebuffer fb = o.framebuffers[o.frameImageIndex];
+    VkRenderPass rp = o.renderPass;
+    VkExtent2D ext = o.extent;
+    if (o.currentTarget >= 1000) {
+        uint32_t ti = o.currentTarget - 1000;
+        if (ti < o.targets.size() && o.targets[ti].used) {
+            fb = o.targets[ti].fb;
+            rp = o.targets[ti].rp;
+            ext = {(uint32_t)o.targets[ti].w, (uint32_t)o.targets[ti].h};
+        }
     }
 
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -826,21 +1024,22 @@ void VkRenderer::EndFrame() {
     cv.color.float32[2] = o.clearB;
     cv.color.float32[3] = o.clearA;
     VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    rbi.renderPass = o.renderPass;
-    rbi.framebuffer = o.framebuffers[o.frameImageIndex];
+    rbi.renderPass = rp;
+    rbi.framebuffer = fb;
     rbi.renderArea.offset = {0, 0};
-    rbi.renderArea.extent = o.extent;
+    rbi.renderArea.extent = ext;
     rbi.clearValueCount = 1;
     rbi.pClearValues = &cv;
 
     g_beginRP(o.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
-    g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeline);
-    VkDeviceSize off = 0;
-    g_bindVB(o.cmd, 0, 1, &o.vb, &off);
-    for (auto& r : ranges) {
-        g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeLayout, 0, 1,
-                 &o.textures[r.tex - 1].set, 0, nullptr);
-        g_cmdDraw(o.cmd, (uint32_t)r.count, 1, (uint32_t)r.first, 0);
+    if (totalVerts > 0) {
+        g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeline);
+        VkDeviceSize off = 0;
+        g_bindVB(o.cmd, 0, 1, &o.vb, &off);
+        for (auto& r : ranges) {
+            g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeLayout, 0, 1, &r.set, 0, nullptr);
+            g_cmdDraw(o.cmd, (uint32_t)r.count, 1, (uint32_t)r.first, 0);
+        }
     }
     g_endRP(o.cmd);
     g_endCB(o.cmd);
@@ -851,11 +1050,15 @@ void VkRenderer::EndFrame() {
     g_submit(o.queue, 1, &si, VK_NULL_HANDLE);
     g_waitIdle(o.queue);
 
-    VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-    pi.swapchainCount = 1;
-    pi.pSwapchains = &o.swapchain;
-    pi.pImageIndices = &o.frameImageIndex;
-    g_present(o.queue, &pi);
+    if (o.currentTarget == 0) {
+        VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+        pi.swapchainCount = 1;
+        pi.pSwapchains = &o.swapchain;
+        pi.pImageIndices = &o.frameImageIndex;
+        g_present(o.queue, &pi);
+    }
 
     o.frameOpen = false;
+    for (auto& t : o.textures) t.verts.clear();
+    for (auto& t : o.targets) t.verts.clear();
 }
