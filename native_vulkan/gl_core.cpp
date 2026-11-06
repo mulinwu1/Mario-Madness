@@ -1,5 +1,8 @@
 #include "gl_compat.h"
 #include "vk_renderer.h"
+#include "gl_vk_bridge.h"
+#include "gl_vk_contract.h"
+#include "gl_state.h"
 
 #include <vector>
 #include <cstring>
@@ -19,6 +22,9 @@ static int g_scissorX = 0, g_scissorY = 0, g_scissorW = 0, g_scissorH = 0;
 
 // GL texture name -> VkRenderer texture id (0 = not uploaded yet)
 static std::vector<uint32_t> g_texVk;
+// 纹理尺寸：FBO 完整性判定 / 离屏目标尺寸都要用，必须在 data==nullptr 提前返回之前就记录
+static std::vector<int> g_texW;
+static std::vector<int> g_texH;
 static int g_nextTexName = 1;
 static std::vector<int> g_texBound; // per texture unit
 static int g_activeUnit = 0;
@@ -37,6 +43,72 @@ static std::vector<PendingTex> g_pending;
 static void EnsureSize(std::vector<uint32_t>& v, size_t n, uint32_t def) {
     if (v.size() < n) v.resize(n, def);
 }
+static void EnsureSizeI(std::vector<int>& v, size_t n, int def) {
+    if (v.size() < n) v.resize(n, def);
+}
+
+// ---------- 与 gl_fbo / gl_texture_params 的状态契约 ----------
+static uint32_t S_STATE_getTextureId(int glName) {
+    if (glName <= 0 || glName >= (int)g_texVk.size()) return 0;
+    return g_texVk[(size_t)glName];
+}
+static void S_STATE_setTextureId(int glName, uint32_t vkId) {
+    if (glName <= 0) return;
+    EnsureSize(g_texVk, (size_t)glName + 1, 0);
+    g_texVk[(size_t)glName] = vkId;
+}
+static int S_STATE_getBoundTexture() {
+    if (g_activeUnit < 0 || g_activeUnit >= (int)g_texBound.size()) return 0;
+    return g_texBound[(size_t)g_activeUnit];
+}
+static bool S_STATE_getTextureSize(int glName, int* w, int* h) {
+    if (glName <= 0 || glName >= (int)g_texW.size()) return false;
+    int tw = g_texW[(size_t)glName];
+    int th = g_texH[(size_t)glName];
+    if (tw <= 0 || th <= 0) return false;
+    if (w) *w = tw;
+    if (h) *h = th;
+    return true;
+}
+static void S_STATE_getClearColor(float* rgba) {
+    if (!rgba) return;
+    rgba[0] = g_clearR;
+    rgba[1] = g_clearG;
+    rgba[2] = g_clearB;
+    rgba[3] = g_clearA;
+}
+static const GlVkCoreState S_STATE = {
+    S_STATE_getTextureId, S_STATE_setTextureId, S_STATE_getBoundTexture,
+    S_STATE_getTextureSize, S_STATE_getClearColor
+};
+
+// ---------- 转发到 VkRenderer 的扩展能力（未实现时返回 false/0，不谎报成功） ----------
+static bool EXT_setTextureSampler(uint32_t texId, int minFilter, int magFilter,
+                                  int wrapS, int wrapT, int baseLevel, int maxLevel,
+                                  float minLod, float maxLod) {
+    return g_renderer ? g_renderer->SetTextureSampler(texId, minFilter, magFilter, wrapS,
+                                                      wrapT, baseLevel, maxLevel, minLod, maxLod) : false;
+}
+static bool EXT_updateSubImage(uint32_t texId, int level, int x, int y, int w, int h,
+                               const unsigned char* rgba) {
+    return g_renderer ? g_renderer->UpdateSubImage(texId, level, x, y, w, h, rgba) : false;
+}
+static uint32_t EXT_createEmptyTexture(int w, int h) {
+    return g_renderer ? g_renderer->CreateEmptyTexture(w, h) : 0;
+}
+static bool EXT_generateMipmaps(uint32_t texId, int maxLevel) {
+    return g_renderer ? g_renderer->GenerateMipmaps(texId, maxLevel) : false;
+}
+static uint32_t EXT_createRenderTargetEx(int w, int h, bool withDepth) {
+    return g_renderer ? g_renderer->CreateRenderTargetEx(w, h, withDepth) : 0;
+}
+static bool EXT_readPixels(uint32_t targetId, int x, int y, int w, int h, unsigned char* rgba) {
+    return g_renderer ? g_renderer->ReadPixels(targetId, x, y, w, h, rgba) : false;
+}
+static const GlVkRendererExt EXT = {
+    EXT_setTextureSampler, EXT_updateSubImage, EXT_createEmptyTexture,
+    EXT_generateMipmaps, EXT_createRenderTargetEx, EXT_readPixels
+};
 
 void gl_vk_attach_renderer(VkRenderer* r) { g_renderer = r; }
 VkRenderer* gl_vk_get_renderer() { return g_renderer; }
@@ -48,6 +120,12 @@ void gl_vk_init(void* hwnd, int width, int height) {
     VkRenderer* r = new VkRenderer();
     if (r->Init((HWND)hwnd, width, height)) {
         g_renderer = r;
+        // FBO / 纹理参数模块靠这两个契约拿到纹素与清屏色
+        gl_vk_install_core_state(&S_STATE);
+        gl_vk_install_renderer_ext(&EXT);
+        // 状态机：视口/剪裁默认整窗；非法 blend 组合的警告走 stderr（构建日志里可见）
+        glstate::ResetToDefaults(width, height);
+        glstate::SetWarningCallback(nullptr);
     } else {
         delete r;
     }
@@ -57,7 +135,8 @@ bool gl_vk_active() { return g_renderer != nullptr; }
 
 // 由 SDLWindow::ContextFlip 每帧末调用，提交并 present
 void gl_vk_end_frame() {
-    if (g_renderer) g_renderer->EndFrame();
+    // 统一走 gl_fbo 的帧收尾：它负责离屏目标与后缓冲的切换，再调 VkRenderer::EndFrame
+    gl_vk_present_frame();
 }
 
 void gl_vk_shutdown() {
@@ -73,10 +152,13 @@ void lime_gl_clear_color(float red, float green, float blue, float alpha) {
     g_clearG = green;
     g_clearB = blue;
     g_clearA = alpha;
+    glstate::ClearColor(red, green, blue, alpha);
 }
 
 void lime_gl_clear(int mask) {
     if (!g_renderer) return;
+    // 离屏目标由 gl_fbo 负责清除；返回 false 说明当前画在后缓冲上，需要自己开帧
+    if (gl_vk_handle_clear()) return;
     // 只开启一帧，真正的提交在 ContextFlip 里做
     g_renderer->BeginFrame(g_clearR, g_clearG, g_clearB, g_clearA);
 }
@@ -86,20 +168,24 @@ void lime_gl_viewport(int x, int y, int width, int height) {
     g_vpY = y;
     g_vpW = width;
     g_vpH = height;
+    glstate::Viewport(x, y, width, height);
 }
 
 // GL_BLEND = 0x0BE2
 void lime_gl_enable(int cap) {
+    glstate::SetCapability(cap, true);
     if (cap == 0x0BE2) g_blendEnabled = true;
 }
 
 void lime_gl_disable(int cap) {
+    glstate::SetCapability(cap, false);
     if (cap == 0x0BE2) g_blendEnabled = false;
 }
 
 void lime_gl_blend_func(int sfactor, int dfactor) {
     g_blendSrc = sfactor;
     g_blendDst = dfactor;
+    glstate::BlendFunc(sfactor, dfactor);
 }
 
 void lime_gl_color_mask(bool red, bool green, bool blue, bool alpha) {
@@ -107,6 +193,7 @@ void lime_gl_color_mask(bool red, bool green, bool blue, bool alpha) {
     g_colorMask[1] = green;
     g_colorMask[2] = blue;
     g_colorMask[3] = alpha;
+    glstate::ColorMask(red, green, blue, alpha);
 }
 
 void lime_gl_scissor(int x, int y, int width, int height) {
@@ -114,11 +201,14 @@ void lime_gl_scissor(int x, int y, int width, int height) {
     g_scissorY = y;
     g_scissorW = width;
     g_scissorH = height;
+    glstate::Scissor(x, y, width, height);
 }
 
 int lime_gl_create_texture() {
     int name = g_nextTexName++;
     EnsureSize(g_texVk, (size_t)name + 1, 0);
+    EnsureSizeI(g_texW, (size_t)name + 1, 0);
+    EnsureSizeI(g_texH, (size_t)name + 1, 0);
     if (g_texBound.size() < (size_t)name + 1) g_texBound.resize((size_t)name + 1, 0);
     g_texVk[name] = 0;
     return name;
@@ -149,6 +239,13 @@ void lime_gl_tex_image_2d(int target, int level, int internalformat, int width, 
     int texName = g_texBound[(size_t)g_activeUnit];
     if (texName <= 0) return;
     EnsureSize(g_texVk, (size_t)texName + 1, 0);
+
+    // 尺寸必须在 data==nullptr 提前返回之前记录：FBO 挂附件时常传空数据占位，
+    // 完整性判定要靠这两个尺寸
+    EnsureSizeI(g_texW, (size_t)texName + 1, 0);
+    EnsureSizeI(g_texH, (size_t)texName + 1, 0);
+    g_texW[(size_t)texName] = width;
+    g_texH[(size_t)texName] = height;
 
     // Only handle level 0 RGBA/RGB 8-bit for now
     if (level != 0) return;
@@ -320,7 +417,7 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
 }
 
 int lime_gl_get_error() {
-    return 0;
+    return glstate::TakeError();
 }
 
 } // namespace lime

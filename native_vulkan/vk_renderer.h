@@ -33,6 +33,18 @@ public:
     // raw vertex submission (GL-style): verts are x,y,u,v float4 per vertex
     void DrawRaw(uint32_t texId, const float* verts, int vertexCount);
 
+    // ---- GL 翻译层需要的能力（gl_vk_contract.h 里的 GlVkRendererExt）----
+    // per-texture sampler：texParameteri 真正生效的必要条件
+    bool SetTextureSampler(uint32_t texId, int minFilter, int magFilter,
+                           int wrapS, int wrapT, int baseLevel, int maxLevel,
+                           float minLod, float maxLod);
+    bool UpdateSubImage(uint32_t texId, int level, int x, int y, int w, int h,
+                        const unsigned char* rgba);
+    uint32_t CreateEmptyTexture(int w, int h);
+    bool GenerateMipmaps(uint32_t texId, int maxLevel);
+    uint32_t CreateRenderTargetEx(int w, int h, bool withDepth);
+    bool ReadPixels(uint32_t targetId, int x, int y, int w, int h, unsigned char* rgba);
+
     // offscreen render target (FBO equivalent)
     // returns id usable with BindTarget, or 0 on failure. id can also be used as a texture.
     uint32_t CreateRenderTarget(int w, int h);
@@ -47,4 +59,6 @@ public:
 private:
     struct Impl;
     Impl* impl;
+    // 真正上传的实现；CreateTexture 负责大图降级后再转调它
+    uint32_t CreateTextureOnce(int w, int h, const unsigned char* rgba);
 };
