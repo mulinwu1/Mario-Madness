@@ -101,13 +101,43 @@ jobs:
             New-Item -ItemType Directory -Force -Path $d | Out-Null
           }
 
+      # 把 lime 输出重定向到文件并轮询打印，这样 Actions 页面能看到实时进度
+      # 之前完全看不到输出，无法判断是在编译还是卡在网络请求
       - name: Build game
         shell: pwsh
         run: |
-          haxelib run lime build windows
-          Write-Host "exit=$LASTEXITCODE"
+          $hx = (Get-Command haxelib).Source
+          Remove-Item build.log, build.err -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath $hx -ArgumentList "run","lime","build","windows" `
+               -NoNewWindow -RedirectStandardOutput build.log -RedirectStandardError build.err -PassThru
+          $deadline = (Get-Date).AddMinutes(40)
+          while (-not $p.HasExited) {
+            if ((Get-Date) -gt $deadline) {
+              Write-Host "=== TIMEOUT 40min, killing pid $($p.Id) ==="
+              Stop-Process -Id $p.Id -Force
+              break
+            }
+            $tail = Get-Content build.log -Tail 6 -ErrorAction SilentlyContinue
+            if ($tail) { $tail | ForEach-Object { Write-Host "  out| $_" } }
+            $err = Get-Content build.err -Tail 3 -ErrorAction SilentlyContinue
+            if ($err) { $err | ForEach-Object { Write-Host "  err| $_" } }
+            Write-Host "  ---- alive, log lines=$((Get-Content build.log -ErrorAction SilentlyContinue | Measure-Object).Count) ----"
+            Start-Sleep 15
+          }
+          Write-Host "exit code: $($p.ExitCode)"
           $outDir = "export\release\windows"
           Get-ChildItem $outDir -ErrorAction SilentlyContinue | Select-Object Name, Length
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            build.log
+            build.err
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload exe
         uses: actions/upload-artifact@v4
