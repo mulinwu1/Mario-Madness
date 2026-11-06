@@ -2478,8 +2478,8 @@ bool gl_shader_write_sampler (int program, bool offscreen, const char* name, VkI
 
 static std::string HxToString (HxString string) {
 
-	// hxcpp 的 HxString 是 const char*（不是带 __s 的包装类）
-	return string ? std::string (string) : std::string ();
+	// hxcpp 的 HxString 是带 __s (const char*) 成员的结构体
+	return string.__s ? std::string (string.__s) : std::string ();
 
 }
 
