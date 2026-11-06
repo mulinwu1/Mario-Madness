@@ -1,0 +1,10 @@
+# 构建产物与本地依赖
+build/
+out/
+third_party/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.log
+*.bmp
