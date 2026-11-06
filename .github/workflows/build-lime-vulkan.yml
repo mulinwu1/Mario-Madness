@@ -27,6 +27,9 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "HAXE_STD_PATH=$haxeDir\std"
           Add-Content -Path $env:GITHUB_PATH -Value $haxeDir
           Add-Content -Path $env:GITHUB_PATH -Value $nekoDir
+          $env:PATH = "$haxeDir;$nekoDir;$env:PATH"
+          $env:NEKOPATH = $nekoDir
+          $env:HAXE_STD_PATH = "$haxeDir\std"
           haxe -version
           neko -version
 
