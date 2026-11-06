@@ -128,6 +128,15 @@ jobs:
           Write-Host "Windows64 ndll exists: $(Test-Path "$limeRoot\ndll\Windows64\lime.ndll")"
           Write-Host "Windows64-64 ndll exists: $(Test-Path "$limeRoot\ndll\Windows64-64\lime.ndll")"
 
+      # 缓存 hxcpp 的 obj/bin，避免每轮都冷编译（首轮 ~41 分钟）
+      - name: Restore build output cache
+        uses: actions/cache@v4
+        with:
+          path: export\release\windows
+          key: mario-build-obj-v1-${{ runner.os }}
+          restore-keys: |
+            mario-build-obj-v1-
+
       - name: Build game
         shell: pwsh
         run: |
@@ -160,7 +169,10 @@ jobs:
           }
           Write-Host "exit code: $($p.ExitCode)"
           $outDir = "export\release\windows"
-          Get-ChildItem $outDir -ErrorAction SilentlyContinue | Select-Object Name, Length
+          Write-Host "=== output tree ==="
+          Get-ChildItem $outDir -ErrorAction SilentlyContinue | Select-Object Name, Length | Format-Table -AutoSize
+          Write-Host "=== all exe/ndll under export ==="
+          Get-ChildItem 'export' -Recurse -Include *.exe, *.ndll -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
 
       - name: Upload build log
         if: always()
@@ -179,6 +191,8 @@ jobs:
           name: mario-exe-fixed-shaders
           path: |
             export/release/windows/Mario.exe
+            export/release/windows/**/Mario.exe
             export/release/windows/*.ndll
+            export/release/windows/**/*.ndll
           if-no-files-found: warn
           retention-days: 7
