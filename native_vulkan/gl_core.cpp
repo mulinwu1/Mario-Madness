@@ -41,6 +41,33 @@ static void EnsureSize(std::vector<uint32_t>& v, size_t n, uint32_t def) {
 void gl_vk_attach_renderer(VkRenderer* r) { g_renderer = r; }
 VkRenderer* gl_vk_get_renderer() { return g_renderer; }
 
+// 由 SDLWindow 在窗口创建后调用，激活 Vulkan 后端
+void gl_vk_init(void* hwnd, int width, int height) {
+    if (g_renderer) return;
+    if (!hwnd || width <= 0 || height <= 0) return;
+    VkRenderer* r = new VkRenderer();
+    if (r->Init((HWND)hwnd, width, height)) {
+        g_renderer = r;
+    } else {
+        delete r;
+    }
+}
+
+bool gl_vk_active() { return g_renderer != nullptr; }
+
+// 由 SDLWindow::ContextFlip 每帧末调用，提交并 present
+void gl_vk_end_frame() {
+    if (g_renderer) g_renderer->EndFrame();
+}
+
+void gl_vk_shutdown() {
+    if (g_renderer) {
+        g_renderer->Shutdown();
+        delete g_renderer;
+        g_renderer = nullptr;
+    }
+}
+
 void lime_gl_clear_color(float red, float green, float blue, float alpha) {
     g_clearR = red;
     g_clearG = green;
@@ -50,8 +77,8 @@ void lime_gl_clear_color(float red, float green, float blue, float alpha) {
 
 void lime_gl_clear(int mask) {
     if (!g_renderer) return;
+    // 只开启一帧，真正的提交在 ContextFlip 里做
     g_renderer->BeginFrame(g_clearR, g_clearG, g_clearB, g_clearA);
-    g_renderer->EndFrame();
 }
 
 void lime_gl_viewport(int x, int y, int width, int height) {
