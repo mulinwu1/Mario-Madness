@@ -38,6 +38,8 @@ jobs:
         run: |
           haxelib install hxcpp 4.3.2
           haxelib install lime 8.0.2
+          haxelib install format
+          haxelib install hxp
           haxelib list
 
       - name: Fetch Vulkan Headers
