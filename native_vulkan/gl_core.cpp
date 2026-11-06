@@ -1,4 +1,4 @@
-#include "gl_compat.h"
+﻿#include "gl_compat.h"
 #include "vk_renderer.h"
 #include "gl_vk_bridge.h"
 #include "gl_vk_contract.h"

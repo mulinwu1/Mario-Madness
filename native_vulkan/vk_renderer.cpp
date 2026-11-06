@@ -1,4 +1,4 @@
-#include "vk_renderer.h"
+﻿#include "vk_renderer.h"
 #include "vk_shaders_spv.h"
 #define VK_USE_PLATFORM_WIN32_KHR
 #define VK_NO_PROTOTYPES
@@ -1262,6 +1262,17 @@ void VkRenderer::EndFrame() {
     VkFramebuffer fb = o.framebuffers[o.frameImageIndex];
     VkRenderPass rp = o.renderPass;
     VkExtent2D ext = o.extent;
+    {
+        static uint64_t s_frames = 0;
+        s_frames++;
+        if (s_frames == 1 || s_frames % 60 == 0) {
+            float first[4] = {0, 0, 0, 0};
+            if (totalVerts > 0) memcpy(first, o.vbPtr, sizeof(first));
+            fprintf(stderr, "[vk] frame=%llu verts=%zu ranges=%zu target=%u first=(%.1f,%.1f,%.2f,%.2f)\n",
+                    (unsigned long long)s_frames, totalVerts, ranges.size(), o.currentTarget,
+                    first[0], first[1], first[2], first[3]);
+        }
+    }
     if (o.currentTarget >= 1000) {
         uint32_t ti = o.currentTarget - 1000;
         if (ti < o.targets.size() && o.targets[ti].used) {

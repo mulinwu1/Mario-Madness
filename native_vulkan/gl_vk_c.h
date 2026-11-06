@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // 纯 C 接口，避免 SDLWindow.cpp 引入 vulkan.h / hxcpp 头
 // hwnd 在 Windows 下是 HWND，Android 下换成 ANativeWindow*
