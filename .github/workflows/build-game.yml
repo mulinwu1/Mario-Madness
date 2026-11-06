@@ -1,0 +1,106 @@
+name: Build Game Exe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      # 编游戏需要 source/ 和 assets/，不能用稀疏检出
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Restore haxelib cache
+        uses: actions/cache@v4
+        with:
+          path: ~\haxelib
+          key: game-haxelib-${{ runner.os }}-v1
+          restore-keys: |
+            game-haxelib-
+
+      - name: Install Haxe 4.2.5 and Neko
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path C:\haxe | Out-Null
+          New-Item -ItemType Directory -Force -Path C:\neko | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/HaxeFoundation/haxe/releases/download/4.2.5/haxe-4.2.5-win64.zip" -OutFile C:\haxe\haxe.zip -UseBasicParsing
+          Invoke-WebRequest -Uri "https://github.com/HaxeFoundation/neko/releases/download/v2-3-0/neko-2.3.0-win64.zip" -OutFile C:\neko\neko.zip -UseBasicParsing
+          Expand-Archive -Path C:\haxe\haxe.zip -DestinationPath C:\haxe -Force
+          Expand-Archive -Path C:\neko\neko.zip -DestinationPath C:\neko -Force
+          $haxeDir = (Get-ChildItem C:\haxe -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'haxe.exe') } | Select-Object -First 1).FullName
+          $nekoDir = (Get-ChildItem C:\neko -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'neko.exe') } | Select-Object -First 1).FullName
+          Add-Content -Path $env:GITHUB_ENV -Value "NEKOPATH=$nekoDir"
+          Add-Content -Path $env:GITHUB_ENV -Value "HAXE_STD_PATH=$haxeDir\std"
+          Add-Content -Path $env:GITHUB_PATH -Value $haxeDir
+          Add-Content -Path $env:GITHUB_PATH -Value $nekoDir
+          $env:PATH = "$haxeDir;$nekoDir;$env:PATH"
+          haxe -version
+          neko -version
+
+      # 版本锁定自仓库根目录的 complations_preset.bat
+      - name: Install haxelibs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path "$env:USERPROFILE\haxelib\hxcpp\.current")) { haxelib install hxcpp 4.3.2 }
+          haxelib install lime 8.0.2
+          haxelib install openfl 9.2.0
+          haxelib install flixel 5.3.1
+          haxelib install flixel-addons 3.1.1
+          haxelib install flixel-ui 2.5.0
+          haxelib install hxCodec 2.6.1
+          haxelib install hscript
+          haxelib install discord_rpc
+          haxelib install linc_luajit
+          haxelib install format
+          haxelib install hxp
+          haxelib list
+
+      # discord_rpc 的 native 源码 haxelib 包里缺失，需要手工补齐
+      - name: Patch discord_rpc native sources
+        shell: pwsh
+        run: |
+          $drRoot = "$env:USERPROFILE\haxelib\discord_rpc"
+          $verDir = Get-ChildItem $drRoot -Directory | Where-Object { $_.Name -match '^\d' } | Select-Object -First 1
+          if (-not $verDir) { Write-Host "discord_rpc dir missing, skip"; exit 0 }
+          $header = Join-Path $verDir.FullName "lib\discord-rpc\include\discord-rpc.h"
+          if (-not (Test-Path $header)) {
+            $tmp = "C:\discord-rpc-src"
+            git clone --depth 1 --branch v2.1.0 --recursive --shallow-submodules https://github.com/discord/discord-rpc.git $tmp
+            New-Item -ItemType Directory -Force -Path (Join-Path $verDir.FullName "lib\discord-rpc") | Out-Null
+            Copy-Item "$tmp\include" (Join-Path $verDir.FullName "lib\discord-rpc\include") -Recurse -Force
+            Copy-Item "$tmp\src" (Join-Path $verDir.FullName "lib\discord-rpc\src") -Recurse -Force
+          }
+          $inc = Join-Path $verDir.FullName "lib\discord-rpc\include"
+          if (Test-Path "$inc\discord_rpc.h") {
+            Copy-Item "$inc\discord_rpc.h" "$inc\discord-rpc.h" -Force
+          }
+          $rj = "C:\rapidjson-src"
+          git clone --depth 1 https://github.com/Tencent/rapidjson.git $rj
+          New-Item -ItemType Directory -Force -Path (Join-Path $verDir.FullName "lib\discord-rpc\src\rapidjson") | Out-Null
+          Copy-Item "$rj\include\rapidjson\*" (Join-Path $verDir.FullName "lib\discord-rpc\src\rapidjson") -Recurse -Force
+          New-Item -ItemType Directory -Force -Path (Join-Path $inc "rapidjson") | Out-Null
+          Copy-Item "$rj\include\rapidjson\*" (Join-Path $inc "rapidjson") -Recurse -Force
+
+      - name: Build game
+        shell: pwsh
+        run: |
+          haxelib run lime build windows
+          Write-Host "exit=$LASTEXITCODE"
+          $outDir = "export\release\windows"
+          Get-ChildItem $outDir -ErrorAction SilentlyContinue | Select-Object Name, Length
+
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: mario-exe-fixed-shaders
+          path: |
+            export/release/windows/Mario.exe
+            export/release/windows/*.ndll
+          if-no-files-found: warn
+          retention-days: 7
