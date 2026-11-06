@@ -101,7 +101,6 @@ int main() {
     for (auto& d : devs) {
         VkPhysicalDeviceProperties pp{};
         getProps(d, &pp);
-        printf("[vk] candidate: %s  type=%d\n", pp.deviceName, (int)pp.deviceType);
         if (pp.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) phys = d;
     }
     if (!phys) phys = devs[0];
@@ -166,6 +165,9 @@ int main() {
     auto createPool = (PFN_vkCreateCommandPool)gipa(inst, "vkCreateCommandPool");
     auto allocCB = (PFN_vkAllocateCommandBuffers)gipa(inst, "vkAllocateCommandBuffers");
     auto beginCB = (PFN_vkBeginCommandBuffer)gipa(inst, "vkBeginCommandBuffer");
+    auto endCB = (PFN_vkEndCommandBuffer)gipa(inst, "vkEndCommandBuffer");
+    auto submit = (PFN_vkQueueSubmit)gipa(inst, "vkQueueSubmit");
+    auto waitIdle = (PFN_vkQueueWaitIdle)gipa(inst, "vkQueueWaitIdle");
 
     VkQueue queue = nullptr;
     getQueue(dev, (uint32_t)qidx, 0, &queue);
@@ -270,7 +272,6 @@ int main() {
     VkCommandBuffer cb = nullptr;
     allocCB(dev, &cbi, &cb);
 
-    // ---------- function table ----------
     auto createShader = (PFN_vkCreateShaderModule)gipa(inst, "vkCreateShaderModule");
     auto createPL = (PFN_vkCreatePipelineLayout)gipa(inst, "vkCreatePipelineLayout");
     auto createPipe = (PFN_vkCreateGraphicsPipelines)gipa(inst, "vkCreateGraphicsPipelines");
@@ -294,159 +295,151 @@ int main() {
     auto cmdBarrier = (PFN_vkCmdPipelineBarrier)gipa(inst, "vkCmdPipelineBarrier");
     auto cmdCopyImg = (PFN_vkCmdCopyBufferToImage)gipa(inst, "vkCmdCopyBufferToImage");
     auto bindDS = (PFN_vkCmdBindDescriptorSets)gipa(inst, "vkCmdBindDescriptorSets");
+    auto acquire = (PFN_vkAcquireNextImageKHR)gipa(inst, "vkAcquireNextImageKHR");
+    auto present = (PFN_vkQueuePresentKHR)gipa(inst, "vkQueuePresentKHR");
+    auto beginRP = (PFN_vkCmdBeginRenderPass)gipa(inst, "vkCmdBeginRenderPass");
+    auto endRP = (PFN_vkCmdEndRenderPass)gipa(inst, "vkCmdEndRenderPass");
 
-    // ---------- shaders ----------
-    VkShaderModuleCreateInfo smci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    VkShaderModule vsMod = VK_NULL_HANDLE, fsMod = VK_NULL_HANDLE;
-    auto codeVS = ReadFile(baseDir + "shader.vert.spv");
-    auto codeFS = ReadFile(baseDir + "crt_test.spv");
-    if (codeFS.empty()) codeFS = ReadFile(baseDir + "shader.frag.spv");
-    if (codeVS.empty() || codeFS.empty()) {
-        printf("[vk] shader spv missing in %s\n", baseDir.c_str());
-        return 1;
-    }
-    smci.codeSize = codeVS.size();
-    smci.pCode = (const uint32_t*)codeVS.data();
-    createShader(dev, &smci, nullptr, &vsMod);
-    smci.codeSize = codeFS.size();
-    smci.pCode = (const uint32_t*)codeFS.data();
-    createShader(dev, &smci, nullptr, &fsMod);
-
-    // ---------- texture upload ----------
-    std::string texPath = baseDir + "texture.png";
-    int tw = 0, th = 0, tc = 0;
-    unsigned char* px = stbi_load(texPath.c_str(), &tw, &th, &tc, 4);
-    if (!px) { printf("[vk] failed to load %s\n", texPath.c_str()); return 1; }
-    printf("[vk] texture loaded: %dx%d channels=%d\n", tw, th, tc);
-    size_t texBytes = (size_t)tw * (size_t)th * 4;
-
-    VkImageCreateInfo tci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-    tci.imageType = VK_IMAGE_TYPE_2D;
-    tci.format = VK_FORMAT_R8G8B8A8_UNORM;
-    tci.extent = {(uint32_t)tw, (uint32_t)th, 1};
-    tci.mipLevels = 1;
-    tci.arrayLayers = 1;
-    tci.samples = VK_SAMPLE_COUNT_1_BIT;
-    tci.tiling = VK_IMAGE_TILING_OPTIMAL;
-    tci.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    tci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    tci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    VkImage texImg = VK_NULL_HANDLE;
-    if (createImage(dev, &tci, nullptr, &texImg) != VK_SUCCESS) { printf("[vk] image create failed\n"); return 1; }
-
-    VkMemoryRequirements imr{};
-    getImgReqs(dev, texImg, &imr);
-    VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    mai.allocationSize = imr.size;
-    mai.memoryTypeIndex = findMemType(imr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    VkDeviceMemory texMem = VK_NULL_HANDLE;
-    allocMem(dev, &mai, nullptr, &texMem);
-    bindImgMem(dev, texImg, texMem, 0);
-    printf("[vk] texture memory: DEVICE_LOCAL type=%u size=%u KB\n",
-        mai.memoryTypeIndex, (unsigned)(imr.size / 1024));
-
-    VkBufferCreateInfo sbci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    sbci.size = texBytes;
-    sbci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    VkBuffer stageBuf = VK_NULL_HANDLE;
-    createBuf(dev, &sbci, nullptr, &stageBuf);
-    VkMemoryRequirements smr{};
-    getBufReqs(dev, stageBuf, &smr);
-    mai.allocationSize = smr.size;
-    mai.memoryTypeIndex = findMemType(smr.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    VkDeviceMemory stageMem = VK_NULL_HANDLE;
-    allocMem(dev, &mai, nullptr, &stageMem);
-    bindBufMem(dev, stageBuf, stageMem, 0);
-
-    void* sptr = nullptr;
-    mapMem(dev, stageMem, 0, smr.size, 0, &sptr);
-    memcpy(sptr, px, texBytes);
-    unmapMem(dev, stageMem);
-    stbi_image_free(px);
-
-    // one-off command buffer for upload
-    VkCommandBuffer upCB = VK_NULL_HANDLE;
-    VkCommandBufferAllocateInfo ubi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    ubi.commandPool = pool;
-    ubi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    ubi.commandBufferCount = 1;
-    allocCB(dev, &ubi, &upCB);
-
-    VkCommandBufferBeginInfo ubegin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    ubegin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    beginCB(upCB, &ubegin);
-
-    VkImageMemoryBarrier b1{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    b1.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    b1.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    b1.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b1.image = texImg;
-    b1.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    b1.subresourceRange.levelCount = 1;
-    b1.subresourceRange.layerCount = 1;
-    b1.srcAccessMask = 0;
-    b1.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    cmdBarrier(upCB, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b1);
-
-    VkBufferImageCopy region{};
-    region.bufferOffset = 0;
-    region.bufferRowLength = 0;
-    region.bufferImageHeight = 0;
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.mipLevel = 0;
-    region.imageSubresource.baseArrayLayer = 0;
-    region.imageSubresource.layerCount = 1;
-    region.imageOffset = {0, 0, 0};
-    region.imageExtent = {(uint32_t)tw, (uint32_t)th, 1};
-    cmdCopyImg(upCB, stageBuf, texImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
-    VkImageMemoryBarrier b2{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    b2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    b2.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    b2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b2.image = texImg;
-    b2.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    b2.subresourceRange.levelCount = 1;
-    b2.subresourceRange.layerCount = 1;
-    b2.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    cmdBarrier(upCB, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b2);
-
-    auto endCB = (PFN_vkEndCommandBuffer)gipa(inst, "vkEndCommandBuffer");
-    auto submit = (PFN_vkQueueSubmit)gipa(inst, "vkQueueSubmit");
-    auto waitIdle = (PFN_vkQueueWaitIdle)gipa(inst, "vkQueueWaitIdle");
-    endCB(upCB);
-    VkSubmitInfo us{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    us.commandBufferCount = 1;
-    us.pCommandBuffers = &upCB;
-    submit(queue, 1, &us, VK_NULL_HANDLE);
-    waitIdle(queue);
-
-    // image view + sampler
-    VkImageViewCreateInfo tvi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    tvi.image = texImg;
-    tvi.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    tvi.format = VK_FORMAT_R8G8B8A8_UNORM;
-    tvi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    tvi.subresourceRange.levelCount = 1;
-    tvi.subresourceRange.layerCount = 1;
-    VkImageView texView = VK_NULL_HANDLE;
-    createView(dev, &tvi, nullptr, &texView);
-
-    VkSamplerCreateInfo smpci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    smpci.magFilter = VK_FILTER_LINEAR;
-    smpci.minFilter = VK_FILTER_LINEAR;
-    smpci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    smpci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    smpci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    smpci.maxLod = 1.0f;
+    // ---------- multi texture ----------
+    const int NTEX = 4;
     VkSampler smp = VK_NULL_HANDLE;
-    createSampler(dev, &smpci, nullptr, &smp);
+    {
+        VkSamplerCreateInfo smpci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        smpci.magFilter = VK_FILTER_NEAREST;
+        smpci.minFilter = VK_FILTER_NEAREST;
+        smpci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        smpci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        smpci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        smpci.maxLod = 1.0f;
+        createSampler(dev, &smpci, nullptr, &smp);
+    }
 
-    // descriptor
+    VkImageView texViews[NTEX] = {};
+    int texW[NTEX] = {}, texH[NTEX] = {};
+    size_t totalTex = 0;
+
+    for (int ti = 0; ti < NTEX; ti++) {
+        char fn[64];
+        sprintf(fn, "texture%d.png", ti);
+        std::string path = baseDir + fn;
+        int tw = 0, th = 0, tc = 0;
+        unsigned char* px = stbi_load(path.c_str(), &tw, &th, &tc, 4);
+        if (!px) { printf("[vk] failed to load %s\n", path.c_str()); return 1; }
+        texW[ti] = tw;
+        texH[ti] = th;
+        size_t bytes = (size_t)tw * th * 4;
+
+        VkImageCreateInfo tci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        tci.imageType = VK_IMAGE_TYPE_2D;
+        tci.format = VK_FORMAT_R8G8B8A8_UNORM;
+        tci.extent = {(uint32_t)tw, (uint32_t)th, 1};
+        tci.mipLevels = 1;
+        tci.arrayLayers = 1;
+        tci.samples = VK_SAMPLE_COUNT_1_BIT;
+        tci.tiling = VK_IMAGE_TILING_OPTIMAL;
+        tci.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        tci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        tci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        VkImage image = VK_NULL_HANDLE;
+        if (createImage(dev, &tci, nullptr, &image) != VK_SUCCESS) { printf("[vk] image create failed\n"); return 1; }
+
+        VkMemoryRequirements imr{};
+        getImgReqs(dev, image, &imr);
+        VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        mai.allocationSize = imr.size;
+        mai.memoryTypeIndex = findMemType(imr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        VkDeviceMemory mem = VK_NULL_HANDLE;
+        allocMem(dev, &mai, nullptr, &mem);
+        bindImgMem(dev, image, mem, 0);
+        totalTex += imr.size;
+
+        VkBufferCreateInfo sbci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        sbci.size = bytes;
+        sbci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        VkBuffer stage = VK_NULL_HANDLE;
+        createBuf(dev, &sbci, nullptr, &stage);
+        VkMemoryRequirements smr{};
+        getBufReqs(dev, stage, &smr);
+        mai.allocationSize = smr.size;
+        mai.memoryTypeIndex = findMemType(smr.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        VkDeviceMemory stageMem = VK_NULL_HANDLE;
+        allocMem(dev, &mai, nullptr, &stageMem);
+        bindBufMem(dev, stage, stageMem, 0);
+
+        void* sptr = nullptr;
+        mapMem(dev, stageMem, 0, smr.size, 0, &sptr);
+        memcpy(sptr, px, bytes);
+        unmapMem(dev, stageMem);
+        stbi_image_free(px);
+
+        VkCommandBuffer upCB = VK_NULL_HANDLE;
+        VkCommandBufferAllocateInfo ubi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        ubi.commandPool = pool;
+        ubi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        ubi.commandBufferCount = 1;
+        allocCB(dev, &ubi, &upCB);
+
+        VkCommandBufferBeginInfo ubegin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        ubegin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        beginCB(upCB, &ubegin);
+
+        VkImageMemoryBarrier b1{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b1.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        b1.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b1.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b1.image = image;
+        b1.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        b1.subresourceRange.levelCount = 1;
+        b1.subresourceRange.layerCount = 1;
+        b1.srcAccessMask = 0;
+        b1.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        cmdBarrier(upCB, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b1);
+
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = {(uint32_t)tw, (uint32_t)th, 1};
+        cmdCopyImg(upCB, stage, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+        VkImageMemoryBarrier b2{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b2.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b2.image = image;
+        b2.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        b2.subresourceRange.levelCount = 1;
+        b2.subresourceRange.layerCount = 1;
+        b2.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        cmdBarrier(upCB, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b2);
+
+        endCB(upCB);
+        VkSubmitInfo us{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        us.commandBufferCount = 1;
+        us.pCommandBuffers = &upCB;
+        submit(queue, 1, &us, VK_NULL_HANDLE);
+        waitIdle(queue);
+
+        VkImageViewCreateInfo tvi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        tvi.image = image;
+        tvi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        tvi.format = VK_FORMAT_R8G8B8A8_UNORM;
+        tvi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        tvi.subresourceRange.levelCount = 1;
+        tvi.subresourceRange.layerCount = 1;
+        VkImageView view = VK_NULL_HANDLE;
+        createView(dev, &tvi, nullptr, &view);
+        texViews[ti] = view;
+
+        printf("[vk] tex%d: %dx%d DEVICE_LOCAL %u KB\n", ti, tw, th, (unsigned)(imr.size / 1024));
+    }
+    printf("[vk] total texture memory: %u KB\n", (unsigned)(totalTex / 1024));
+
+    // ---------- descriptor ----------
     VkDescriptorSetLayoutBinding dslb[2]{};
     dslb[0].binding = 0;
     dslb[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -463,7 +456,6 @@ int main() {
     VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
     createDSL(dev, &dslci, nullptr, &dsl);
 
-    // UBO: res(8) sHardScan(4) kHardPix(4) kWarp(8) kMaskDark(4) kMaskLight(4) openfl_TextureSize(8) -> 48 bytes pad
     VkBufferCreateInfo ubci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     ubci.size = 64;
     ubci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
@@ -483,49 +475,65 @@ int main() {
 
     VkDescriptorPoolSize dps[2]{};
     dps[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    dps[0].descriptorCount = 1;
+    dps[0].descriptorCount = NTEX;
     dps[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    dps[1].descriptorCount = 1;
+    dps[1].descriptorCount = NTEX;
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpci.maxSets = 1;
+    dpci.maxSets = NTEX;
     dpci.poolSizeCount = 2;
     dpci.pPoolSizes = dps;
     VkDescriptorPool dp = VK_NULL_HANDLE;
     createDP(dev, &dpci, nullptr, &dp);
 
+    std::vector<VkDescriptorSetLayout> layouts(NTEX, dsl);
     VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     dsai.descriptorPool = dp;
-    dsai.descriptorSetCount = 1;
-    dsai.pSetLayouts = &dsl;
-    VkDescriptorSet ds = VK_NULL_HANDLE;
-    allocDS(dev, &dsai, &ds);
-
-    VkDescriptorImageInfo dii{};
-    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    dii.imageView = texView;
-    dii.sampler = smp;
+    dsai.descriptorSetCount = NTEX;
+    dsai.pSetLayouts = layouts.data();
+    VkDescriptorSet sets[NTEX] = {};
+    allocDS(dev, &dsai, sets);
 
     VkDescriptorBufferInfo dbi{};
     dbi.buffer = ubo;
     dbi.offset = 0;
     dbi.range = 64;
 
-    VkWriteDescriptorSet wds[2]{};
-    wds[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    wds[0].dstSet = ds;
-    wds[0].dstBinding = 0;
-    wds[0].descriptorCount = 1;
-    wds[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    wds[0].pImageInfo = &dii;
-    wds[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    wds[1].dstSet = ds;
-    wds[1].dstBinding = 1;
-    wds[1].descriptorCount = 1;
-    wds[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    wds[1].pBufferInfo = &dbi;
-    updateDS(dev, 2, wds, 0, nullptr);
+    for (int ti = 0; ti < NTEX; ti++) {
+        VkDescriptorImageInfo dii{};
+        dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        dii.imageView = texViews[ti];
+        dii.sampler = smp;
 
-    // ---------- pipeline ----------
+        VkWriteDescriptorSet wds[2]{};
+        wds[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wds[0].dstSet = sets[ti];
+        wds[0].dstBinding = 0;
+        wds[0].descriptorCount = 1;
+        wds[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wds[0].pImageInfo = &dii;
+        wds[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wds[1].dstSet = sets[ti];
+        wds[1].dstBinding = 1;
+        wds[1].descriptorCount = 1;
+        wds[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        wds[1].pBufferInfo = &dbi;
+        updateDS(dev, 2, wds, 0, nullptr);
+    }
+
+    // ---------- shaders ----------
+    VkShaderModuleCreateInfo smci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    VkShaderModule vsMod = VK_NULL_HANDLE, fsMod = VK_NULL_HANDLE;
+    auto codeVS = ReadFile(baseDir + "shader.vert.spv");
+    auto codeFS = ReadFile(baseDir + "crt_test.spv");
+    if (codeFS.empty()) codeFS = ReadFile(baseDir + "shader.frag.spv");
+    if (codeVS.empty() || codeFS.empty()) { printf("[vk] spv missing\n"); return 1; }
+    smci.codeSize = codeVS.size();
+    smci.pCode = (const uint32_t*)codeVS.data();
+    createShader(dev, &smci, nullptr, &vsMod);
+    smci.codeSize = codeFS.size();
+    smci.pCode = (const uint32_t*)codeFS.data();
+    createShader(dev, &smci, nullptr, &fsMod);
+
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -617,11 +625,9 @@ int main() {
     }
 
     // ---------- sprite batch ----------
-    const int MAX_SPRITES = 200;
-    const size_t VERTS_PER_SPRITE = 6;
-    const size_t FLOATS_PER_VERT = 4;
-    const size_t VB_FLOATS = MAX_SPRITES * VERTS_PER_SPRITE * FLOATS_PER_VERT;
-    const size_t VB_SIZE = VB_FLOATS * sizeof(float);
+    const int PER_TEX = 80;
+    const int MAX_SPRITES = PER_TEX * NTEX;
+    const size_t VB_SIZE = (size_t)MAX_SPRITES * 6 * 4 * sizeof(float);
 
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size = VB_SIZE;
@@ -630,30 +636,27 @@ int main() {
     createBuf(dev, &bci, nullptr, &vb);
     VkMemoryRequirements vmr{};
     getBufReqs(dev, vb, &vmr);
-    mai.allocationSize = vmr.size;
-    mai.memoryTypeIndex = findMemType(vmr.memoryTypeBits,
+    VkMemoryAllocateInfo vmai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    vmai.allocationSize = vmr.size;
+    vmai.memoryTypeIndex = findMemType(vmr.memoryTypeBits,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     VkDeviceMemory vbMem = VK_NULL_HANDLE;
-    allocMem(dev, &mai, nullptr, &vbMem);
+    allocMem(dev, &vmai, nullptr, &vbMem);
     bindBufMem(dev, vb, vbMem, 0);
     void* vptr = nullptr;
     mapMem(dev, vbMem, 0, vmr.size, 0, &vptr);
 
-    auto acquire = (PFN_vkAcquireNextImageKHR)gipa(inst, "vkAcquireNextImageKHR");
-    auto present = (PFN_vkQueuePresentKHR)gipa(inst, "vkQueuePresentKHR");
-    auto beginRP = (PFN_vkCmdBeginRenderPass)gipa(inst, "vkCmdBeginRenderPass");
-    auto endRP = (PFN_vkCmdEndRenderPass)gipa(inst, "vkCmdEndRenderPass");
-
-    printf("[vk] swapchain %ux%u, images=%u\n", ext2.width, ext2.height, imgCount);
-    printf("[vk] running - press ESC or close window to quit\n");
+    printf("[vk] swapchain %ux%u images=%u sprites=%d textures=%d\n",
+        ext2.width, ext2.height, imgCount, MAX_SPRITES, NTEX);
+    printf("[vk] running - ESC or close window to quit\n");
     fflush(stdout);
 
     MSG msg{};
     bool run = true;
     uint32_t idx = 0;
+    float t = 0.0f;
     DWORD lastFps = GetTickCount();
     int frames = 0;
-    float t = 0.0f;
 
     while (run) {
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -666,28 +669,51 @@ int main() {
         VkResult ar = acquire(dev, sw, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE, &idx);
         if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) { Sleep(1); continue; }
 
-        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        beginCB(cb, &bi);
         t += 0.016f;
 
         {
             float* u = (float*)uboPtr;
-            u[0] = (float)tw;
-            u[1] = (float)th;
+            u[0] = (float)texW[0];
+            u[1] = (float)texH[0];
             u[2] = -8.0f;
             u[3] = -2.0f;
             u[4] = 0.0f;
             u[5] = 100.0f / 24.0f;
             u[6] = 0.5f;
             u[7] = 1.5f;
-            u[8] = (float)tw;
-            u[9] = (float)th;
+            u[8] = (float)texW[0];
+            u[9] = (float)texH[0];
         }
 
+        {
+            float* v = (float*)vptr;
+            for (int i = 0; i < MAX_SPRITES; i++) {
+                int g = i / PER_TEX;
+                int k = i % PER_TEX;
+                float px = 0.92f * (float)((k * 13 + g * 7) % 100 - 50) / 50.0f * 0.95f;
+                float py = 0.52f * (float)(((k * 17 + (int)(t * 90)) % 100) - 50) / 50.0f;
+                float sz = 0.055f + 0.02f * (float)(k % 4);
+                float qx[6] = {-sz, sz, sz, -sz, sz, -sz};
+                float qy[6] = {-sz, -sz, sz, -sz, sz, sz};
+                float qu[6] = {0, 1, 1, 0, 1, 0};
+                float qv[6] = {0, 0, 1, 0, 1, 1};
+                for (int m = 0; m < 6; m++) {
+                    size_t o = ((size_t)i * 6 + m) * 4;
+                    v[o + 0] = px + qx[m];
+                    v[o + 1] = py + qy[m];
+                    v[o + 2] = qu[m];
+                    v[o + 3] = qv[m];
+                }
+            }
+        }
+
+        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        beginCB(cb, &bi);
+
         VkClearValue cv{};
-        cv.color.float32[0] = 0.04f;
-        cv.color.float32[1] = 0.05f;
-        cv.color.float32[2] = 0.10f;
+        cv.color.float32[0] = 0.03f;
+        cv.color.float32[1] = 0.04f;
+        cv.color.float32[2] = 0.06f;
         cv.color.float32[3] = 1.0f;
 
         VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -698,32 +724,17 @@ int main() {
         rbi.clearValueCount = 1;
         rbi.pClearValues = &cv;
 
-        {
-            float* v = (float*)vptr;
-            for (int i = 0; i < MAX_SPRITES; i++) {
-                float px = 0.92f * (float)(((i * 37) % 200) - 100) / 100.0f;
-                float py = 0.55f * (float)(((i * 53 + (int)(t * 90)) % 200) - 100) / 100.0f;
-                float sz = 0.05f + 0.02f * (float)(i % 5);
-                float qx[6] = {-sz, sz, sz, -sz, sz, -sz};
-                float qy[6] = {-sz, -sz, sz, -sz, sz, sz};
-                float qu[6] = {0, 1, 1, 0, 1, 0};
-                float qv[6] = {0, 0, 1, 0, 1, 1};
-                for (int k = 0; k < 6; k++) {
-                    size_t o = ((size_t)i * 6 + k) * 4;
-                    v[o + 0] = px + qx[k];
-                    v[o + 1] = py + qy[k];
-                    v[o + 2] = qu[k];
-                    v[o + 3] = qv[k];
-                }
-            }
-        }
-
         beginRP(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
         bindPipe(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-        bindDS(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &ds, 0, nullptr);
         VkDeviceSize off = 0;
         bindVB(cb, 0, 1, &vb, &off);
-        cmdDraw(cb, MAX_SPRITES * 6, 1, 0, 0);
+
+        for (int ti = 0; ti < NTEX; ti++) {
+            if (texViews[ti] == VK_NULL_HANDLE) continue;
+            bindDS(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &sets[ti], 0, nullptr);
+            cmdDraw(cb, PER_TEX * 6, 1, ti * PER_TEX * 6, 0);
+        }
+
         endRP(cb);
         endCB(cb);
 
@@ -742,7 +753,7 @@ int main() {
         frames++;
         DWORD now = GetTickCount();
         if (now - lastFps >= 1000) {
-            printf("[vk] fps=%d sprites=%d\n", frames, MAX_SPRITES);
+            printf("[vk] fps=%d sprites=%d draws=%d\n", frames, MAX_SPRITES, NTEX);
             fflush(stdout);
             frames = 0;
             lastFps = now;
