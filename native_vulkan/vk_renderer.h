@@ -30,6 +30,15 @@ public:
                     float u0, float v0, float u1, float v1);
     void EndFrame();
 
+    // offscreen render target (FBO equivalent)
+    // returns id usable with BindTarget, or 0 on failure. id can also be used as a texture.
+    uint32_t CreateRenderTarget(int w, int h);
+    void DestroyRenderTarget(uint32_t id);
+    // bind a render target (0 = backbuffer). starts a new frame for that target.
+    bool BindRenderTarget(uint32_t id, float r, float g, float b, float a);
+    // finish drawing into the current target and present it if it is the backbuffer
+    void PresentTarget();
+
     const char* LastError() const;
 
 private:
