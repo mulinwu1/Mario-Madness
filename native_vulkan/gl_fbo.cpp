@@ -193,8 +193,8 @@ bool EnsureFboTarget (int fboName) {
 
     uint32_t id = 0;
     uint32_t wId = (uint32_t)w, hId = (uint32_t)h;
-    if (needDepth && g_rendererExt && g_rendererExt->createRenderTargetEx) {
-        id = g_rendererExt->createRenderTargetEx (wId, hId, true);
+    if (needDepth && gl_vk_renderer_ext() && gl_vk_renderer_ext()->createRenderTargetEx) {
+        id = gl_vk_renderer_ext()->createRenderTargetEx (wId, hId, true);
     }
     if (id == 0) {
         // 当前 VkRenderer 只有颜色附件；深度/模板的落地等主线补 createRenderTargetEx

@@ -1,4 +1,4 @@
-#include "gl_shader.h"
+﻿#include "gl_shader.h"
 #include "gl_compat.h"
 
 #include <glslang/Include/glslang_c_interface.h>
