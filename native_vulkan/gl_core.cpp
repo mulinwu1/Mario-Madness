@@ -405,7 +405,17 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
     if (g_activeUnit < (int)g_texBound.size()) texName = g_texBound[(size_t)g_activeUnit];
     if (texName <= 0 || texName >= (int)g_texVk.size()) return;
     uint32_t vkTex = g_texVk[(size_t)texName];
-    if (!vkTex) return;
+    // FBO 颜色附件的纹理名会被别名到离屏 RenderTarget（>=1000），g_texVk 里没有，
+    // 必须回退查询；不回退就会把整条 filter 链的场景绘制全部丢掉
+    if (!vkTex) vkTex = gl_vk_texture_id(texName);
+    if (!vkTex) {
+        static int s_skip = 0;
+        if (s_skip < 8 || s_skip % 200 == 0) {
+            fprintf(stderr, "[gldraw] skip tex=%d count=%d\n", texName, count);
+        }
+        s_skip++;
+        return;
+    }
     g_draws++;
     g_renderer->DrawRaw(vkTex, out.data(), count);
 }
@@ -445,7 +455,15 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
     if (g_activeUnit < (int)g_texBound.size()) texName = g_texBound[(size_t)g_activeUnit];
     if (texName <= 0 || texName >= (int)g_texVk.size()) return;
     uint32_t vkTex = g_texVk[(size_t)texName];
-    if (!vkTex) return;
+    if (!vkTex) vkTex = gl_vk_texture_id(texName);
+    if (!vkTex) {
+        static int s_skip2 = 0;
+        if (s_skip2 < 8 || s_skip2 % 200 == 0) {
+            fprintf(stderr, "[gldraw] skip(ie) tex=%d count=%d\n", texName, count);
+        }
+        s_skip2++;
+        return;
+    }
     g_draws++;
     g_renderer->DrawRaw(vkTex, out.data(), count);
 }
