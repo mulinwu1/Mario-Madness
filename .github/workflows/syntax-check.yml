@@ -1,0 +1,51 @@
+name: Syntax Check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch Vulkan Headers
+        shell: pwsh
+        run: git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git vkh
+
+      - name: Install Haxe and hxcpp
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path C:\haxe | Out-Null
+          New-Item -ItemType Directory -Force -Path C:\neko | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/HaxeFoundation/haxe/releases/download/4.2.5/haxe-4.2.5-win64.zip" -OutFile C:\haxe\haxe.zip -UseBasicParsing
+          Expand-Archive -Path C:\haxe\haxe.zip -DestinationPath C:\haxe -Force
+          Invoke-WebRequest -Uri "https://github.com/HaxeFoundation/neko/releases/download/v2-3-0/neko-2.3.0-win64.zip" -OutFile C:\neko\neko.zip -UseBasicParsing
+          Expand-Archive -Path C:\neko\neko.zip -DestinationPath C:\neko -Force
+          $haxeDir = (Get-ChildItem C:\haxe -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'haxe.exe') } | Select-Object -First 1).FullName
+          $nekoDir = (Get-ChildItem C:\neko -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'neko.exe') } | Select-Object -First 1).FullName
+          $env:PATH = "$haxeDir;$nekoDir;$env:PATH"
+          $env:NEKOPATH = $nekoDir
+          $env:HAXE_STD_PATH = "$haxeDir\std"
+          haxelib install hxcpp 4.3.2
+
+      - name: Clone lime headers
+        shell: pwsh
+        run: git clone --depth 1 --branch 8.0.2 https://github.com/openfl/lime.git C:\lime-src
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Syntax only (no link)
+        shell: pwsh
+        run: |
+          $hxcppInc = "$env:USERPROFILE\haxelib\hxcpp\4,3,2\include"
+          if (-not (Test-Path $hxcppInc)) { $hxcppInc = (Get-ChildItem "$env:USERPROFILE\haxelib\hxcpp" -Directory | Select-Object -First 1).FullName + "\include" }
+          Write-Host "hxcpp include: $hxcppInc"
+          cl /c /EHsc /std:c++17 /I vkh\include /I C:\lime-src\project\include /I $hxcppInc native_vulkan\vk_renderer.cpp
+          if ($LASTEXITCODE -ne 0) { throw "vk_renderer.cpp syntax error" }
+          cl /c /EHsc /std:c++17 /I vkh\include /I C:\lime-src\project\include /I $hxcppInc native_vulkan\gl_core.cpp
+          if ($LASTEXITCODE -ne 0) { throw "gl_core.cpp syntax error" }
+          Write-Host "SYNTAX OK"
