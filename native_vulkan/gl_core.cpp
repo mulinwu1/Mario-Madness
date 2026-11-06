@@ -276,9 +276,19 @@ void lime_gl_tex_image_2d(int target, int level, int internalformat, int width, 
     }
 
     std::vector<unsigned char> rgba((size_t)width * height * 4);
-    // GL_RGBA = 0x1908, GL_RGB = 0x1907, GL_UNSIGNED_BYTE = 0x1401
-    if (format == 0x1908) {
-        memcpy(rgba.data(), src, rgba.size());
+    // GL_RGBA = 0x1908, GL_RGB = 0x1907, GL_BGRA_EXT = 0x80E1（lime 在桌面上传贴图用的就是 BGRA）
+    if (format == 0x1908 || format == 0x80E1) {
+        if (format == 0x1908) {
+            memcpy(rgba.data(), src, rgba.size());
+        } else {
+            // BGRA -> RGBA：之前这里直接 return，导致游戏所有贴图都没上传，采样全黑
+            for (int i = 0; i < width * height; i++) {
+                rgba[i * 4 + 0] = src[i * 4 + 2];
+                rgba[i * 4 + 1] = src[i * 4 + 1];
+                rgba[i * 4 + 2] = src[i * 4 + 0];
+                rgba[i * 4 + 3] = src[i * 4 + 3];
+            }
+        }
     } else if (format == 0x1907) {
         for (int i = 0; i < width * height; i++) {
             rgba[i * 4 + 0] = src[i * 3 + 0];
