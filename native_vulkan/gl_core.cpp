@@ -417,6 +417,22 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
         return;
     }
     g_draws++;
+    // 诊断：确认 lime 传进来的 uv 是“帧子矩形归一化”还是“整图 0..1”/像素值
+    {
+        static int s_uvdbg = 0;
+        if (s_uvdbg < 25 || s_uvdbg % 300 == 0) {
+            float minU = out[2], maxU = out[2], minV = out[3], maxV = out[3];
+            for (int i = 1; i < count; i++) {
+                float u = out[(size_t)i * 4 + 2], v = out[(size_t)i * 4 + 3];
+                if (u < minU) minU = u; if (u > maxU) maxU = u;
+                if (v < minV) minV = v; if (v > maxV) maxV = v;
+            }
+            int tw = 0, th = 0; gl_vk_texture_size (texName, &tw, &th);
+            fprintf (stderr, "[gldraw] tex=%d size=%dx%d n=%d uv=[%.3f..%.3f, %.3f..%.3f] stride=%d uvOff=%d\n",
+                     texName, tw, th, count, minU, maxU, minV, maxV, stride, (int)g_attrs[1].offset);
+        }
+        s_uvdbg++;
+    }
     g_renderer->DrawRaw(vkTex, out.data(), count);
 }
 
@@ -465,6 +481,22 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
         return;
     }
     g_draws++;
+    // 诊断：与 draw_arrays 同款，确认 indexed 路径的 uv 语义
+    {
+        static int s_uvdbg2 = 0;
+        if (s_uvdbg2 < 25 || s_uvdbg2 % 300 == 0) {
+            float minU = out[2], maxU = out[2], minV = out[3], maxV = out[3];
+            for (int i = 1; i < count; i++) {
+                float u = out[(size_t)i * 4 + 2], v = out[(size_t)i * 4 + 3];
+                if (u < minU) minU = u; if (u > maxU) maxU = u;
+                if (v < minV) minV = v; if (v > maxV) maxV = v;
+            }
+            int tw = 0, th = 0; gl_vk_texture_size (texName, &tw, &th);
+            fprintf (stderr, "[gldraw/ie] tex=%d size=%dx%d n=%d uv=[%.3f..%.3f, %.3f..%.3f] stride=%d uvOff=%d\n",
+                     texName, tw, th, count, minU, maxU, minV, maxV, stride, (int)g_attrs[1].offset);
+        }
+        s_uvdbg2++;
+    }
     g_renderer->DrawRaw(vkTex, out.data(), count);
 }
 
