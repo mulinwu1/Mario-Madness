@@ -772,18 +772,6 @@ uint32_t VkRenderer::TextureCount() const {
     return c;
 }
 
-void VkRenderer::BeginFrame(float r, float g, float b, float a) {
-    Impl& o = *impl;
-    VkResult ar = g_acquire(o.dev, o.swapchain, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE, &o.frameImageIndex);
-    if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) return;
-    o.frameOpen = true;
-    for (auto& t : o.textures) t.verts.clear();
-    o.clearR = r;
-    o.clearG = g;
-    o.clearB = b;
-    o.clearA = a;
-}
-
 void VkRenderer::SetUniform(int index, float value) {
     Impl& o = *impl;
     if (o.uboPtr && index >= 0 && index < 64) o.uboPtr[index] = value;
@@ -814,6 +802,35 @@ void VkRenderer::DrawSprite(uint32_t texId, float x, float y, float w, float h,
         vertsPtr->push_back(qy[i]);
         vertsPtr->push_back(qu[i]);
         vertsPtr->push_back(qv[i]);
+    }
+}
+
+void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount) {
+    Impl& o = *impl;
+    std::vector<float>* vertsPtr = nullptr;
+    if (texId >= 1000) {
+        uint32_t ti = texId - 1000;
+        if (ti >= o.targets.size() || !o.targets[ti].used) return;
+        if (o.currentTarget == texId) return;
+        vertsPtr = &o.targets[ti].verts;
+    } else {
+        if (texId == 0 || texId > o.textures.size()) return;
+        TexSlot& t = o.textures[texId - 1];
+        if (!t.used) return;
+        vertsPtr = &t.verts;
+    }
+    if (vertexCount <= 0) return;
+    float w = (float)o.extent.width;
+    float h = (float)o.extent.height;
+    if (w <= 0 || h <= 0) return;
+    vertsPtr->reserve(vertsPtr->size() + (size_t)vertexCount * 4);
+    for (int i = 0; i < vertexCount; i++) {
+        float px = verts[i * 4 + 0];
+        float py = verts[i * 4 + 1];
+        vertsPtr->push_back(px * 2.0f / w - 1.0f);
+        vertsPtr->push_back(1.0f - py * 2.0f / h);
+        vertsPtr->push_back(verts[i * 4 + 2]);
+        vertsPtr->push_back(verts[i * 4 + 3]);
     }
 }
 
