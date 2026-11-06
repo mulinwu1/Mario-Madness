@@ -1151,6 +1151,13 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
     o.clearG = g;
     o.clearB = b;
     o.clearA = a;
+    // 临时调试：后缓冲清成紫色，用来区分“呈现/清屏是否通”和“绘制内容是否黑”
+    if (id == 0) {
+        o.clearR = 0.45f;
+        o.clearG = 0.0f;
+        o.clearB = 0.45f;
+        o.clearA = 1.0f;
+    }
     // 注意：切换目标时不能清空顶点列表。OpenFL 的 filter 链最后一个 pass 常常是
     // “先绑后缓冲、再画一张全屏 quad”，一清就把这批顶点吃掉 → 屏幕只剩清屏色。
     // 顶点在 EndFrame 提交后由 EndFrame 自己清。
@@ -1341,6 +1348,15 @@ void VkRenderer::EndFrame() {
             fprintf(stderr, "[vk] frame=%llu verts=%zu ranges=%zu target=%u first=(%.1f,%.1f,%.2f,%.2f)\n",
                     (unsigned long long)s_frames, totalVerts, ranges.size(), o.currentTarget,
                     first[0], first[1], first[2], first[3]);
+            if (o.currentTarget == 0 && totalVerts >= 6) {
+                fprintf(stderr, "[vk] v6=(%.1f,%.1f,%.3f,%.3f) (%.1f,%.1f,%.3f,%.3f) (%.1f,%.1f,%.3f,%.3f) | (%.1f,%.1f,%.3f,%.3f) (%.1f,%.1f,%.3f,%.3f) (%.1f,%.1f,%.3f,%.3f)\n",
+                        o.vbPtr[0], o.vbPtr[1], o.vbPtr[13], o.vbPtr[14],
+                        o.vbPtr[15], o.vbPtr[16], o.vbPtr[28], o.vbPtr[29],
+                        o.vbPtr[30], o.vbPtr[31], o.vbPtr[43], o.vbPtr[44],
+                        o.vbPtr[45], o.vbPtr[46], o.vbPtr[58], o.vbPtr[59],
+                        o.vbPtr[60], o.vbPtr[61], o.vbPtr[73], o.vbPtr[74],
+                        o.vbPtr[75], o.vbPtr[76], o.vbPtr[88], o.vbPtr[89]);
+            }
         }
     }
     if (o.currentTarget >= 1000) {
