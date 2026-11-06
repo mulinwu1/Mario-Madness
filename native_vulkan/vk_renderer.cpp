@@ -1094,6 +1094,18 @@ void VkRenderer::BeginFrame(float r, float g, float b, float a) {
     BindRenderTarget(0, r, g, b, a);
 }
 
+int VkRenderer::ScreenWidth() const { return impl->extent.width; }
+int VkRenderer::ScreenHeight() const { return impl->extent.height; }
+
+bool VkRenderer::GetRenderTargetSize(uint32_t id, int* w, int* h) const {
+    if (id < 1000) return false;
+    uint32_t ti = id - 1000;
+    if (ti >= impl->targets.size() || !impl->targets[ti].used) return false;
+    if (w) *w = impl->targets[ti].w;
+    if (h) *h = impl->targets[ti].h;
+    return true;
+}
+
 bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float a) {
     Impl& o = *impl;
     // 同一目标重复绑定（OpenFL 每个 pass 开头都会 glClear，gl_vk_handle_clear 又会 Bind 一次）

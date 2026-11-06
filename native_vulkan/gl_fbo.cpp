@@ -641,7 +641,33 @@ bool gl_vk_handle_clear () {
 
 void gl_vk_present_frame () {
     VkRenderer* r = gl_vk_get_renderer ();
-    if (r) r->EndFrame ();
+    if (r) {
+        // 关键：OpenFL 的整帧常常停在最后一个离屏目标上，如果直接 EndFrame，
+        // 渲染结果只留在 FBO 里，后缓冲从来没被画过 → 屏幕只有清屏色（黑屏）。
+        // 所以提交前先把最后一张离屏图铺满后缓冲。
+        if (g_currentTarget >= 1000) {
+            uint32_t src = g_currentTarget;
+            float c[4];
+            GetClearColor (c);
+            int tw = 0, th = 0;
+            bool bound = r->BindRenderTarget (0, c[0], c[1], c[2], c[3]);
+            if (bound && r->GetRenderTargetSize (src, &tw, &th) && tw > 0 && th > 0) {
+                float W = (float)r->ScreenWidth ();
+                float H = (float)r->ScreenHeight ();
+                float quad[24] = {
+                    0.0f, 0.0f, 0.0f, 0.0f,
+                    W,    0.0f, (float)tw, 0.0f,
+                    0.0f, H,    0.0f, (float)th,
+                    0.0f, H,    0.0f, (float)th,
+                    W,    0.0f, (float)tw, 0.0f,
+                    W,    H,    (float)tw, (float)th,
+                };
+                r->DrawRaw (src, quad, 6);
+                g_backbufferOpen = true;
+            }
+        }
+        r->EndFrame ();
+    }
     g_currentTarget = 0;
     g_backbufferOpen = false;
     // 帧结束后绘制目标回到后缓冲，避免跨帧残留指向已提交的离屏目标

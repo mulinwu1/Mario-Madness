@@ -30,6 +30,11 @@ public:
                     float u0, float v0, float u1, float v1);
     void EndFrame();
 
+    // 交换链尺寸 / 离屏目标尺寸（present 时把最后一张离屏图铺满窗口要用）
+    int ScreenWidth() const;
+    int ScreenHeight() const;
+    bool GetRenderTargetSize(uint32_t id, int* w, int* h) const;
+
     // raw vertex submission (GL-style): verts are x,y,u,v float4 per vertex
     void DrawRaw(uint32_t texId, const float* verts, int vertexCount);
 
