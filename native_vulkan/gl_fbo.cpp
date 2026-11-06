@@ -583,10 +583,35 @@ void lime_gl_invalidate_sub_framebuffer (int target, value attachments,
 void lime_gl_blit_framebuffer (int srcX0, int srcY0, int srcX1, int srcY1,
                                int dstX0, int dstY0, int dstX1, int dstY1,
                                int mask, int filter) {
-    // 需要 VkCmdBlitImage / 目标切换支持，等 VkRenderer 补接口后再实现
-    (void)srcX0; (void)srcY0; (void)srcX1; (void)srcY1;
-    (void)dstX0; (void)dstY0; (void)dstX1; (void)dstY1;
-    (void)mask; (void)filter;
+    (void)filter;
+    if (!(mask & 0x4000)) return;   // GL_COLOR_BUFFER_BIT
+
+    VkRenderer* r = gl_vk_get_renderer ();
+    if (!r) return;
+
+    // 源：READ_FRAMEBUFFER 的颜色附件（纹理名已被 alias 成 RT id，>=1000）
+    uint32_t srcTex = 0;
+    int sw = 0, sh = 0;
+    int readFbo = g_boundReadFbo;
+    if (readFbo > 0 && IsFboName (readFbo)) {
+        Fbo& f = g_fbos[(size_t)readFbo];
+        if (f.color.objectType == K_OBJECT_TEXTURE) {
+            srcTex = gl_vk_texture_id (f.color.name);
+            gl_vk_texture_size (f.color.name, &sw, &sh);
+        }
+    }
+    if (!srcTex) return;
+
+    // 用一次带贴图的四边形代替 vkCmdBlitImage：目标当前绑定的 pass 已经开着
+    float quad[24] = {
+        (float)dstX0, (float)dstY0, (float)srcX0, (float)srcY0,
+        (float)dstX1, (float)dstY0, (float)srcX1, (float)srcY0,
+        (float)dstX0, (float)dstY1, (float)srcX0, (float)srcY1,
+        (float)dstX0, (float)dstY1, (float)srcX0, (float)srcY1,
+        (float)dstX1, (float)dstY0, (float)srcX1, (float)srcY0,
+        (float)dstX1, (float)dstY1, (float)srcX1, (float)srcY1,
+    };
+    r->DrawRaw (srcTex, quad, 6);
 }
 
 // ---------------------------------------------------------------- 帧目标对接
