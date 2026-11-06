@@ -54,7 +54,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           git clone --depth 1 --branch 8.0.2 --recursive --shallow-submodules https://github.com/openfl/lime.git C:\lime-src
           New-Item -ItemType Directory -Force -Path C:\lime-src\project\src\graphics\vulkan | Out-Null
-          Copy-Item native_vulkan\vk_renderer.h, native_vulkan\vk_renderer.cpp, native_vulkan\gl_core.cpp, native_vulkan\gl_stubs.cpp, native_vulkan\gl_compat.h, native_vulkan\gl_vk_bridge.h C:\lime-src\project\src\graphics\vulkan\ -Force
+          Copy-Item native_vulkan\vk_renderer.h, native_vulkan\vk_renderer.cpp, native_vulkan\gl_core.cpp, native_vulkan\gl_compat.h, native_vulkan\gl_vk_bridge.h C:\lime-src\project\src\graphics\vulkan\ -Force
           Copy-Item vkh\include\vulkan C:\lime-src\project\include\ -Recurse -Force
           $env:LIME_SRC = "C:\lime-src"
           python native_vulkan\patch_lime.py
