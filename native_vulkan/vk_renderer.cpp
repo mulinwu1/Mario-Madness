@@ -144,6 +144,20 @@ static uint32_t FindMemType(const VkPhysicalDeviceMemoryProperties& mp, uint32_t
     return 0;
 }
 
+// 内嵌着色器的顶点格式：loc0=Position(vec4) loc1=Alpha loc2=ColorMultiplier(vec4)
+// loc3=ColorOffset(vec4) loc4=TexCoord(vec2)，共 15 个 float
+static void PushLimeVertex(std::vector<float>& out, float x, float y, float u, float v) {
+    out.push_back(x);
+    out.push_back(y);
+    out.push_back(0.0f);
+    out.push_back(1.0f);
+    out.push_back(1.0f);                                   // alpha
+    out.push_back(1.0f); out.push_back(1.0f); out.push_back(1.0f); out.push_back(1.0f); // colorMultiplier
+    out.push_back(0.0f); out.push_back(0.0f); out.push_back(0.0f); out.push_back(0.0f); // colorOffset
+    out.push_back(u);
+    out.push_back(v);
+}
+
 static std::vector<char> ReadFileLocal(const std::string& path) {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) return {};
@@ -411,14 +425,14 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     cbi.commandBufferCount = 1;
     allocCB(o.dev, &cbi, &o.cmd);
 
-    // descriptor layout: sampler + ubo
+    // descriptor layout 按实际 SPIR-V：binding0 = UBO，binding1 = 贴图采样器
     VkDescriptorSetLayoutBinding dslb[2]{};
     dslb[0].binding = 0;
-    dslb[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    dslb[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     dslb[0].descriptorCount = 1;
-    dslb[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    dslb[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     dslb[1].binding = 1;
-    dslb[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    dslb[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     dslb[1].descriptorCount = 1;
     dslb[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
@@ -491,23 +505,37 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     stages[1].module = o.fsMod;
     stages[1].pName = "main";
 
+    // 顶点布局按内嵌着色器实际 loc：0=Position(vec4) 1=Alpha(float)
+    // 2=ColorMultiplier(vec4) 3=ColorOffset(vec4) 4=TextureCoord(vec2)，共 15 floats
     VkVertexInputBindingDescription vbind{};
     vbind.binding = 0;
-    vbind.stride = sizeof(float) * 4;
+    vbind.stride = sizeof(float) * 15;
     vbind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    VkVertexInputAttributeDescription vattr[2]{};
+    VkVertexInputAttributeDescription vattr[5]{};
     vattr[0].location = 0;
     vattr[0].binding = 0;
-    vattr[0].format = VK_FORMAT_R32G32_SFLOAT;
+    vattr[0].format = VK_FORMAT_R32G32B32A32_SFLOAT;
     vattr[0].offset = 0;
     vattr[1].location = 1;
     vattr[1].binding = 0;
-    vattr[1].format = VK_FORMAT_R32G32_SFLOAT;
-    vattr[1].offset = sizeof(float) * 2;
+    vattr[1].format = VK_FORMAT_R32_SFLOAT;
+    vattr[1].offset = sizeof(float) * 4;
+    vattr[2].location = 2;
+    vattr[2].binding = 0;
+    vattr[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    vattr[2].offset = sizeof(float) * 5;
+    vattr[3].location = 3;
+    vattr[3].binding = 0;
+    vattr[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    vattr[3].offset = sizeof(float) * 9;
+    vattr[4].location = 4;
+    vattr[4].binding = 0;
+    vattr[4].format = VK_FORMAT_R32G32_SFLOAT;
+    vattr[4].offset = sizeof(float) * 13;
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     vi.vertexBindingDescriptionCount = 1;
     vi.pVertexBindingDescriptions = &vbind;
-    vi.vertexAttributeDescriptionCount = 2;
+    vi.vertexAttributeDescriptionCount = 5;
     vi.pVertexAttributeDescriptions = vattr;
 
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
@@ -562,7 +590,7 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     }
 
     // vertex buffer
-    o.vbBytes = (size_t)MAX_SPRITES * 6 * 4 * sizeof(float);
+    o.vbBytes = (size_t)MAX_SPRITES * 6 * 15 * sizeof(float);
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size = o.vbBytes;
     bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
@@ -789,14 +817,14 @@ uint32_t VkRenderer::CreateTextureOnce(int w, int h, const unsigned char* rgba) 
         wds[0].dstSet = t.set;
         wds[0].dstBinding = 0;
         wds[0].descriptorCount = 1;
-        wds[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        wds[0].pImageInfo = &dii;
+        wds[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        wds[0].pBufferInfo = &dbi;
         wds[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         wds[1].dstSet = t.set;
         wds[1].dstBinding = 1;
         wds[1].descriptorCount = 1;
-        wds[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        wds[1].pBufferInfo = &dbi;
+        wds[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wds[1].pImageInfo = &dii;
         g_updateDS(o.dev, 2, wds, 0, nullptr);
 
         t.w = w;
@@ -874,7 +902,7 @@ bool VkRenderer::SetTextureSampler(uint32_t texId, int minFilter, int magFilter,
     VkWriteDescriptorSet wds{};
     wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     wds.dstSet = t.set;
-    wds.dstBinding = 0;
+    wds.dstBinding = 1;
     wds.descriptorCount = 1;
     wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     wds.pImageInfo = &dii;
@@ -1028,10 +1056,7 @@ void VkRenderer::DrawSprite(uint32_t texId, float x, float y, float w, float h,
     float qu[6] = {u0, u1, u1, u0, u1, u0};
     float qv[6] = {v0, v0, v1, v0, v1, v1};
     for (int i = 0; i < 6; i++) {
-        vertsPtr->push_back(qx[i]);
-        vertsPtr->push_back(qy[i]);
-        vertsPtr->push_back(qu[i]);
-        vertsPtr->push_back(qv[i]);
+        PushLimeVertex(*vertsPtr, qx[i], qy[i], qu[i], qv[i]);
     }
 }
 
@@ -1072,21 +1097,17 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount) {
         th = (float)o.textures[texId - 1].h;
     }
 
-    vertsPtr->reserve(vertsPtr->size() + (size_t)vertexCount * 4);
+    vertsPtr->reserve(vertsPtr->size() + (size_t)vertexCount * 15);
     for (int i = 0; i < vertexCount; i++) {
         float px = verts[i * 4 + 0];
         float py = verts[i * 4 + 1];
         float u = verts[i * 4 + 2];
         float v = verts[i * 4 + 3];
-        vertsPtr->push_back(px * 2.0f / w - 1.0f);
-        // Vulkan 的 NDC y=+1 在屏幕底部，GL/OpenFL 的 y=0 在顶部，所以直接把像素 y 映射进
-        // [-1,+1] 即可（不能再取 1 - ...，否则整帧上下镜像）
-        vertsPtr->push_back(py * 2.0f / h - 1.0f);
+        // 像素坐标直接进顶点：像素→NDC 的换算由 UBO 里的投影矩阵完成
         // uv 超出 0..1 说明传进来的是像素坐标，按采样源尺寸归一化，否则采样越界全黑
         if (u > 1.001f || u < -1.001f) u = tw > 0 ? u / tw : 1.0f;
         if (v > 1.001f || v < -1.001f) v = th > 0 ? v / th : 1.0f;
-        vertsPtr->push_back(u);
-        vertsPtr->push_back(v);
+        PushLimeVertex(*vertsPtr, px, py, u, v);
     }
 }
 
@@ -1194,11 +1215,13 @@ uint32_t VkRenderer::CreateRenderTarget(int w, int h) {
     VkAttachmentDescription att{};
     att.format = VK_FORMAT_R8G8B8A8_UNORM;
     att.samples = VK_SAMPLE_COUNT_1_BIT;
-    att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    // 离屏 pass 不能 CLEAR：多段 filter 会复用同一批目标，清屏会把上一 pass 的内容抹掉
+    att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    // finalLayout 是 SHADER_READ_ONLY（这一 pass 结束就要被采样），initialLayout 与之一致才能保留内容
+    att.initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     att.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkAttachmentReference ref{};
@@ -1254,14 +1277,14 @@ uint32_t VkRenderer::CreateRenderTarget(int w, int h) {
     wds[0].dstSet = t.set;
     wds[0].dstBinding = 0;
     wds[0].descriptorCount = 1;
-    wds[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    wds[0].pImageInfo = &dii;
+    wds[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    wds[0].pBufferInfo = &dbi;
     wds[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     wds[1].dstSet = t.set;
     wds[1].dstBinding = 1;
     wds[1].descriptorCount = 1;
-    wds[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    wds[1].pBufferInfo = &dbi;
+    wds[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wds[1].pImageInfo = &dii;
     g_updateDS(o.dev, 2, wds, 0, nullptr);
 
     t.w = w;
@@ -1296,9 +1319,9 @@ void VkRenderer::EndFrame() {
 
     auto pushBatch = [&](std::vector<float>& v, VkDescriptorSet set) {
         if (v.empty()) return;
-        size_t vc = v.size() / 4;
+        size_t vc = v.size() / 15;
         if (totalVerts + vc > (size_t)MAX_SPRITES * 6) return;
-        memcpy(dst + totalVerts * 4, v.data(), v.size() * sizeof(float));
+        memcpy(dst + totalVerts * 15, v.data(), v.size() * sizeof(float));
         ranges.push_back({set, totalVerts, vc});
         totalVerts += vc;
     };
@@ -1349,6 +1372,18 @@ void VkRenderer::EndFrame() {
     rbi.renderArea.extent = ext;
     rbi.clearValueCount = 1;
     rbi.pClearValues = &cv;
+
+    // 每个 pass 的坐标系不同：UBO 里的投影矩阵按当前渲染目标尺寸重算，
+    // 否则离屏 pass 会整体错位（着色器读的就是这块 UBO）
+    if (o.uboPtr) {
+        memset(o.uboPtr, 0, 64);
+        o.uboPtr[0] = 2.0f / (float)ext.width;
+        o.uboPtr[5] = 2.0f / (float)ext.height;
+        o.uboPtr[10] = 1.0f;
+        o.uboPtr[12] = -1.0f;
+        o.uboPtr[13] = -1.0f;
+        o.uboPtr[15] = 1.0f;
+    }
 
     g_beginRP(o.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
     if (totalVerts > 0) {
