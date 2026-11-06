@@ -92,13 +92,12 @@ jobs:
       - name: Trim heavy assets
         shell: pwsh
         run: |
-          foreach ($d in @('assets\songs', 'assets\shared', 'assets\videos')) {
-            if (Test-Path $d) {
-              $mb = [math]::Round(((Get-ChildItem $d -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum) / 1MB, 1)
-              Write-Host "$d = ${mb}MB -> emptied"
-              Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            New-Item -ItemType Directory -Force -Path $d | Out-Null
+          # 清空 assets 下所有内容（保留目录结构），让 Haxe 编译阶段几乎不处理资源
+          # 这是 OOM / 超长静默的根因：PRELOAD_ALL 会把全部资源转成 Haxe 类
+          Get-ChildItem 'assets' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $mb = [math]::Round(((Get-ChildItem $_.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum) / 1MB, 1)
+            Write-Host "$($_.Name) = ${mb}MB -> emptied"
+            Get-ChildItem $_.FullName -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
           }
 
       # 把 lime 输出重定向到文件并轮询打印，这样 Actions 页面能看到实时进度
@@ -128,9 +127,6 @@ jobs:
           Get-ChildItem "$limeRoot\ndll" -Recurse -File -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
           Write-Host "Windows64 ndll exists: $(Test-Path "$limeRoot\ndll\Windows64\lime.ndll")"
           Write-Host "Windows64-64 ndll exists: $(Test-Path "$limeRoot\ndll\Windows64-64\lime.ndll")"
-          # 诊断模式：立即失败，让 job 3 分钟内结束，便于下载完整日志
-          Write-Host "=== diagnostic-only run, stopping here ==="
-          exit 1
 
       - name: Build game
         shell: pwsh
