@@ -52,7 +52,7 @@ jobs:
           Copy-Item "assets\shared\images\characters\BF_AllStars_DEAD_Assets.png"       "native_vulkan\texture1.png" -Force
           Copy-Item "assets\shared\images\characters\GF_AllStars_DEAD_Assets.png"       "native_vulkan\texture2.png" -Force
           Copy-Item "assets\shared\images\mario\allfinal\act3\Act3_Ultra_M.png"         "native_vulkan\texture3.png" -Force
-          cl /EHsc /O2 /std:c++17 /I vkh\include /I native_vulkan native_vulkan\main.cpp /link user32.lib gdi32.lib /out:native_vulkan\vulkan_demo.exe
+          cl /EHsc /O2 /std:c++17 /I vkh\include /I native_vulkan native_vulkan\vk_renderer.cpp native_vulkan\demo_renderer.cpp /link user32.lib gdi32.lib /out:native_vulkan\vulkan_demo.exe
           if ($LASTEXITCODE -ne 0) { throw "cl failed" }
           Get-ChildItem native_vulkan\vulkan_demo.exe, native_vulkan\texture0.png | Select-Object Name, Length
 
