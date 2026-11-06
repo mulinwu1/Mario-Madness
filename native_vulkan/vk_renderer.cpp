@@ -1106,6 +1106,13 @@ bool VkRenderer::GetRenderTargetSize(uint32_t id, int* w, int* h) const {
     return true;
 }
 
+bool VkRenderer::FrameHasGeometry() const {
+    if (!impl->frameOpen) return false;
+    for (auto& t : impl->textures) if (!t.verts.empty()) return true;
+    for (auto& t : impl->targets) if (!t.verts.empty()) return true;
+    return false;
+}
+
 bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float a) {
     Impl& o = *impl;
     // 同一目标重复绑定（OpenFL 每个 pass 开头都会 glClear，gl_vk_handle_clear 又会 Bind 一次）
