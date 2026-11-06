@@ -319,6 +319,9 @@ struct AttribState {
     int type = 0;
     int stride = 0;
     double offset = 0;
+    int buffer = 0;   // glVertexAttribPointer 当时绑定的 GL_ARRAY_BUFFER
+    bool client = false;        // buffer==0 时 offset 是 client 内存指针
+    uintptr_t clientPtr = 0;
     bool enabled = false;
 };
 static AttribState g_attrs[16];
@@ -369,6 +372,12 @@ void lime_gl_vertex_attrib_pointer(int index, int size, int type, bool normalize
     g_attrs[index].type = type;
     g_attrs[index].stride = stride;
     g_attrs[index].offset = offset;
+    // GL 语义：属性数据源是调用 glVertexAttribPointer 时绑定的 VBO，
+    // 不是绘制时当前绑定的那个；uv 与 position 分属不同 VBO 时必须分开读
+    g_attrs[index].buffer = g_boundArrayBuffer;
+    // 没绑 VBO 时，offset 本身就是 client-side 数组的内存地址；不能拿它当字节偏移
+    g_attrs[index].client = (g_boundArrayBuffer == 0);
+    g_attrs[index].clientPtr = (uintptr_t)offset;
 }
 
 void lime_gl_enable_vertex_attrib_array(int index) {
@@ -381,24 +390,46 @@ void lime_gl_disable_vertex_attrib_array(int index) {
 
 void lime_gl_draw_arrays(int mode, int first, int count) {
     if (!g_renderer || count <= 0) return;
-    if (g_boundArrayBuffer <= 0 || g_boundArrayBuffer >= (int)g_buffers.size()) return;
-    const GLBufferData& b = g_buffers[(size_t)g_boundArrayBuffer];
-    if (b.data.empty()) return;
+    // 每个属性的数据源是设置指针时的 VBO（GL 语义），不一定是绘制时当前绑定的 VBO。
+    // buffer==0 表示 client-side 数组：此时 offset 是内存地址，必须直接读；
+    // 旧实现回退到位置 VBO，会把位置数据当 uv 读，表现为整张图集铺进精灵四边形
+    bool posClient = g_attrs[0].buffer == 0 && g_attrs[0].clientPtr > 0x10000;
+    bool uvClient = g_attrs[1].buffer == 0 && g_attrs[1].clientPtr > 0x10000;
+    int posBuf = posClient ? 0 : (g_attrs[0].buffer > 0 ? g_attrs[0].buffer : g_boundArrayBuffer);
+    int uvBuf = uvClient ? 0 : (g_attrs[1].buffer > 0 ? g_attrs[1].buffer : posBuf);
+    if (!posClient) {
+        if (posBuf <= 0 || posBuf >= (int)g_buffers.size()) return;
+        if (g_buffers[(size_t)posBuf].data.empty()) return;
+    }
+    if (!uvClient) {
+        if (uvBuf <= 0 || uvBuf >= (int)g_buffers.size()) uvBuf = posBuf;
+        if (uvBuf <= 0 || uvBuf >= (int)g_buffers.size()) return;
+        if (g_buffers[(size_t)uvBuf].data.empty()) return;
+    }
 
-    int stride = g_attrs[0].stride;
-    if (stride <= 0) stride = 16;
+    int strideP = g_attrs[0].stride;
+    if (strideP <= 0) strideP = 16;
+    int strideU = g_attrs[1].stride;
+    if (strideU <= 0) strideU = strideP;
 
     std::vector<float> out((size_t)count * 4);
-    const unsigned char* p = b.data.data();
+    const unsigned char* pp = posClient
+        ? (const unsigned char*)g_attrs[0].clientPtr : g_buffers[(size_t)posBuf].data.data();
+    const unsigned char* pu = uvClient
+        ? (const unsigned char*)g_attrs[1].clientPtr : g_buffers[(size_t)uvBuf].data.data();
+    size_t pBytes = posClient ? 0 : g_buffers[(size_t)posBuf].data.size();
+    size_t uBytes = uvClient ? 0 : g_buffers[(size_t)uvBuf].data.size();
+    size_t pBase0 = posClient ? 0 : (size_t)g_attrs[0].offset;
+    size_t uBase0 = uvClient ? 0 : (size_t)g_attrs[1].offset;
     for (int i = 0; i < count; i++) {
         size_t base = (size_t)first + (size_t)i;
-        size_t posOff = (size_t)g_attrs[0].offset + base * (size_t)stride;
-        size_t uvOff = (size_t)g_attrs[1].offset + base * (size_t)stride;
-        if (posOff + 8 > b.data.size() || uvOff + 8 > b.data.size()) return;
-        out[(size_t)i * 4 + 0] = *(const float*)(p + posOff);
-        out[(size_t)i * 4 + 1] = *(const float*)(p + posOff + 4);
-        out[(size_t)i * 4 + 2] = *(const float*)(p + uvOff);
-        out[(size_t)i * 4 + 3] = *(const float*)(p + uvOff + 4);
+        size_t posOff = pBase0 + base * (size_t)strideP;
+        size_t uvOff = uBase0 + base * (size_t)strideU;
+        if ((!posClient && posOff + 8 > pBytes) || (!uvClient && uvOff + 8 > uBytes)) return;
+        out[(size_t)i * 4 + 0] = *(const float*)(pp + posOff);
+        out[(size_t)i * 4 + 1] = *(const float*)(pp + posOff + 4);
+        out[(size_t)i * 4 + 2] = *(const float*)(pu + uvOff);
+        out[(size_t)i * 4 + 3] = *(const float*)(pu + uvOff + 4);
     }
 
     int texName = 0;
@@ -417,24 +448,69 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
         return;
     }
     g_draws++;
+    // 诊断：确认 lime 传进来的 uv 是“帧子矩形归一化”还是“整图 0..1”/像素值
+    {
+        static int s_uvdbg = 0;
+        if (s_uvdbg < 25 || s_uvdbg % 300 == 0) {
+            float minU = out[2], maxU = out[2], minV = out[3], maxV = out[3];
+            float minX = out[0], maxX = out[0], minY = out[1], maxY = out[1];
+            for (int i = 1; i < count; i++) {
+                float u = out[(size_t)i * 4 + 2], v = out[(size_t)i * 4 + 3];
+                if (u < minU) minU = u; if (u > maxU) maxU = u;
+                if (v < minV) minV = v; if (v > maxV) maxV = v;
+                float x = out[(size_t)i * 4 + 0], y = out[(size_t)i * 4 + 1];
+                if (x < minX) minX = x; if (x > maxX) maxX = x;
+                if (y < minY) minY = y; if (y > maxY) maxY = y;
+            }
+            int tw = 0, th = 0; gl_vk_texture_size (texName, &tw, &th);
+            fprintf (stderr, "[gldraw] tex=%d size=%dx%d n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] pStride=%d pOff=%.0f uvBuf=%d uvStride=%d uvOff=%.0f pBufRaw=%d uBufRaw=%d posCli=%d uvCli=%d\n",
+                     texName, tw, th, count, minU, maxU, minV, maxV,
+                     minX, maxX, minY, maxY, strideP, g_attrs[0].offset,
+                     uvBuf, strideU, g_attrs[1].offset,
+                     g_attrs[0].buffer, g_attrs[1].buffer, posClient ? 1 : 0, uvClient ? 1 : 0);
+        }
+        s_uvdbg++;
+    }
     g_renderer->DrawRaw(vkTex, out.data(), count);
 }
 
 void lime_gl_draw_elements(int mode, int count, int type, double offset) {
     if (!g_renderer || count <= 0) return;
-    if (g_boundArrayBuffer <= 0 || g_boundArrayBuffer >= (int)g_buffers.size()) return;
+    // 同上：pos / uv 各自读设置指针时的数据源；client-side 数组（buffer==0）
+    // 的 offset 是内存地址，必须直接读，不能回退到位置 VBO
+    bool posClient = g_attrs[0].buffer == 0 && g_attrs[0].clientPtr > 0x10000;
+    bool uvClient = g_attrs[1].buffer == 0 && g_attrs[1].clientPtr > 0x10000;
+    int posBuf = posClient ? 0 : (g_attrs[0].buffer > 0 ? g_attrs[0].buffer : g_boundArrayBuffer);
+    int uvBuf = uvClient ? 0 : (g_attrs[1].buffer > 0 ? g_attrs[1].buffer : posBuf);
+    if (!posClient) {
+        if (posBuf <= 0 || posBuf >= (int)g_buffers.size()) return;
+        if (g_buffers[(size_t)posBuf].data.empty()) return;
+    }
+    if (!uvClient) {
+        if (uvBuf <= 0 || uvBuf >= (int)g_buffers.size()) uvBuf = posBuf;
+        if (uvBuf <= 0 || uvBuf >= (int)g_buffers.size()) return;
+        if (g_buffers[(size_t)uvBuf].data.empty()) return;
+    }
     if (g_boundElementBuffer <= 0 || g_boundElementBuffer >= (int)g_buffers.size()) return;
-    const GLBufferData& vb = g_buffers[(size_t)g_boundArrayBuffer];
     const GLBufferData& ib = g_buffers[(size_t)g_boundElementBuffer];
-    if (vb.data.empty() || ib.data.empty()) return;
+    if (ib.data.empty()) return;
 
-    int stride = g_attrs[0].stride;
-    if (stride <= 0) stride = 16;
+    int strideP = g_attrs[0].stride;
+    if (strideP <= 0) strideP = 16;
+    int strideU = g_attrs[1].stride;
+    if (strideU <= 0) strideU = strideP;
     int idxSize = (type == 0x1403) ? 2 : 4; // GL_UNSIGNED_SHORT = 0x1403
 
     std::vector<float> out((size_t)count * 4);
     const unsigned char* ip = ib.data.data();
-    const unsigned char* p = vb.data.data();
+    const unsigned char* pp = posClient
+        ? (const unsigned char*)g_attrs[0].clientPtr : g_buffers[(size_t)posBuf].data.data();
+    const unsigned char* pu = uvClient
+        ? (const unsigned char*)g_attrs[1].clientPtr : g_buffers[(size_t)uvBuf].data.data();
+    size_t pBytes = posClient ? 0 : g_buffers[(size_t)posBuf].data.size();
+    size_t uBytes = uvClient ? 0 : g_buffers[(size_t)uvBuf].data.size();
+    size_t pBase0 = posClient ? 0 : (size_t)g_attrs[0].offset;
+    size_t uBase0 = uvClient ? 0 : (size_t)g_attrs[1].offset;
     size_t byteOff = (size_t)offset;
     for (int i = 0; i < count; i++) {
         size_t idxOff = byteOff + (size_t)i * (size_t)idxSize;
@@ -442,13 +518,13 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
         unsigned int idx = (idxSize == 2)
             ? *(const unsigned short*)(ip + idxOff)
             : *(const unsigned int*)(ip + idxOff);
-        size_t posOff = (size_t)g_attrs[0].offset + (size_t)idx * (size_t)stride;
-        size_t uvOff = (size_t)g_attrs[1].offset + (size_t)idx * (size_t)stride;
-        if (posOff + 8 > vb.data.size() || uvOff + 8 > vb.data.size()) return;
-        out[(size_t)i * 4 + 0] = *(const float*)(p + posOff);
-        out[(size_t)i * 4 + 1] = *(const float*)(p + posOff + 4);
-        out[(size_t)i * 4 + 2] = *(const float*)(p + uvOff);
-        out[(size_t)i * 4 + 3] = *(const float*)(p + uvOff + 4);
+        size_t posOff = pBase0 + (size_t)idx * (size_t)strideP;
+        size_t uvOff = uBase0 + (size_t)idx * (size_t)strideU;
+        if ((!posClient && posOff + 8 > pBytes) || (!uvClient && uvOff + 8 > uBytes)) return;
+        out[(size_t)i * 4 + 0] = *(const float*)(pp + posOff);
+        out[(size_t)i * 4 + 1] = *(const float*)(pp + posOff + 4);
+        out[(size_t)i * 4 + 2] = *(const float*)(pu + uvOff);
+        out[(size_t)i * 4 + 3] = *(const float*)(pu + uvOff + 4);
     }
 
     int texName = 0;
@@ -465,6 +541,29 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
         return;
     }
     g_draws++;
+    // 诊断：与 draw_arrays 同款，确认 indexed 路径的 uv 语义
+    {
+        static int s_uvdbg2 = 0;
+        if (s_uvdbg2 < 25 || s_uvdbg2 % 300 == 0) {
+            float minU = out[2], maxU = out[2], minV = out[3], maxV = out[3];
+            float minX = out[0], maxX = out[0], minY = out[1], maxY = out[1];
+            for (int i = 1; i < count; i++) {
+                float u = out[(size_t)i * 4 + 2], v = out[(size_t)i * 4 + 3];
+                if (u < minU) minU = u; if (u > maxU) maxU = u;
+                if (v < minV) minV = v; if (v > maxV) maxV = v;
+                float x = out[(size_t)i * 4 + 0], y = out[(size_t)i * 4 + 1];
+                if (x < minX) minX = x; if (x > maxX) maxX = x;
+                if (y < minY) minY = y; if (y > maxY) maxY = y;
+            }
+            int tw = 0, th = 0; gl_vk_texture_size (texName, &tw, &th);
+            fprintf (stderr, "[gldraw/ie] tex=%d size=%dx%d n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] pStride=%d pOff=%.0f uvBuf=%d uvStride=%d uvOff=%.0f pBufRaw=%d uBufRaw=%d posCli=%d uvCli=%d\n",
+                     texName, tw, th, count, minU, maxU, minV, maxV,
+                     minX, maxX, minY, maxY, strideP, g_attrs[0].offset,
+                     uvBuf, strideU, g_attrs[1].offset,
+                     g_attrs[0].buffer, g_attrs[1].buffer, posClient ? 1 : 0, uvClient ? 1 : 0);
+        }
+        s_uvdbg2++;
+    }
     g_renderer->DrawRaw(vkTex, out.data(), count);
 }
 
