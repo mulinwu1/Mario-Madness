@@ -14,6 +14,15 @@
 static VkPipeline g_probePipeline = VK_NULL_HANDLE;
 static int g_probeProgram = 0;
 
+// 取证探针（只记状态，不改行为）：后缓冲帧是否已 open 但还没 close。
+// 用来把"合成 quad 落进一个不会 EndFrame 的帧"与"BindRenderTarget(0) 失败"分开。
+static int g_bbOpen = 0;
+// 按 program 累计的绘制/整屏/顶点数（只计数，不受逐条日志上限影响）
+static uint64_t g_progDraw[256];
+static uint64_t g_progWhole[256];
+static uint64_t g_progVerts[256];
+static uint64_t g_progDrawTotal = 0;
+
 #define MAX_SPRITES 4096
 #define MAX_TEXTURES 512
 
@@ -43,6 +52,14 @@ struct RenderTarget {
     uint64_t createdFrame = 0;
     uint64_t lastWriteFrame = 0;
 };
+
+// 取证用：当前挂着但未提交的顶点总数（顶点 = 15 floats）
+static size_t PendingVertsOf (const std::vector<TexSlot>& tex, const std::vector<RenderTarget>& tgt) {
+    size_t n = 0;
+    for (auto& t : tex) n += t.verts.size() / 15;
+    for (auto& t : tgt) n += t.verts.size() / 15;
+    return n;
+}
 
 struct VkRenderer::Impl {
     HWND hwnd = nullptr;
@@ -1504,6 +1521,13 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
                     pixelUv ? 1 : 0, spansWhole ? 1 : 0, vertexAlpha ? "arr" : "const", aMin, aMax, vkProg);
             s_logged++;
         }
+        // 按 program 只计数不逐条打：主菜单段的 prog 分布靠这里，不受 6000 条上限影响
+        if (vkProg >= 0 && vkProg < 256) {
+            g_progDraw[vkProg]++;
+            if (spansWhole) g_progWhole[vkProg]++;
+            g_progVerts[vkProg] += (uint64_t) vertexCount;
+        }
+        g_progDrawTotal++;
     }
 
     vertsPtr->reserve(vertsPtr->size() + (size_t)vertexCount * 15);
@@ -1591,6 +1615,11 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
             o.clearG = g;
             o.clearB = b;
             o.clearA = a;
+            if (id == 0) {
+                g_bbOpen = 1;
+                fprintf(stderr, "[vk] bbframe open f=%llu ok=1 target=0 path=reuse load=%d\n",
+                        (unsigned long long) g_drawFrame, o.bbLoad ? 1 : 0);
+            }
             return true;
         }
         // 取证开关 VK_FRESH_IMG=1（默认关）：第二次绑定后缓冲时，若已累积几何，
@@ -1607,9 +1636,21 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
             o.clearG = g;
             o.clearB = b;
             o.clearA = a;
+            if (id == 0) {
+                g_bbOpen = 1;
+                fprintf(stderr, "[vk] bbframe open f=%llu ok=1 target=0 path=same load=%d\n",
+                        (unsigned long long) g_drawFrame, o.bbLoad ? 1 : 0);
+            }
             return true;
         }
         EndFrame ();
+    }
+    // 探针（只记状态）：0 → 离屏切换时后缓冲若还挂着一批没提交的顶点，这批顶点
+    // 会被 1641 的 flush 条件（只对 currentTarget>=1000）跳过，从而并进离屏 pass。
+    if (o.frameOpen && o.currentTarget == 0 && id >= 1000) {
+        size_t pv = PendingVertsOf (o.textures, o.targets);
+        fprintf(stderr, "[vk] bbframe migrate f=%llu from=0 to=%u pendingVerts=%zu\n",
+                (unsigned long long) g_drawFrame, id, pv);
     }
     // 切换目标前先把旧离屏 pass 真正提交进旧 FBO：否则整帧所有 pass 的顶点
     // 会被攒到 present 那一刻、用最后一张图（后缓冲）的投影一次性画出去，
@@ -1631,13 +1672,24 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
             o.bbLoad = true;
         } else {
             VkResult ar = g_acquire(o.dev, o.swapchain, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE, &o.frameImageIndex);
-            if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) return false;
+            if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
+                fprintf(stderr, "[vk] bbframe open f=%llu ok=0 target=0 path=acquire err=%d\n",
+                        (unsigned long long) g_drawFrame, (int) ar);
+                return false;
+            }
             o.bbHeld = true;
             o.bbLoad = false;
         }
+        g_bbOpen = 1;
+        fprintf(stderr, "[vk] bbframe open f=%llu ok=1 target=0 path=acquire img=%u load=%d\n",
+                (unsigned long long) g_drawFrame, o.frameImageIndex, o.bbLoad ? 1 : 0);
     } else {
         uint32_t ti = id - 1000;
-        if (ti >= o.targets.size() || !o.targets[ti].used) return false;
+        if (ti >= o.targets.size() || !o.targets[ti].used) {
+            fprintf(stderr, "[vk] bbframe open f=%llu ok=0 target=%u path=offscreen\n",
+                    (unsigned long long) g_drawFrame, id);
+            return false;
+        }
     }
     o.frameOpen = true;
     return true;
@@ -1801,7 +1853,25 @@ void VkRenderer::DestroyRenderTarget(uint32_t id) {
 
 void VkRenderer::EndFrame() {
     Impl& o = *impl;
-    if (!o.frameOpen) return;
+    if (!o.frameOpen) {
+        if (g_bbOpen) {
+            fprintf(stderr, "[vk] bbframe close f=%llu target=%u noop=1 BBOPEN=1\n",
+                    (unsigned long long) g_drawFrame, o.currentTarget);
+        }
+        return;
+    }
+    // 探针（只记状态）：后缓冲 close 与 open 是否配对；离屏 close 时后缓冲还开着 = 顶点被并走
+    {
+        size_t pv = PendingVertsOf (o.textures, o.targets);
+        if (o.currentTarget == 0) {
+            fprintf(stderr, "[vk] bbframe close f=%llu target=0 verts=%zu open=%d\n",
+                    (unsigned long long) g_drawFrame, pv, g_bbOpen ? 1 : 0);
+            g_bbOpen = 0;
+        } else if (g_bbOpen) {
+            fprintf(stderr, "[vk] bbframe close f=%llu target=%u verts=%zu BBOPEN=1 backbufferNotClosed\n",
+                    (unsigned long long) g_drawFrame, o.currentTarget, pv);
+        }
+    }
 
     float* dst = o.vbPtr;
     struct DrawRange { VkDescriptorSet set; size_t first; size_t count; };
@@ -1952,6 +2022,34 @@ void VkRenderer::EndFrame() {
                     totalVerts, ranges.size(), delsample, (unsigned long long)created,
                     (o.currentTarget == 0) ? g_bbLastTex : 0u, srcs);
             s_submitLog++;
+        }
+        // 汇总（只计数，不逐条打）：tgt=0 的提交帧数/顶点/空帧，以及按 program 的累计绘制
+        {
+            static uint64_t s_t0 = 0, s_t0v = 0, s_t0empty = 0, s_t104 = 0, s_t105 = 0, s_osum = 0;
+            if (o.currentTarget == 0) {
+                s_t0++;
+                s_t0v += totalVerts;
+                if (totalVerts == 0) s_t0empty++;
+            } else if (o.currentTarget == 1004) {
+                s_t104++;
+            } else if (o.currentTarget == 1005) {
+                s_t105++;
+            }
+            s_osum++;
+            if (s_osum % 60 == 0) {
+                fprintf(stderr,
+                        "[vksum] f=%llu t0=%llu t0verts=%llu t0empty=%llu t1004=%llu t1005=%llu draws=%llu"
+                        " p1=%llu p2=%llu p3=%llu p4=%llu p5=%llu p6=%llu p7=%llu w1=%llu w5=%llu w6=%llu bbopen=%d\n",
+                        (unsigned long long) s_frames, (unsigned long long) s_t0, (unsigned long long) s_t0v,
+                        (unsigned long long) s_t0empty, (unsigned long long) s_t104, (unsigned long long) s_t105,
+                        (unsigned long long) g_progDrawTotal,
+                        (unsigned long long) g_progDraw[1], (unsigned long long) g_progDraw[2],
+                        (unsigned long long) g_progDraw[3], (unsigned long long) g_progDraw[4],
+                        (unsigned long long) g_progDraw[5], (unsigned long long) g_progDraw[6],
+                        (unsigned long long) g_progDraw[7],
+                        (unsigned long long) g_progWhole[1], (unsigned long long) g_progWhole[5],
+                        (unsigned long long) g_progWhole[6], g_bbOpen);
+            }
         }
         if (s_frames == 1 || s_frames % 30 == 0 || o.currentTarget == 0) {
             float first[4] = {0, 0, 0, 0};
