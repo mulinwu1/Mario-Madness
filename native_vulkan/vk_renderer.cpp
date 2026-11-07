@@ -9,8 +9,8 @@
 #include <cstdlib>
 #include <ctime>
 
-// gl_fbo 侧的当前目标（只读探针用，定义在 gl_fbo.cpp:706）
-extern uint32_t gl_vk_current_target ();
+// gl_fbo 侧的当前目标（只读探针用，定义在 lime 命名空间的 gl_fbo.cpp:706）
+namespace lime { uint32_t gl_vk_current_target (); }
 
 // 接线探针（本轮只接不选）：gl_shader 自己建的管线。它不参与任何 draw，
 // 只在 render pass 开头绑一次、紧接着换回固定管线（两次绑定之间没有 draw）。
@@ -1870,7 +1870,7 @@ void VkRenderer::EndFrame() {
     if (o.presentReq) {
         fprintf(stderr, "[vk] efstate f=%llu req=1 open=%d cur=%u gcur=%u bbHeld=%d bbOpen=%d\n",
                 (unsigned long long) g_drawFrame, o.frameOpen ? 1 : 0, o.currentTarget,
-                gl_vk_current_target (), o.bbHeld ? 1 : 0, g_bbOpen);
+                lime::gl_vk_current_target (), o.bbHeld ? 1 : 0, g_bbOpen);
     }
     if (!o.frameOpen) {
         // 审计要求：不再用 g_bbOpen 门控，每次空 EndFrame 都打，否则"零 noop"无法区分原因
