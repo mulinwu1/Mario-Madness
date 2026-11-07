@@ -15,13 +15,19 @@ env:
   NDK_VERSION: "21.4.7075529"
   # 只要 64 位
   ANDROID_ABI: "arm64-v8a"
+  # 冒烟模式：证明"真的开始编译"后立刻杀掉，不做 AArch64 断言、不上传 .so
+  SMOKE_MODE: "1"
 
 jobs:
-  probe:
+  # ==========================================================================
+  # job 1：分钟级冒烟——只证明 rebuild 真的开始编译，出现第一条 TU 就杀
+  # 修正两处：补 ANDROID_SDK（lime 只认 ANDROID_SDK / ANDROID_NDK_ROOT 两个环境变量）；
+  #          删掉 `yes | haxelib run lime setup android`（上轮 88m56s 全卡在这条管道）
+  # ==========================================================================
+  smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 15
     steps:
-      # 仓库有 1.8GB 资源，本探针只验工具链，稀疏检出只取 native_vulkan
       - name: "Checkout (sparse: native_vulkan)"
         uses: actions/checkout@v4
         with:
@@ -29,7 +35,6 @@ jobs:
             native_vulkan
           sparse-checkout-cone-mode: false
 
-      # 产物/日志放 RUNNER_TEMP：checkout 的 clean 会把 workspace 里的未跟踪文件删掉
       - name: Init timing
         run: |
           echo "PROBE_T0=$(date +%s)" >> "$GITHUB_ENV"
@@ -51,10 +56,7 @@ jobs:
           SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
           SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
           echo "SDK=$SDK"
-          echo "--- 镜像里已装的 NDK ---"
           ls -1 "$SDK/ndk" 2>/dev/null || true
-          echo "--- sdkmanager 安装 ndk;${NDK_VERSION} ---"
-          # 注意：yes 读完 stdin 会被 SIGPIPE 杀掉(退出141)，所以只看 sdkmanager 自己的退出码
           yes | "$SDKM" --sdk_root="$SDK" "ndk;${NDK_VERSION}" 2>&1 \
             | tee "$RUNNER_TEMP/probe-out/install-ndk.log" | tail -n 6
           code=${PIPESTATUS[1]}
@@ -63,10 +65,13 @@ jobs:
           NDK_DIR="$SDK/ndk/${NDK_VERSION}"
           [ -d "$NDK_DIR" ] || { echo "NDK 目录不存在: $NDK_DIR"; exit 1; }
           cat "$NDK_DIR/source.properties"
+          # lime 8.0.2 AndroidPlatform.hx:467 只读 ANDROID_SDK / ANDROID_NDK_ROOT，
+          # 之前只写了 ANDROID_SDK_ROOT/ANDROID_HOME，才逼得它去跑交互式 setup
           {
             echo "ANDROID_NDK_ROOT=$NDK_DIR"
             echo "ANDROID_NDK_HOME=$NDK_DIR"
             echo "ANDROID_NDK=$NDK_DIR"
+            echo "ANDROID_SDK=$SDK"
             echo "ANDROID_SDK_ROOT=$SDK"
             echo "ANDROID_HOME=$SDK"
           } >> "$GITHUB_ENV"
@@ -101,7 +106,6 @@ jobs:
           } >> "$GITHUB_ENV"
           export PATH="$HAXE_DIR:$NEKO_DIR:$PATH"
           export NEKOPATH="$NEKO_DIR" HAXE_STD_PATH="$HAXE_DIR/std"
-          # haxelib 是 neko 脚本，必须能加载 libneko.so.2
           export LD_LIBRARY_PATH="$NEKO_DIR:${LD_LIBRARY_PATH:-}"
           haxe -version || exit 1
           neko -version || exit 1
@@ -120,12 +124,10 @@ jobs:
           echo "haxelib install hxcpp exit=$code"
           [ "$code" -eq 0 ] || { echo "haxelib 装 hxcpp 失败"; exit "$code"; }
           haxelib list | grep -i hxcpp || true
-          echo "--- hxcpp 首次自举（会本地编译 hxcpp host，耗时较长；退出码仅记录，不据此判失败）---"
+          echo "--- hxcpp 首次自举（退出码仅记录，不据此判失败）---"
           haxelib run hxcpp 2>&1 | tail -n 20; echo "hxcpp self-build exit=${PIPESTATUS[0]}"
           echo "install-hxcpp: $(( $(date +%s) - t0 ))s" | tee -a "$O/timings.txt"
 
-      # lime 的 tools 编译时要 -lib format；缺它 rebuild 会在第一秒就报
-      # "Cannot process [format]: Library format is not installed"
       - name: Install lime toolchain deps (format, hxp)
         run: |
           set -uo pipefail
@@ -141,7 +143,6 @@ jobs:
           haxelib list
           echo "install-lime-deps: $(( $(date +%s) - t0 ))s" | tee -a "$O/timings.txt"
 
-      # 第一版不打 patch_lime.py、不注入 native_vulkan：只验工具链能否出 liblime.so
       - name: Clone lime ${{ env.LIME_VERSION }} + haxelib dev
         run: |
           set -uo pipefail
@@ -156,25 +157,70 @@ jobs:
           ls "$HOME/lime-src/project/Build.xml" || exit 1
           echo "clone-lime: $(( $(date +%s) - t0 ))s" | tee -a "$O/timings.txt"
 
-      - name: lime rebuild android
+      # 必须先把 CLI 编出来：git 仓库里没有 tools/tools.n，`haxelib run lime` 会先走
+      # RunScript.rebuildTools() -> 还会顺手编 host 版 lime.ndll（ndll/Linux64/lime.ndll 也不在 git 里），
+      # 那样冒烟抓到的 TU 行来自 host 编译，证明不了 android 编译真的开始了。
+      # 预编译 tools.n 后 run.n 直接 exec `neko tools/tools.n rebuild android`，没有 host 编译混入。
+      # 这一步同时验证"改 tools/*.hx 后必须 haxe tools.hxml"这条重建路径。
+      - name: Prebuild lime CLI (haxe tools.hxml)
+        run: |
+          set -uo pipefail
+          t0=$(date +%s)
+          O="$RUNNER_TEMP/probe-out"
+          T="$HOME/lime-src/tools"
+          echo "tools.n before: $(ls -l "$T/tools.n" 2>/dev/null || echo 'absent (expected)')"
+          cd "$T" || exit 1
+          haxe tools.hxml 2>&1 | tee "$O/tools-hxml.log"
+          code=${PIPESTATUS[0]}
+          echo "haxe tools.hxml exit=$code"
+          [ "$code" -eq 0 ] || { echo "ASSERT FAIL: haxe tools.hxml 失败"; exit 1; }
+          [ -f "$T/tools.n" ] || { echo "ASSERT FAIL: tools.n 没生成"; exit 1; }
+          echo "tools.n after: mtime=$(stat -c %Y "$T/tools.n") size=$(stat -c %s "$T/tools.n")"
+          echo "prebuild-tools: $(( $(date +%s) - t0 ))s" | tee -a "$O/timings.txt"
+
+      # 冒烟：只看"第一条 TU 编译"是否出现，出现就立刻杀掉整棵进程树
+      - name: Smoke - lime rebuild android until first TU
+        timeout-minutes: 12
         run: |
           set -uo pipefail
           set +e
           t0=$(date +%s)
           O="$RUNNER_TEMP/probe-out"
+          LOG="$O/lime-rebuild.log"
           cd "$HOME/lime-src" || exit 1
-          echo "--- lime setup android（无 TTY，yes 喂默认值；失败不阻断）---"
-          yes | haxelib run lime setup android 2>&1 | tail -n 10 || true
-          echo "--- lime rebuild android ---"
-          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT  ABI=$ANDROID_ABI"
-          haxelib run lime rebuild android 2>&1 | tee "$O/lime-rebuild.log" | tail -n 60
-          code=${PIPESTATUS[0]}
-          echo "lime rebuild android exit=$code"
-          echo "build-lime-android: $(( $(date +%s) - t0 ))s" | tee -a "$O/timings.txt"
-          exit "$code"
+          echo "ANDROID_SDK=$ANDROID_SDK"
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
+          echo "tools.n: $(stat -c %s "$HOME/lime-src/tools/tools.n" 2>/dev/null || echo MISSING)"
+          echo "--- lime rebuild android (smoke, no setup) ---"
+          : > "$LOG"
+          setsid haxelib run lime rebuild android >>"$LOG" 2>&1 &
+          BLD=$!
+          seen=""
+          for i in $(seq 1 420); do
+            if sed -r 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -qE '^\s*-\s+\S+\.(cpp|cc|c)\s*$'; then
+              seen=1; break
+            fi
+            if ! kill -0 "$BLD" 2>/dev/null; then break; fi
+            sleep 1
+          done
+          echo "--- first log lines (ansi stripped) ---"
+          sed -r 's/\x1b\[[0-9;]*m//g' "$LOG" | head -n 25
+          if [ -n "$seen" ]; then
+            echo "SMOKE_OK: first TU compile seen at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            sed -r 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -m 3 -E '^\s*-\s+\S+\.(cpp|cc|c)\s*$' || true
+          else
+            echo "SMOKE FAIL: no TU compile within 420s (build may have exited or errored)"
+            sed -r 's/\x1b\[[0-9;]*m//g' "$LOG" | tail -n 60
+          fi
+          kill -TERM -"$BLD" 2>/dev/null || true
+          sleep 3
+          kill -KILL -"$BLD" 2>/dev/null || true
+          wait "$BLD" 2>/dev/null || true
+          echo "smoke-kill: $(( $(date +%s) - t0 ))s" | tee -a "$O/timings.txt"
+          [ -n "$seen" ] || exit 1
 
       - name: Assert liblime.so is AArch64
-        if: always()
+        if: always() && env.SMOKE_MODE != '1'
         run: |
           set -uo pipefail
           O="$RUNNER_TEMP/probe-out"
@@ -183,8 +229,6 @@ jobs:
           SO=$(find "$HOME/lime-src" -name 'liblime.so' 2>/dev/null | head -n 1)
           if [ -z "$SO" ]; then
             echo "ASSERT FAIL: 没找到 liblime.so"
-            echo "--- ndll 实际内容 ---"
-            find "$HOME/lime-src/ndll" "$HOME/lime-src/project" -maxdepth 4 \( -name '*.so' -o -name '*.a' -o -name 'obj' \) 2>/dev/null | head -n 40 || true
             exit 1
           fi
           file "$SO"
@@ -203,7 +247,6 @@ jobs:
           echo "--- 总耗时 ---"
           if [ -n "${PROBE_T0:-}" ]; then echo "total: $(( $(date +%s) - PROBE_T0 ))s"; fi
 
-      # checkout 的 clean 会清 workspace，所以最后再把产物拷进去给 upload-artifact 用
       - name: Collect outputs
         if: always()
         run: |
@@ -215,13 +258,229 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: android-probe-liblime
+          name: android-probe-smoke
           path: |
-            probe-out/liblime.so
             probe-out/lime-rebuild.log
             probe-out/install-ndk.log
             probe-out/install-hxcpp.log
             probe-out/install-format.log
             probe-out/install-hxp.log
+            probe-out/timings.txt
+          if-no-files-found: warn
+
+  # ==========================================================================
+  # job 2：arm64-only 入口验证——不编译，只证明"改了 tools 源码后补丁真的生效"
+  # 关键事实（lime 8.0.2）：
+  #   * haxelib run lime 跑的是包内预编译 run.n（tools/RunScript.hx），
+  #     只改 tools/platforms/*.hx 不重建不会生效 --> 静默无效
+  #   * RunScript.hx:202  `if (!FileSystem.exists("tools/tools.n") || args.indexOf("-rebuild") > -1) rebuildTools();`
+  #   * RunScript.hx:32   `System.runCommand(toolsDirectory, "haxe", ["tools.hxml"]);`
+  #   * tools/tools.hxml  = -main CommandLineTools -neko tools.n -cp platforms -cp ../src -lib format -lib hxp
+  #   即：cd <lime>/tools && haxe tools.hxml  -> 重新生成 tools/tools.n
+  # ==========================================================================
+  abi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Init timing
+        run: |
+          echo "PROBE_T0=$(date +%s)" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/probe-out"
+          echo "OUT=$RUNNER_TEMP/probe-out" >> "$GITHUB_ENV"
+
+      - name: Install Haxe ${{ env.HAXE_VERSION }} + Neko ${{ env.NEKO_VERSION }}
+        run: |
+          set -uo pipefail
+          t0=$(date +%s)
+          O="$RUNNER_TEMP/probe-out"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/haxe.tar.gz" \
+            "https://github.com/HaxeFoundation/haxe/releases/download/${HAXE_VERSION}/haxe-${HAXE_VERSION}-linux64.tar.gz" \
+            || { echo "下载 haxe 失败"; exit 1; }
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/neko.tar.gz" \
+            "https://github.com/HaxeFoundation/neko/releases/download/v2-3-0/neko-${NEKO_VERSION}-linux64.tar.gz" \
+            || { echo "下载 neko 失败"; exit 1; }
+          mkdir -p "$HOME/haxe" "$HOME/neko"
+          tar -xzf "$RUNNER_TEMP/haxe.tar.gz" -C "$HOME/haxe" || exit 1
+          tar -xzf "$RUNNER_TEMP/neko.tar.gz" -C "$HOME/neko" || exit 1
+          HAXE_DIR=$(dirname "$(find "$HOME/haxe" -maxdepth 2 -type f -name haxe | head -n 1)")
+          NEKO_DIR=$(dirname "$(find "$HOME/neko" -maxdepth 2 -type f -name neko | head -n 1)")
+          echo "$HAXE_DIR" >> "$GITHUB_PATH"
+          echo "$NEKO_DIR" >> "$GITHUB_PATH"
+          {
+            echo "HAXE_STD_PATH=$HAXE_DIR/std"
+            echo "NEKOPATH=$NEKO_DIR"
+            echo "LD_LIBRARY_PATH=$NEKO_DIR:${LD_LIBRARY_PATH:-}"
+          } >> "$GITHUB_ENV"
+          export PATH="$HAXE_DIR:$NEKO_DIR:$PATH"
+          export NEKOPATH="$NEKO_DIR" HAXE_STD_PATH="$HAXE_DIR/std"
+          export LD_LIBRARY_PATH="$NEKO_DIR:${LD_LIBRARY_PATH:-}"
+          haxe -version || exit 1
+          neko -version || exit 1
+          yes | haxelib setup "$HOME/haxelib" >/dev/null 2>&1 || true
+          haxelib config || exit 1
+          echo "install-haxe-neko: $(( $(date +%s) - t0 ))s" | tee -a "$O/timings.txt"
+
+      - name: Install lime toolchain deps (format, hxp)
+        run: |
+          set -uo pipefail
+          set +e
+          t0=$(date +%s)
+          O="$RUNNER_TEMP/probe-out"
+          for lib in format hxp; do
+            yes | haxelib install "$lib" 2>&1 | tee "$O/install-$lib.log" | tail -n 6
+            code=${PIPESTATUS[1]}
+            echo "haxelib install $lib exit=$code"
+            [ "$code" -eq 0 ] || { echo "装 $lib 失败"; exit 1; }
+          done
+          haxelib list
+          echo "install-lime-deps: $(( $(date +%s) - t0 ))s" | tee -a "$O/timings.txt"
+
+      - name: Clone lime ${{ env.LIME_VERSION }} + haxelib dev
+        run: |
+          set -uo pipefail
+          set +e
+          t0=$(date +%s)
+          O="$RUNNER_TEMP/probe-out"
+          git clone --depth 1 --branch "${LIME_VERSION}" --recursive --shallow-submodules \
+            https://github.com/openfl/lime.git "$HOME/lime-src" 2>&1 | tail -n 5
+          [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "clone lime 失败"; exit 1; }
+          haxelib dev lime "$HOME/lime-src" || exit 1
+          ls "$HOME/lime-src/tools/tools.hxml" || exit 1
+          ls "$HOME/lime-src/tools/platforms/AndroidPlatform.hx" || exit 1
+          # git 仓库里没有 tools/tools.n（只有根目录 run.n 这个引导脚本），
+          # 这正好证明"改 tools/*.hx 不会自动生效，必须自己 haxe tools.hxml"
+          if [ -f "$HOME/lime-src/tools/tools.n" ]; then
+            echo "tools.n present in repo (unexpected): $(stat -c %s "$HOME/lime-src/tools/tools.n") bytes"
+          else
+            echo "tools.n absent in repo (expected; 只有根 run.n): $(ls -l "$HOME/lime-src/run.n" | awk '{print $5}') bytes run.n"
+          fi
+          echo "clone-lime: $(( $(date +%s) - t0 ))s" | tee -a "$O/timings.txt"
+
+      # 打补丁：arm64-only 门（LIME_ANDROID_ABI）+ 干跑钩子（LIME_ANDROID_ABI_DRY）
+      # 不许静默 sed：每处替换都断言命中次数，改完再断言总特征数
+      - name: Patch AndroidPlatform.hx (asserted)
+        run: |
+          set -uo pipefail
+          python3 - "$HOME/lime-src/tools/platforms/AndroidPlatform.hx" <<'PY'
+          import io, sys
+          p = sys.argv[1]
+          raw = io.open(p, encoding='utf-8').read()
+
+          old_block = (
+              '\t\tvar armv5 = (command == "rebuild"\n'
+              '\t\t\t|| ArrayTools.containsValue(project.architectures, Architecture.ARMV5)\n'
+              '\t\t\t|| ArrayTools.containsValue(project.architectures, Architecture.ARMV6));\n'
+              '\t\tvar armv7 = (command == "rebuild" || ArrayTools.containsValue(project.architectures, Architecture.ARMV7));\n'
+              '\t\tvar arm64 = (command == "rebuild" || ArrayTools.containsValue(project.architectures, Architecture.ARM64));\n'
+              '\t\tvar x86 = (command == "rebuild" || ArrayTools.containsValue(project.architectures, Architecture.X86));\n'
+              '\t\tvar x64 = (/*command == "rebuild" ||*/ ArrayTools.containsValue(project.architectures, Architecture.X64));\n'
+          )
+          new_block = (
+              '\t\tvar abiOnly = Sys.getEnv("LIME_ANDROID_ABI") == "arm64-v8a";\n'
+              '\t\tvar armv5 = (!abiOnly && (command == "rebuild"\n'
+              '\t\t\t|| ArrayTools.containsValue(project.architectures, Architecture.ARMV5)\n'
+              '\t\t\t|| ArrayTools.containsValue(project.architectures, Architecture.ARMV6)));\n'
+              '\t\tvar armv7 = (!abiOnly && (command == "rebuild" || ArrayTools.containsValue(project.architectures, Architecture.ARMV7)));\n'
+              '\t\tvar arm64 = (command == "rebuild" || ArrayTools.containsValue(project.architectures, Architecture.ARM64));\n'
+              '\t\tvar x86 = (!abiOnly && (command == "rebuild" || ArrayTools.containsValue(project.architectures, Architecture.X86)));\n'
+              '\t\tvar x64 = (/*command == "rebuild" ||*/ ArrayTools.containsValue(project.architectures, Architecture.X64));\n'
+          )
+          n = raw.count(old_block)
+          assert n == 1, "anchor block count=%d (expected 1)" % n
+          raw = raw.replace(old_block, new_block, 1)
+
+          old_call = '\t\tCPPHelper.rebuild(project, commands);\n'
+          new_call = (
+              '\t\tif (Sys.getEnv("LIME_ANDROID_ABI_DRY") == "1")\n'
+              '\t\t{\n'
+              '\t\t\tfor (c in commands) Sys.println("CMD-DRY: " + c.join(" "));\n'
+              '\t\t\tSys.exit(0);\n'
+              '\t\t}\n\n'
+              + old_call
+          )
+          n2 = raw.count(old_call)
+          assert n2 == 1, "CPPHelper.rebuild call count=%d (expected 1)" % n2
+          raw = raw.replace(old_call, new_call, 1)
+
+          assert raw.count('LIME_ANDROID_ABI_DRY') == 1
+          assert raw.count('!abiOnly &&') == 3
+          io.open(p, 'w', encoding='utf-8').write(raw)
+          print("PATCH OK: 1 anchor block, 3 abiOnly guards, 1 dry hook")
+          PY
+          echo "--- patched region ---"
+          sed -n '350,375p' "$HOME/lime-src/tools/platforms/AndroidPlatform.hx"
+          echo "--- dry hook ---"
+          grep -n 'LIME_ANDROID_ABI' "$HOME/lime-src/tools/platforms/AndroidPlatform.hx"
+
+      # 重建 CLI：走官方路径 cd tools && haxe tools.hxml（等价于 run.n 的 -rebuild）
+      - name: Rebuild lime CLI (haxe tools.hxml)
+        run: |
+          set -uo pipefail
+          t0=$(date +%s)
+          O="$RUNNER_TEMP/probe-out"
+          T="$HOME/lime-src/tools"
+          BEFORE=$(stat -c %Y "$T/tools.n")
+          BEFORE_SIZE=$(stat -c %s "$T/tools.n")
+          echo "tools.n before: mtime=$BEFORE size=$BEFORE_SIZE"
+          cd "$T" || exit 1
+          haxe tools.hxml 2>&1 | tee "$O/tools-hxml.log"
+          code=${PIPESTATUS[0]}
+          echo "haxe tools.hxml exit=$code"
+          [ "$code" -eq 0 ] || { echo "ASSERT FAIL: haxe tools.hxml 失败"; exit 1; }
+          AFTER=$(stat -c %Y "$T/tools.n")
+          AFTER_SIZE=$(stat -c %s "$T/tools.n")
+          echo "tools.n after:  mtime=$AFTER size=$AFTER_SIZE"
+          # haxe -neko 在无改动时也会重写；以 mtime 前进为准，用 2s 容差
+          [ "$AFTER" -ge "$BEFORE" ] || { echo "ASSERT FAIL: tools.n 未更新"; exit 1; }
+          # 强证据：新代码里的字符串必须出现在新 tools.n 里
+          if ! grep -q 'LIME_ANDROID_ABI' "$T/tools.n"; then
+            echo "ASSERT FAIL: tools.n 里没有 LIME_ANDROID_ABI（补丁没进 CLI）"
+            exit 1
+          fi
+          echo "ASSERT OK: tools.n 已重建且包含 LIME_ANDROID_ABI"
+          echo "rebuild-tools: $(( $(date +%s) - t0 ))s" | tee -a "$O/timings.txt"
+
+      # 干跑：不编译，只打印 4 条 commands 中实际留下哪几条
+      - name: Dry-run arm64-only commands
+        run: |
+          set -uo pipefail
+          t0=$(date +%s)
+          O="$RUNNER_TEMP/probe-out"
+          cd "$HOME/lime-src" || exit 1
+          # 干跑不会碰 NDK，但 ProjectHelper 可能读环境，给占位值即可
+          export ANDROID_SDK=/tmp/fake-sdk
+          export ANDROID_NDK_ROOT=/tmp/fake-ndk
+          LIME_ANDROID_ABI=arm64-v8a LIME_ANDROID_ABI_DRY=1 \
+            haxelib run lime rebuild android 2>&1 | tee "$O/abi-dry.log"
+          code=${PIPESTATUS[0]}
+          echo "dry exit=$code"
+          LINES=$(grep -c 'CMD-DRY:' "$O/abi-dry.log" || true)
+          echo "CMD-DRY lines=$LINES"
+          cat "$O/abi-dry.log"
+          [ "$LINES" -eq 1 ] || { echo "ASSERT FAIL: 期望 1 条 CMD-DRY，实际 $LINES"; exit 1; }
+          grep -q 'CMD-DRY:.*-DHXCPP_ARM64' "$O/abi-dry.log" \
+            || { echo "ASSERT FAIL: 唯一那条不是 ARM64"; exit 1; }
+          if grep -qE 'CMD-DRY:.*(-DHXCPP_ARMV7|-DHXCPP_ARM7|-DHXCPP_X86|-DHXCPP_ARMV5)' "$O/abi-dry.log"; then
+            echo "ASSERT FAIL: 仍然出现非 arm64 架构 define"
+            exit 1
+          fi
+          echo "ASSERT OK: arm64-only 生效（1 条命令，仅 -DHXCPP_ARM64）"
+          echo "abi-dry: $(( $(date +%s) - t0 ))s" | tee -a "$O/timings.txt"
+
+      - name: Timing summary
+        if: always()
+        run: |
+          echo "--- 每步耗时 ---"
+          cat "$RUNNER_TEMP/probe-out/timings.txt" || true
+          if [ -n "${PROBE_T0:-}" ]; then echo "total: $(( $(date +%s) - PROBE_T0 ))s"; fi
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-probe-abi
+          path: |
+            probe-out/tools-hxml.log
+            probe-out/abi-dry.log
             probe-out/timings.txt
           if-no-files-found: warn
