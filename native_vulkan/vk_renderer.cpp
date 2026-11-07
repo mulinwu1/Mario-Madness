@@ -1141,6 +1141,25 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount) {
         th = (float)o.textures[texId - 1].h;
     }
 
+    // 实验开关 VK_SKIP_3X=1：跳过"采样源尺寸 >= 2× 屏幕"的整图绘制（当前是
+    // 2763x2073 的 3× 画布）。默认关闭；只用于判定它是不是黑帧的直接来源。
+    {
+        static int s_skip = -1;
+        if (s_skip < 0) {
+            const char* v = getenv ("VK_SKIP_3X");
+            s_skip = (v && v[0] == '1') ? 1 : 0;
+        }
+        if (s_skip && (tw >= 2.0f * (float)o.width || th >= 2.0f * (float)o.height)) {
+            static int s_n = 0;
+            if (s_n < 5) {
+                fprintf(stderr, "[vk] skip3x src=%u %dx%d cur=%u\n",
+                        texId, (int)tw, (int)th, o.currentTarget);
+            }
+            s_n++;
+            return;
+        }
+    }
+
     // 采样方式实测：多数贴图是 LINEAR。像素坐标 uv 正好落在帧边界时，双线性
     // 会混入相邻格（表现为贴图四周一圈异色边框）。按 min 侧 +0.5、max 侧 -0.5
     // 内缩半像素，使采样点落在首/末纹素中心；只对像素坐标 uv 生效。
@@ -1447,16 +1466,23 @@ void VkRenderer::EndFrame() {
     std::vector<DrawRange> ranges;
     size_t totalVerts = 0;
 
-    auto pushBatch = [&](std::vector<float>& v, VkDescriptorSet set) {
+    // 取证：按提交实际拼出的批次顺序记录源 id（贴图 1..N，离屏 1000+槽位）
+    std::vector<uint32_t> batchIds;
+    auto pushBatch = [&](std::vector<float>& v, VkDescriptorSet set, uint32_t id) {
         if (v.empty()) return;
         size_t vc = v.size() / 15;
         if (totalVerts + vc > (size_t)MAX_SPRITES * 6) return;
         memcpy(dst + totalVerts * 15, v.data(), v.size() * sizeof(float));
         ranges.push_back({set, totalVerts, vc});
         totalVerts += vc;
+        batchIds.push_back(id);
     };
-    for (auto& t : o.textures) if (t.used) pushBatch(t.verts, t.set);
-    for (auto& t : o.targets) if (t.used) pushBatch(t.verts, t.set);
+    for (size_t i = 0; i < o.textures.size(); i++) {
+        if (o.textures[i].used) pushBatch(o.textures[i].verts, o.textures[i].set, (uint32_t)(i + 1));
+    }
+    for (size_t i = 0; i < o.targets.size(); i++) {
+        if (o.targets[i].used) pushBatch(o.targets[i].verts, o.targets[i].set, (uint32_t)(1000 + i));
+    }
 
     // present 选源：记下最后一帧真正收到顶点（vertexCount>0）的离屏目标。
     // 只绑了 FBO、clear 过、没写几何的目标会呈现为黑纹帧，不能拿它当合成源。
@@ -1487,10 +1513,19 @@ void VkRenderer::EndFrame() {
                     if (totalVerts > 0) o.targets[ti].lastWriteFrame = s_frames;
                 }
             }
-            fprintf(stderr, "[vk] submit frame=%llu t=%lld tgt=%u verts=%zu ranges=%zu delsample=%lld created=%llu tex=%u\n",
+            char srcs[256] = {0};
+            {
+                size_t n = (batchIds.size() < 16) ? batchIds.size() : 16;
+                size_t pos = 0;
+                for (size_t i = 0; i < n && pos + 12 < sizeof(srcs); i++) {
+                    pos += (size_t)snprintf(srcs + pos, sizeof(srcs) - pos, "%s%u", i ? "," : "", batchIds[i]);
+                }
+                if (batchIds.size() > 16 && pos + 4 < sizeof(srcs)) snprintf(srcs + pos, sizeof(srcs) - pos, "+%zu", batchIds.size() - 16);
+            }
+            fprintf(stderr, "[vk] submit frame=%llu t=%lld tgt=%u verts=%zu ranges=%zu delsample=%lld created=%llu tex=%u srcs=%s\n",
                     (unsigned long long)s_frames, (long long)time(nullptr), o.currentTarget,
                     totalVerts, ranges.size(), delsample, (unsigned long long)created,
-                    (o.currentTarget == 0) ? g_bbLastTex : 0u);
+                    (o.currentTarget == 0) ? g_bbLastTex : 0u, srcs);
             s_submitLog++;
         }
         if (s_frames == 1 || s_frames % 30 == 0 || o.currentTarget == 0) {
