@@ -1275,11 +1275,23 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
     // 不能清空已经累积的顶点，否则整条 filter 链最后合成时 verts=0，屏幕只剩清屏色。
     // 这里只更新清屏色，等 EndFrame 时真正清屏。
     if (o.frameOpen && o.currentTarget == id) {
-        o.clearR = r;
-        o.clearG = g;
-        o.clearB = b;
-        o.clearA = a;
-        return true;
+        // 取证开关 VK_FRESH_IMG=1（默认关）：第二次绑定后缓冲时，若已累积几何，
+        // 先 EndFrame 做一次 present 归还当前 image，再 acquire 新图。
+        // 目的：保持 acquire↔present 一一对应（不重走 §17 的 skip-present），
+        // 验证"同一张 img0 被 present 两次"是不是黑帧的直接机制。
+        static int s_fresh = -1;
+        if (s_fresh < 0) {
+            const char* v = getenv ("VK_FRESH_IMG");
+            s_fresh = (v && v[0] == '1') ? 1 : 0;
+        }
+        if (!(s_fresh && id == 0 && FrameHasGeometry())) {
+            o.clearR = r;
+            o.clearG = g;
+            o.clearB = b;
+            o.clearA = a;
+            return true;
+        }
+        EndFrame ();
     }
     // 切换目标前先把旧离屏 pass 真正提交进旧 FBO：否则整帧所有 pass 的顶点
     // 会被攒到 present 那一刻、用最后一张图（后缓冲）的投影一次性画出去，
