@@ -1,4 +1,4 @@
-﻿name: Build Lime Vulkan Native
+name: Build Lime Vulkan Native
 
 # workflow_call：由 build-game.yml 作为前置 job 复用，产出的 artifact 在同一次 run 内
 # 直接给游戏构建 job 下载，不需要跨 run / release 传文件
@@ -159,7 +159,7 @@ jobs:
             'gl_vk_bridge.h', 'gl_vk_c.h', 'gl_vk_contract.h', 'gl_vk_contract.cpp', 'gl_fbo.cpp',
             'gl_texture_params.cpp', 'gl_state.h', 'gl_state.cpp', 'gl_shader.h', 'gl_shader.cpp',
             'vk_platform.h', 'vk_platform_win32.cpp', 'vk_platform_android.cpp',
-            'vk_packet.h', 'vk_packet.cpp', 'gl_packet.h', 'gl_packet.cpp'
+            'vk_packet.h', 'vk_packet.cpp', 'gl_packet.h', 'gl_packet.cpp', 'vk_tuning.h', 'vk_tuning.cpp'
           )
           Copy-Item -Path ($files | ForEach-Object { "native_vulkan\$_" }) -Destination C:\lime-src\project\src\graphics\vulkan\ -Force
           # vulkan_core.h 会引用 vk_video/ 下的视频编码头，两个目录都要复制
