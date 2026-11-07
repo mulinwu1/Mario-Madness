@@ -133,6 +133,26 @@ jobs:
           $check = Get-Content Project.xml -Raw
           if ($check -notmatch '<haxedef name="openfl_vk_pkt"') { throw 'failed to enable openfl_vk_pkt in Project.xml' }
 
+          # 内存实验 1/2：analyzer-optimize 是已知的内存翻倍项。源侧核查结论：
+          # lime 8.0.2 (HXProject/ProjectXMLParser/Platform) 与仓库 Project.xml 都没有它，
+          # 所以这里只做"确认没有"，若以后有人加进来会立刻在日志里暴露。
+          $ao = @(Select-String -Path Project.xml -Pattern 'analyzer-optimize' -ErrorAction SilentlyContinue)
+          if ($ao.Count -gt 0) { Write-Host "WARN: Project.xml 出现 analyzer-optimize（内存翻倍项）：$($ao[0].Line.Trim())" }
+          else { Write-Host 'analyzer-optimize: absent in Project.xml (lime 8.0.2 默认也不加)' }
+
+          # 内存实验 2/2：本轮显式关掉 haxe 优化器（--no-opt），降低编译器峰值内存；
+          # 幂等插入，只影响 CI 里的这份 Project.xml，不改仓库文件
+          if ($check -match '--no-opt') {
+            Write-Host 'Project.xml already has <haxeflag name="--no-opt" />'
+          } else {
+            $px2 = Get-Content Project.xml -Raw
+            $px2 = $px2 -replace '</project>', "`t<haxeflag name=`"--no-opt`" />`n</project>"
+            Set-Content -Path Project.xml -Value $px2 -NoNewline
+            Write-Host 'inserted <haxeflag name="--no-opt" /> (memory experiment)'
+          }
+          $final = Get-Content Project.xml -Raw
+          if ($final -notmatch 'no-opt') { throw 'failed to insert --no-opt' }
+
       # 有 artifact 就覆盖 haxelib 里的 ndll；没有就原地用 haxelib lime 自带的那份，
       # 并记录 VULKAN_LIME_NDLL 供打包步骤贴到 exe 旁边。
       - name: Wire lime ndll into haxelib lime
@@ -188,6 +208,46 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $inc "rapidjson") | Out-Null
           Copy-Item "$rj\include\rapidjson\*" (Join-Path $inc "rapidjson") -Recurse -Force
 
+      # 提交上限诊断 + 尝试把页面文件调大：免费手段里唯一能抬高"物理内存 + 页面文件"这条路
+      - name: Pagefile and commit limit (memory experiment)
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Host ("BEFORE os: TotalVisible={0} MB TotalVirtual={1} MB FreeVirtual={2} MB FreePhysical={3} MB" -f $os.TotalVisibleMemorySize, $os.TotalVirtualMemorySize, $os.FreeVirtualMemory, $os.FreePhysicalMemory)
+          foreach ($p in @(Get-CimInstance Win32_PageFileSetting -ErrorAction SilentlyContinue)) {
+            Write-Host ("BEFORE pagefile setting: {0} Initial={1} MB Maximum={2} MB" -f $p.Name, $p.InitialSize, $p.MaximumSize)
+          }
+          foreach ($p in @(Get-CimInstance Win32_PageFileUsage -ErrorAction SilentlyContinue)) {
+            Write-Host ("BEFORE pagefile usage: {0} AllocatedBase={1} MB Current={2} MB Peak={3} MB" -f $p.Name, $p.AllocatedBaseSize, $p.CurrentUsage, $p.PeakUsage)
+          }
+          Write-Host ("BEFORE commit: used={0} MB limit={1} MB" -f ($os.TotalVirtualMemorySize - $os.FreeVirtualMemory), $os.TotalVirtualMemorySize)
+          try {
+            $drv = @(Get-CimInstance Win32_PageFileSetting -ErrorAction SilentlyContinue) | Select-Object -First 1
+            if (-not $drv) {
+              Write-Host 'SET skipped: no Win32_PageFileSetting (system-managed pagefile)'
+            } else {
+              $drv | Set-CimInstance -Property @{ InitialSize = 32768; MaximumSize = 32768 } -ErrorAction Stop
+              Write-Host "SET requested Initial=Maximum=32768 MB on $($drv.Name)"
+            }
+          } catch { Write-Host "SET failed: $($_.Exception.Message)" }
+          Start-Sleep -Seconds 3
+          foreach ($p in @(Get-CimInstance Win32_PageFileSetting -ErrorAction SilentlyContinue)) {
+            Write-Host ("AFTER pagefile setting: {0} Initial={1} MB Maximum={2} MB" -f $p.Name, $p.InitialSize, $p.MaximumSize)
+          }
+          $pu = @(Get-CimInstance Win32_PageFileUsage -ErrorAction SilentlyContinue)
+          foreach ($p in $pu) { Write-Host ("AFTER pagefile usage: {0} AllocatedBase={1} MB" -f $p.Name, $p.AllocatedBaseSize) }
+          $os2 = Get-CimInstance Win32_OperatingSystem
+          Write-Host ("AFTER os: TotalVirtual={0} MB FreeVirtual={1} MB" -f $os2.TotalVirtualMemorySize, $os2.FreeVirtualMemory)
+          $allocated = 0
+          if ($pu.Count -gt 0) { $allocated = [int]$pu[0].AllocatedBaseSize }
+          if ($allocated -lt 32768) {
+            Write-Host 'CONCLUSION: pagefile NOT effective within this job (resize needs reboot) -> not usable in one run'
+          } else {
+            Write-Host 'CONCLUSION: pagefile effective within this job; commit limit can grow'
+          }
+
       # 冷构建：不使用任何 hxcpp/obj 缓存（单变量原则），保证产物一定是本轮新编的
       # 单阶段：haxe 前台跑（输出实时进 Actions 日志）+ 独立监控进程（每 60s 一行心跳，卡死自动 taskkill）
       - name: Build game with openfl_vk_pkt
@@ -226,6 +286,8 @@ jobs:
           $prevCpp = -1
           $prevObj = -1
           $flat = 0
+          $peak = 0
+          $peakCommit = 0
           function Kill-Tree {
             foreach ($p in @(Get-Process -Name haxe, haxelib, neko, cl, link, c2 -ErrorAction SilentlyContinue)) {
               & taskkill /PID $p.Id /T /F 2>&1 | Out-Null
@@ -252,9 +314,15 @@ jobs:
             $cppMB = 0
             if ($cppCount -gt 0) { $cppMB = [int][math]::Round((($cpp | Measure-Object -Property Length -Sum).Sum) / 1MB) }
             $objCount = @(Get-ChildItem 'export' -Recurse -Filter '*.obj' -File -ErrorAction SilentlyContinue).Count
-            Write-Host ("::notice::[hb] elapsed=${elapsed}s haxe_cpu=${cpu}s (+${delta}) mem=${mem}MB cpp=${cppCount} files=${cppMB}MB")
-            Write-Host ("  [hb-detail] obj=${objCount} flat=${flat}")
-            Add-Content -Path $HbLog -Value ("[hb] elapsed=${elapsed}s haxe_cpu=${cpu}s (+${delta}) mem=${mem}MB cpp=${cppCount} files=${cppMB}MB obj=${objCount}")
+            # 提交上限：TotalVirtualMemorySize - FreeVirtualMemory = 当前已提交；limit = 物理内存 + 页面文件
+            $os = Get-CimInstance Win32_OperatingSystem
+            $commitMB = [int][math]::Round(($os.TotalVirtualMemorySize - $os.FreeVirtualMemory) / 1KB)
+            $limitMB = [int][math]::Round($os.TotalVirtualMemorySize / 1KB)
+            Write-Host ("::notice::[hb] elapsed=${elapsed}s haxe_cpu=${cpu}s (+${delta}) mem=${mem}MB commit=${commitMB}MB/${limitMB}MB cpp=${cppCount} files=${cppMB}MB obj=${objCount}")
+            Add-Content -Path $HbLog -Value ("[hb] elapsed=${elapsed}s haxe_cpu=${cpu}s (+${delta}) mem=${mem}MB commit=${commitMB}MB/${limitMB}MB cpp=${cppCount} files=${cppMB}MB obj=${objCount}")
+            if ($mem -ne 'NA' -and [int]$mem -gt $peak) { $peak = [int]$mem }
+            if ($commitMB -gt $peakCommit) { $peakCommit = $commitMB }
+            Set-Content -Path (Join-Path $Wd 'peak_mem.txt') -Value ("peak_haxe_mem_MB=$peak`npeak_commit_MB=$peakCommit`ncommit_limit_MB=$limitMB`nelapsed_s=$elapsed`nhaxe_cpu_s=$cpu")
             if ($delta -le 0 -and $cppCount -eq $prevCpp -and $objCount -eq $prevObj) { $flat++ } else { $flat = 0 }
             $prevCpp = $cppCount
             $prevObj = $objCount
@@ -292,6 +360,19 @@ jobs:
           Write-Host '=== hb tail 8 ==='
           Get-Content hb.log -Tail 8 -ErrorAction SilentlyContinue
           if ($stalled) { Write-Host ("kill reason: " + ((Get-Content stall.txt -Raw) -replace "`r?`n", ' ')) }
+          # 证据：生成的 hxml 里 analyzer-optimize 到底有没有、--no-opt 是否真的进去了
+          $hxmls = @(Get-ChildItem 'export' -Recurse -Filter '*.hxml' -File -ErrorAction SilentlyContinue)
+          Write-Host ("hxml files: {0}" -f $hxmls.Count)
+          foreach ($h in $hxmls) {
+            $raw = Get-Content $h.FullName -Raw
+            $aoState = 'ABSENT'
+            if ($raw -match 'analyzer-optimize') { $aoState = 'PRESENT' }
+            $nooptState = 'ABSENT'
+            if ($raw -match 'no-opt') { $nooptState = 'PRESENT' }
+            Write-Host ("hxml {0}: analyzer-optimize={1} no-opt={2}" -f $h.Name, $aoState, $nooptState)
+            $defs = @(Get-Content $h.FullName | Where-Object { $_ -match '^\s*-D|no-opt|analyzer-optimize' })
+            Write-Host ("  hxml defines(" + $defs.Count + "): " + ($defs -join ' '))
+          }
           if ($code -ne 0 -or $stalled) {
             Write-Host '=== build.err (full) ==='
             $errLines = @(Get-Content build.err -ErrorAction SilentlyContinue)
@@ -363,6 +444,7 @@ jobs:
             build.err
             hb.log
             stall.txt
+            peak_mem.txt
           if-no-files-found: warn
           retention-days: 7
 
