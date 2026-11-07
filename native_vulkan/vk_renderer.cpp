@@ -1405,15 +1405,15 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
     }
 
     // 观测（非行为）：记录本笔 draw 对应的 GL program，并首次见到时打一次程序表。
-    int vkProg = gl_shader_current_program ();
+    int vkProg = lime::gl_shader_current_program ();
     {
         static unsigned s_progSeen[256] = {0};
         if (vkProg >= 0 && vkProg < 256 && !s_progSeen[vkProg]) {
             s_progSeen[vkProg] = 1;
             fprintf(stderr, "[glprog] id=%d attrs=%d hasLoc5=%d ubo=%u\n",
-                    vkProg, gl_shader_attribute_count(vkProg),
-                    gl_shader_program_has_attribute(vkProg, 5) ? 1 : 0,
-                    (unsigned) gl_shader_uniform_buffer_size(vkProg));
+                    vkProg, lime::gl_shader_attribute_count(vkProg),
+                    lime::gl_shader_program_has_attribute(vkProg, 5) ? 1 : 0,
+                    (unsigned) lime::gl_shader_uniform_buffer_size(vkProg));
         }
     }
     // 取证：每次绘制一条紧凑记录（纹理 id/尺寸、uv 范围、顶点包围盒、是否触发
