@@ -144,6 +144,7 @@ COMMON_SOURCES = [
     "gl_state.cpp",
     "vk_packet.cpp",
     "gl_packet.cpp",
+    "vk_tuning.cpp",
 ]
 PLATFORM_SOURCES = {
     "windows": ["vk_platform_win32.cpp"],
@@ -156,7 +157,7 @@ sources = COMMON_SOURCES + PLATFORM_SOURCES[PLATFORM]
 def assert_sources_present():
     # 准备阶段结束后，树里必须真的有这些文件。否则不要把它拖到链接阶段变成
     # 上百行 LNK2019（run 42395291038 就是这样浪费了 87 秒）。
-    need = sources + ["gl_compat.h", "vk_packet.h", "gl_packet.h"]
+    need = sources + ["gl_compat.h", "vk_packet.h", "gl_packet.h", "vk_tuning.h"]
     missing = [n for n in need if not os.path.exists(os.path.join(VULKAN_DIR, n))]
     if not missing:
         return

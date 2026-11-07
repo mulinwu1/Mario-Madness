@@ -15,10 +15,62 @@ namespace lime {
 VkRenderer* gl_vk_get_renderer ();
 uint32_t gl_vk_fbo_target (int fboName);
 bool gl_vk_texture_size (int glName, int* w, int* h);
+// gl_texture_params.cpp：按 GL 纹理名取当前采样参数（texParameteri 的镜像）
+bool gl_vk_texture_sampler_state (int glName, int* minFilter, int* magFilter,
+                                  int* wrapS, int* wrapT);
 }
 
 namespace lime {
 namespace pkt {
+
+// ---------------------------------------------------------------- 归一化
+// 把 GL 枚举收敛成 PktDrawDesc 里的小枚举；认不出的一律 0xFF（= 未指定，走默认）。
+
+static uint8_t NormMinFilter (int gl) {
+    switch (gl) {
+        case 0x2600: return 0;   // GL_NEAREST
+        case 0x2601: return 1;   // GL_LINEAR
+        case 0x2700: return 2;   // GL_NEAREST_MIPMAP_NEAREST
+        case 0x2701: return 3;   // GL_LINEAR_MIPMAP_NEAREST
+        case 0x2702: return 4;   // GL_NEAREST_MIPMAP_LINEAR
+        case 0x2703: return 5;   // GL_LINEAR_MIPMAP_LINEAR
+        default:     return 0xFF;
+    }
+}
+
+static uint8_t NormMagFilter (int gl) {
+    if (gl == 0x2601) return 1;   // GL_LINEAR
+    if (gl == 0x2600) return 0;   // GL_NEAREST
+    return 0xFF;
+}
+
+static uint8_t NormWrap (int gl) {
+    switch (gl) {
+        case 0x812F: return 0;   // GL_CLAMP_TO_EDGE
+        case 0x2901: return 1;   // GL_REPEAT
+        case 0x8370: return 2;   // GL_MIRRORED_REPEAT
+        case 0x2900: return 0;   // GL_CLAMP（老语义取 border 色，这里按 clamp_to_edge 兜底，最接近）
+        default:     return 0xFF;
+    }
+}
+
+static uint8_t NormBlendFactor (int gl) {
+    switch (gl) {
+        case 0x0001: return PKT_BLEND_ONE;
+        case 0x0000: return PKT_BLEND_ZERO;
+        case 0x0302: return PKT_BLEND_SRC_ALPHA;
+        case 0x0303: return PKT_BLEND_ONE_MINUS_SRC_ALPHA;
+        case 0x0304: return PKT_BLEND_DST_ALPHA;
+        case 0x0305: return PKT_BLEND_ONE_MINUS_DST_ALPHA;
+        case 0x0300: return PKT_BLEND_SRC_COLOR;
+        case 0x0301: return PKT_BLEND_ONE_MINUS_SRC_COLOR;
+        case 0x0306: return PKT_BLEND_DST_COLOR;
+        case 0x0307: return PKT_BLEND_ONE_MINUS_DST_COLOR;
+        case 0x8003: return PKT_BLEND_CONST_ALPHA;
+        case 0x8004: return PKT_BLEND_ONE_MINUS_CONST_ALPHA;
+        default:     return PKT_BLEND_UNSET;
+    }
+}
 
 // ---------------------------------------------------------------- GL 常量
 
@@ -225,7 +277,7 @@ static void GatherAttrs (vkpkt::AttrInput out[8], uint16_t* attrCount) {
         d.byteOffset = snap.byteOffset;
         d.stride = (uint16_t)(snap.stride > 0 ? snap.stride : 0);
         d.size = (uint8_t)(snap.size > 0 ? snap.size : 0);
-        d.glType = (uint8_t)(snap.glType & 0xFF);
+        d.glType = (uint32_t)(snap.glType < 0 ? 0 : snap.glType);   // 完整 GL 枚举，不许截断
         d.normalized = 0;
         if (!snap.enabled) {
             d.kind = snap.constSet ? vkpkt::ATTR_CONSTANT : vkpkt::ATTR_DISABLED;
@@ -303,15 +355,9 @@ static bool CopyVertexRange (const vkpkt::WirePacket& w, const vkpkt::AttrInput 
     if (primary < 0 || w.count <= 0) return false;
 
     const vkpkt::AttrInput& a = attrs[primary];
-    uint32_t typeCode = 255;
-    switch (a.glType) {
-        case 0x1406: typeCode = vkpkt::ATYPE_FLOAT; break;
-        case 0x1401: typeCode = vkpkt::ATYPE_UBYTE; break;
-        case 0x1400: typeCode = vkpkt::ATYPE_BYTE; break;
-        case 0x1403: typeCode = vkpkt::ATYPE_USHORT; break;
-        case 0x1402: typeCode = vkpkt::ATYPE_SHORT; break;
-        default: typeCode = vkpkt::ATYPE_UNKNOWN; break;
-    }
+    // 用共享映射（vk_packet.h 里 constexpr + static_assert 护栏），不再本地 switch：
+    // 本地 switch 曾因字段被截成 uint8 而恒落 default → err=vb_missing → draws=0（R1）。
+    uint32_t typeCode = vkpkt::AttrTypeFromGL(a.glType);
     uint32_t elem = ElemBytes((uint8_t)typeCode, a.size);
     if (!elem) return false;
     uint32_t stride = a.stride ? a.stride : elem;
@@ -659,22 +705,34 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
     }
 
     // 索引按展开后的顺序给 0..n-1：顶点已经按原索引顺序展开，视觉结果与原索引一致。
-    // 16 位索引装不下时退化为非索引绘制（顶点顺序完全等价）。
+    // 优先 16 位；超过 65535 走 32 位；两种都装不下（不会发生）才退化为非索引。
     std::vector<uint16_t> seq;
-    bool indexed = (w.kind == vkpkt::KIND_DRAW_ELEMENTS && w.count <= 65535);
+    std::vector<uint32_t> seq32;
+    bool indexed = (w.kind == vkpkt::KIND_DRAW_ELEMENTS);
+    bool use32 = false;
     if (indexed) {
-        seq.resize((size_t)w.count);
-        for (int i = 0; i < w.count; i++) seq[(size_t)i] = (uint16_t)i;
+        if (w.count <= 65535) {
+            seq.resize((size_t)w.count);
+            for (int i = 0; i < w.count; i++) seq[(size_t)i] = (uint16_t)i;
+        } else {
+            seq32.resize((size_t)w.count);
+            for (int i = 0; i < w.count; i++) seq32[(size_t)i] = (uint32_t)i;
+            use32 = true;
+        }
     }
 
-    // 状态位按 record 的快照填；第一版只记录，不选管线变体。
+    // 状态位按 record 的快照填；PktDraw 按这些位选管线变体（默认状态复用现有管线）。
     PktDrawDesc d{};
     d.texId = vkTex;
     d.verts = packed.data();
     d.vertexCount = w.count;
     d.indices = seq.empty() ? nullptr : seq.data();
-    d.indexCount = (int)seq.size();
+    d.indices32 = seq32.empty() ? nullptr : seq32.data();
+    d.indexCount = (int)(seq.size() ? seq.size() : seq32.size());
+    d.index32 = use32 ? 1 : 0;
     d.state.blendEnabled = rec.blendEnabled;
+    d.state.blendSrc = NormBlendFactor(rec.blendSrcRgb);
+    d.state.blendDst = NormBlendFactor(rec.blendDstRgb);
     d.state.depthTest = rec.depthTestEnabled;
     d.state.depthWrite = rec.depthMask;
     d.state.stencilTest = 0;
@@ -682,6 +740,33 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
     d.state.frontFace = rec.frontFace;
     d.state.scissorTest = rec.scissorEnabled;
     d.state.colorMask = rec.colorMaskBits;
+
+    // 采样器：记录侧的 draw_record 没有采样器字段，改从 GL 参数镜像按纹理名取
+    // （与 texParameteri 同源，等于这一笔真正生效的过滤/wrap）。
+    int fMin = 0, fMag = 0, wS = 0, wT = 0;
+    if (texName > 0 && gl_vk_texture_sampler_state(texName, &fMin, &fMag, &wS, &wT)) {
+        d.sampler.minFilter = NormMinFilter(fMin);
+        d.sampler.magFilter = NormMagFilter(fMag);
+        d.sampler.wrapU = NormWrap(wS);
+        d.sampler.wrapV = NormWrap(wT);
+    } else {
+        d.sampler.minFilter = 0xFF;
+        d.sampler.magFilter = 0xFF;
+        d.sampler.wrapU = 0xFF;
+        d.sampler.wrapV = 0xFF;
+    }
+
+    // viewport / scissor 逐笔：零尺寸或未启用时 valid=0，沿用 pass 打开时的下发值
+    d.viewport.valid = (rec.vpW > 0 && rec.vpH > 0) ? 1 : 0;
+    d.viewport.x = (int16_t)rec.vpX;
+    d.viewport.y = (int16_t)rec.vpY;
+    d.viewport.w = (int16_t)rec.vpW;
+    d.viewport.h = (int16_t)rec.vpH;
+    d.scissor.valid = (rec.scissorEnabled && rec.scissorW > 0 && rec.scissorH > 0) ? 1 : 0;
+    d.scissor.x = (int16_t)rec.scissorX;
+    d.scissor.y = (int16_t)rec.scissorY;
+    d.scissor.w = (int16_t)rec.scissorW;
+    d.scissor.h = (int16_t)rec.scissorH;
     // 兜底：正常流程里 pass 在 BindRenderTarget 时就开了；这里按 packet 里的目标
     // 再对齐一次（同目标幂等不重清，换目标会先把上一笔 pass 收尾再开新的）。
     if (!r->PktBeginTarget(rtId, rec.clearColorF[0], rec.clearColorF[1],
@@ -690,9 +775,9 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
 
     g_rt.executed++;
     if (g_rt.executed <= 4 || g_rt.executed % 500 == 0) {
-        fprintf(stderr, "[vkexec] exec=1 tex=%d vk=%u n=%d prog=%u s=%u idx=%d\n",
+        fprintf(stderr, "[vkexec] exec=1 tex=%d vk=%u n=%d prog=%u s=%u idx=%d i%d\n",
                 texName, (unsigned)vkTex, (int)w.count, (unsigned)w.program, (unsigned)w.seq,
-                (int)seq.size());
+                d.indexCount, use32 ? 32 : 16);
     }
     return true;
 }

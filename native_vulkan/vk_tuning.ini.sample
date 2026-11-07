@@ -1,0 +1,45 @@
+; ============================================================================
+; vk_tuning.ini  —— Vulkan 翻译层运行时调参（放在 Mario.exe 同目录）
+;
+; 本文件默认全部注释掉 = 全部使用内置默认值 = 与没有本文件时行为完全一致。
+; 只读一次；改完重启游戏生效。不需要重编 ndll。
+; 完整字段说明与"症状 -> 调哪个键"见 docs/vk_tuning.md
+;
+; 启动后 stderr 会打一行生效值，先确认它真的读到了：
+;   [vk] tuning src=vk_tuning.ini ... unknown=-
+;   src=default  -> 没读到本文件（路径/编码问题）
+;   unknown=xxx  -> 键名拼错或值不合法，该键没生效
+; ============================================================================
+
+[texture]
+; 全局过滤：gl(沿用 GL 记录) | nearest(像素画) | linear(平滑大图)
+; filter = nearest
+
+; 按尺寸覆盖，顺序命中：max(w,h) <= 最大边 则用该模式
+; filter.by_size = 64:nearest,256:linear
+
+; 按 GL 纹理编号强制最近邻（编号从 [sampler] tex= 抄）
+; filter.by_glname = 12,0
+
+; 全局 wrap：gl | clamp | repeat | mirror
+; wrap = clamp
+; wrap.by_size = 64:clamp
+
+[blend]
+; srcalpha(默认) | premul(预乘) | additive(叠加发光) | off(不混合)
+; blend = srcalpha
+
+[state]
+; 预留位：当前渲染目标无深度附件，改这些只影响 [pkt] draw 的状态日志
+; depth.test = keep
+; depth.write = keep
+; stencil.test = keep
+
+[viewport]
+; keep(按记录逐笔，默认) | full(强制整 target 全幅)
+; viewport = keep
+; scissor = keep
+
+[mip]
+; off(默认，不请求生成) | on(请求生成；当前纹理只有 1 级，暂不会多出 level)
+; mip = off

@@ -14,6 +14,7 @@
 #include "gl_vk_bridge.h"   // 内含 gl_compat.h
 #include "gl_vk_contract.h"
 #include "vk_renderer.h"
+#include "vk_tuning.h"      // mip 生成开关（vk_tuning.ini，默认 off）
 
 #include <cstdint>
 #include <cstdio>
@@ -454,6 +455,9 @@ void lime_gl_generate_mipmap (int target) {
         // 尺寸未知时（gl_core 还没记录 texImage2D 尺寸）无从计算，保持单层
         return;
     }
+    // 调参：mip=off（默认）直接跳过生成请求，与加调参前的实际画面一致；
+    // 打开后走同一条请求路径（当前纹理只分配 1 级，是否真的生成取决于渲染器）。
+    if (!vktuning::Get().mipGenerate) return;
     const GlVkRendererExt* ext = gl_vk_renderer_ext ();
     if (!ext || !ext->generateMipmaps) return;   // 待主线补接口
     if (ext->generateMipmaps (id, levels)) {
@@ -531,6 +535,22 @@ void lime_gl_get_internalformativ (int target, int internalformat, int pname,
     if (pname == K_NUM_SAMPLE_COUNTS || pname == K_SAMPLES) {
         out[0] = 1.0;   // 单采样
     }
+}
+
+// packet 执行路径用：按 GL 纹理名取"这一刻"的采样参数（GL 枚举原样返回）。
+// 记录侧的 draw_record 里没有采样器字段，采样器状态只能从这里取：
+// 它与 texParameteri 的镜像同源，等于 draw 当时真正生效的值。
+// 返回 false 表示该名字没有记录过参数（用调用方自己的默认）。
+bool gl_vk_texture_sampler_state (int glName, int* minFilter, int* magFilter,
+                                  int* wrapS, int* wrapT) {
+    if (glName <= 0) return false;
+    if ((size_t)glName >= g_texParams.size ()) return false;
+    const TexParams& p = g_texParams[(size_t)glName];
+    if (minFilter) *minFilter = p.minFilter;
+    if (magFilter) *magFilter = p.magFilter;
+    if (wrapS) *wrapS = p.wrapS;
+    if (wrapT) *wrapT = p.wrapT;
+    return true;
 }
 
 } // namespace lime

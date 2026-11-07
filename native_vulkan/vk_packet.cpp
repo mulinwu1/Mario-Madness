@@ -9,17 +9,6 @@ namespace vkpkt {
 
 // ---------------------------------------------------------------- 小工具
 
-static uint8_t AttrTypeCode (uint8_t glType) {
-    switch (glType) {
-        case 0x1406: return ATYPE_FLOAT;   // GL_FLOAT
-        case 0x1401: return ATYPE_UBYTE;   // GL_UNSIGNED_BYTE
-        case 0x1400: return ATYPE_BYTE;    // GL_BYTE
-        case 0x1403: return ATYPE_USHORT;  // GL_UNSIGNED_SHORT
-        case 0x1402: return ATYPE_SHORT;   // GL_SHORT
-        default: return ATYPE_UNKNOWN;
-    }
-}
-
 void Hex8 (uint32_t v, char out[9]) {
     static const char* h = "0123456789abcdef";
     for (int i = 0; i < 8; i++) {
@@ -221,7 +210,7 @@ void Materialize (const MaterializeInput& in, DrawRecord* out) {
         d.byteOffset = a.byteOffset;
         d.stride = a.stride;
         d.size = a.size;
-        d.type = AttrTypeCode(a.glType);
+        d.type = AttrTypeFromGL(a.glType);
         d.kind = a.kind;
         d.normalized = a.normalized;
         d.reserved = 0;

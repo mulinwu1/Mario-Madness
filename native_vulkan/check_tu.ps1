@@ -71,7 +71,8 @@ $CommonSources = @(
     'gl_texture_params.cpp',
     'gl_state.cpp',
     'vk_packet.cpp',
-    'gl_packet.cpp'
+    'gl_packet.cpp',
+    'vk_tuning.cpp'
 )
 $WinOnlySources = @('vk_platform_win32.cpp')
 $AndroidOnlySources = @('vk_platform_android.cpp')

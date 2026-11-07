@@ -54,6 +54,22 @@ enum AttrTypeCode {
     ATYPE_UNKNOWN = 255,
 };
 
+// GL 顶点属性类型枚举 -> 压缩码。glType 必须是完整的 GL 枚举（0x1406 这类 16 位值），
+// 任何 & 0xFF 的截断都会把 GL_FLOAT 变成 0x06 而恒落 ATYPE_UNKNOWN（R1 的根因）。
+constexpr uint8_t AttrTypeFromGL (uint32_t glType) {
+    switch (glType) {
+        case 0x1406: return ATYPE_FLOAT;   // GL_FLOAT
+        case 0x1401: return ATYPE_UBYTE;   // GL_UNSIGNED_BYTE
+        case 0x1400: return ATYPE_BYTE;    // GL_BYTE
+        case 0x1403: return ATYPE_USHORT;  // GL_UNSIGNED_SHORT
+        case 0x1402: return ATYPE_SHORT;   // GL_SHORT
+        default: return ATYPE_UNKNOWN;
+    }
+}
+
+// R1 回归护栏：编译期确认 0x1406 命中 ATYPE_FLOAT
+static_assert(AttrTypeFromGL (0x1406) == ATYPE_FLOAT, "GL_FLOAT(0x1406) must map to ATYPE_FLOAT");
+
 // clearMask 位（spec §3）
 enum ClearMaskBits {
     CLEAR_COLOR = 1u << 0,
@@ -242,12 +258,14 @@ struct AttrInput {
     uint32_t byteOffset = 0;
     uint16_t stride = 0;
     uint8_t size = 0;
-    uint8_t glType = 0;         // GL 原始枚举，物化时转压缩码
+    uint32_t glType = 0;        // GL 原始枚举（0x1406 等 16 位值），物化时用 AttrTypeFromGL 转压缩码
     uint8_t kind = ATTR_DISABLED;
     uint8_t normalized = 0;
     float constValue[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
 };
+
+static_assert(sizeof(AttrInput::glType) >= 2, "AttrInput.glType must hold 16-bit GL enums");
 
 struct TexInput {
 
