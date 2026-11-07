@@ -16,6 +16,7 @@
 #include "vk_renderer.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -376,6 +377,15 @@ void lime_gl_tex_sub_image_2d (int target, int level, int xoffset, int yoffset,
 
     const GlVkRendererExt* ext = gl_vk_renderer_ext ();
     if (!ext || !ext->updateSubImage) return;   // 待主线补接口
+    // 取证：谁在逐帧往哪些普通纹理灌像素（前 40 条 + 每 500 条一条）
+    static int s_n = 0;
+    if (s_n < 40 || (s_n % 500) == 0) {
+        fprintf(stderr, "[glsub] n=%d id=%u level=%d rect=(%d,%d %dx%d) fmt=0x%x first=%02x%02x%02x%02x\n",
+                s_n + 1, id, level, xoffset, yoffset, width, height, format,
+                rgba.empty() ? 0 : rgba[0], rgba.empty() ? 0 : rgba[1],
+                rgba.empty() ? 0 : rgba[2], rgba.size() < 4 ? 0 : rgba[3]);
+    }
+    s_n++;
     ext->updateSubImage (id, level, xoffset, yoffset, width, height, rgba.data ());
 }
 
@@ -449,14 +459,24 @@ void lime_gl_generate_mipmap (int target) {
 
 void lime_gl_copy_tex_image_2d (int target, int level, int internalformat,
                                 int x, int y, int width, int height, int border) {
-    (void)target; (void)level; (void)internalformat;
-    (void)x; (void)y; (void)width; (void)height; (void)border;
+    // 取证：这两个入口当前是空实现。若游戏真的走 copyTex*（把帧缓冲内容拷进纹理），
+    // 那这条路就是"纹理永远为空"的直接原因，必须计数确认调用量。
+    static int s_n = 0;
+    if (s_n < 20) {
+        fprintf(stderr, "[glcopy] image2d n=%d target=0x%x level=%d fmt=0x%x rect=(%d,%d %dx%d)\n",
+                s_n + 1, target, level, internalformat, x, y, width, height);
+    }
+    s_n++;
 }
 
 void lime_gl_copy_tex_sub_image_2d (int target, int level, int xoffset, int yoffset,
                                     int x, int y, int width, int height) {
-    (void)target; (void)level; (void)xoffset; (void)yoffset;
-    (void)x; (void)y; (void)width; (void)height;
+    static int s_n = 0;
+    if (s_n < 20) {
+        fprintf(stderr, "[glcopy] sub2d n=%d target=0x%x level=%d off=(%d,%d) rect=(%d,%d %dx%d)\n",
+                s_n + 1, target, level, xoffset, yoffset, x, y, width, height);
+    }
+    s_n++;
 }
 
 void lime_gl_copy_tex_sub_image_3d (int target, int level, int xoffset, int yoffset,
