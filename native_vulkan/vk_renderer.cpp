@@ -1,8 +1,8 @@
 ﻿#include "vk_renderer.h"
 #include "vk_shaders_spv.h"
-#include "gl_shader.h"
 #define VK_USE_PLATFORM_WIN32_KHR
 #define VK_NO_PROTOTYPES
+#include "gl_shader.h"
 #include <vulkan/vulkan.h>
 #include <cstring>
 #include <cstdio>
