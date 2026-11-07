@@ -101,6 +101,8 @@ jobs:
           } >> "$GITHUB_ENV"
           export PATH="$HAXE_DIR:$NEKO_DIR:$PATH"
           export NEKOPATH="$NEKO_DIR" HAXE_STD_PATH="$HAXE_DIR/std"
+          # haxelib 是 neko 脚本，必须能加载 libneko.so.2
+          export LD_LIBRARY_PATH="$NEKO_DIR:${LD_LIBRARY_PATH:-}"
           haxe -version || exit 1
           neko -version || exit 1
           yes | haxelib setup "$HOME/haxelib" >/dev/null 2>&1 || true
