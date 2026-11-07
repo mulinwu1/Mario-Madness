@@ -974,6 +974,22 @@ uint32_t VkRenderer::CreateTextureOnce(int w, int h, const unsigned char* rgba) 
         wds[1].pImageInfo = &dii;
         g_updateDS(o.dev, 2, wds, 0, nullptr);
 
+        // 取证（默认常开，仅大图打印一行）：确认大图上传的 CPU 数据本身是否全黑
+        if ((size_t)w * h >= (size_t)2048 * 2048) {
+            size_t cnt = 0, sum = 0, nb = 0;
+            size_t px = (size_t)w * h;
+            for (size_t k = 0; k < px; k += 97) {
+                const unsigned char* p = rgba + k * 4;
+                unsigned int v = (p[0] + p[1] + p[2]) / 3;
+                sum += v;
+                if (v >= 8) nb++;
+                cnt++;
+            }
+            fprintf(stderr, "[vk] texmean id=%u w=%d h=%d mean=%.2f nb=%.1f\n",
+                    (unsigned)i + 1, w, h,
+                    cnt ? (double)sum / (double)cnt : 0.0,
+                    cnt ? 100.0 * (double)nb / (double)cnt : 0.0);
+        }
         t.w = w;
         t.h = h;
         t.used = true;
@@ -1651,8 +1667,32 @@ void VkRenderer::EndFrame() {
         totalVerts += vc;
         batchIds.push_back(id);
     };
+    // 实验 VK_ORDER_11FIRST=1（默认关）：3× 全屏源（贴图 11）改为最先画，
+    // 而不是按 id 升序被放到最后盖住其它所有层。用于判定“黑帧=贴图 11 全屏覆盖”。
+    static int s_11first = -1;
+    if (s_11first < 0) {
+        const char* v = getenv("VK_ORDER_11FIRST");
+        s_11first = (v && v[0] == '1') ? 1 : 0;
+    }
+    // 实验 VK_SKIP_TEX=<id[,id]>（默认关）：整批丢掉指定贴图的顶点，用于定位覆盖源
+    static const char* s_skipCfg = getenv("VK_SKIP_TEX");
+    auto skipped = [](uint32_t id) {
+        if (!s_skipCfg || !s_skipCfg[0]) return false;
+        char buf[128];
+        snprintf(buf, sizeof(buf), ",%s,", s_skipCfg);
+        char key[32];
+        snprintf(key, sizeof(key), ",%u,", id);
+        return strstr(buf, key) != nullptr;
+    };
+    if (s_11first && o.textures.size() > 10 && o.textures[10].used) {
+        pushBatch(o.textures[10].verts, o.textures[10].set, 11);
+    }
     for (size_t i = 0; i < o.textures.size(); i++) {
-        if (o.textures[i].used) pushBatch(o.textures[i].verts, o.textures[i].set, (uint32_t)(i + 1));
+        if (s_11first && i == 10) continue;
+        if (!o.textures[i].used) continue;
+        uint32_t id = (uint32_t)(i + 1);
+        if (skipped(id)) continue;
+        pushBatch(o.textures[i].verts, o.textures[i].set, id);
     }
     for (size_t i = 0; i < o.targets.size(); i++) {
         if (o.targets[i].used) pushBatch(o.targets[i].verts, o.targets[i].set, (uint32_t)(1000 + i));
