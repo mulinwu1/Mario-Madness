@@ -101,6 +101,12 @@ struct VkRenderer::Impl {
     // 中途绑定后缓冲只提交几何（LOAD pass 叠加），不 flip。
     VkRenderPass renderPassLoad = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> framebuffersLoad;
+    // 单次 present 的中间合成必须保持内容：交换链图在两次合成之间停留在
+    // COLOR_ATTACHMENT_OPTIMAL（不能用 PRESENT_SRC 作 initialLayout，实测会丢内容）。
+    VkRenderPass renderPassLoadKeep = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> framebuffersLoadKeep;
+    VkRenderPass renderPassKeep = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> framebuffersKeep;
     bool bbHeld = false;
     bool bbLoad = false;
     bool presentReq = false;
@@ -201,6 +207,43 @@ static std::string ExeDirLocal() {
     std::string s(p);
     size_t pos = s.find_last_of("\\/");
     return pos == std::string::npos ? std::string("") : s.substr(0, pos + 1);
+}
+
+// 取证：把交换链图（B8G8R8A8）写成 24 位 BMP，用于和窗口截图逐像素比对
+static bool WriteBmpBGRA(const char* path, const uint8_t* px, int w, int h) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return false;
+    int row = w * 3;
+    int pad = (4 - (row % 4)) % 4;
+    size_t imgBytes = (size_t)(row + pad) * (size_t)h;
+    uint8_t hdr[54] = {0};
+    hdr[0] = 'B'; hdr[1] = 'M';
+    uint32_t total = (uint32_t)(54 + imgBytes);
+    memcpy(hdr + 2, &total, 4);
+    uint32_t off = 54;
+    memcpy(hdr + 10, &off, 4);
+    uint32_t hsz = 40;
+    memcpy(hdr + 14, &hsz, 4);
+    int32_t ww = w, hh = h;
+    memcpy(hdr + 18, &ww, 4);
+    memcpy(hdr + 22, &hh, 4);
+    uint16_t planes = 1, bpp = 24;
+    memcpy(hdr + 26, &planes, 2);
+    memcpy(hdr + 28, &bpp, 2);
+    uint32_t img = (uint32_t)imgBytes;
+    memcpy(hdr + 34, &img, 4);
+    fwrite(hdr, 1, 54, f);
+    uint8_t padbuf[3] = {0, 0, 0};
+    for (int y = h - 1; y >= 0; y--) {
+        const uint8_t* s = px + (size_t)y * (size_t)w * 4;
+        for (int x = 0; x < w; x++) {
+            uint8_t bgr[3] = {s[x * 4 + 0], s[x * 4 + 1], s[x * 4 + 2]};
+            fwrite(bgr, 1, 3, f);
+        }
+        if (pad) fwrite(padbuf, 1, (size_t)pad, f);
+    }
+    fclose(f);
+    return true;
 }
 
 VkRenderer::VkRenderer() : impl(new Impl()) {}
@@ -444,37 +487,62 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
 
     // 实验 VK_SINGLE_PRESENT=1（默认关）：同一张交换链图在一个视觉帧内多次合成，
     // 第二次起用 LOAD pass 叠加上一层内容，最后只在真实 swap 时 present 一次。
+    // 关键：中间合成结束在 COLOR_ATTACHMENT_OPTIMAL（不以 PRESENT_SRC 作 initialLayout）。
     {
         const char* v = getenv("VK_SINGLE_PRESENT");
         if (v && v[0] == '1') {
-            VkAttachmentDescription att2 = att;
-            att2.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-            att2.initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-            VkRenderPassCreateInfo rpci2{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-            rpci2.attachmentCount = 1;
-            rpci2.pAttachments = &att2;
-            rpci2.subpassCount = 1;
-            rpci2.pSubpasses = &sub;
-            if (createRP(o.dev, &rpci2, nullptr, &o.renderPassLoad) == VK_SUCCESS) {
-                o.framebuffersLoad.resize(ic);
+            auto mkRP = [&](VkAttachmentLoadOp lop, VkImageLayout init, VkImageLayout fin, VkRenderPass* out) {
+                VkAttachmentDescription a2 = att;
+                a2.loadOp = lop;
+                a2.initialLayout = init;
+                a2.finalLayout = fin;
+                VkRenderPassCreateInfo rpci2{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+                rpci2.attachmentCount = 1;
+                rpci2.pAttachments = &a2;
+                rpci2.subpassCount = 1;
+                rpci2.pSubpasses = &sub;
+                *out = VK_NULL_HANDLE;
+                createRP(o.dev, &rpci2, nullptr, out);
+            };
+            auto mkFB = [&](VkRenderPass rp, std::vector<VkFramebuffer>& fbs) {
+                if (rp == VK_NULL_HANDLE) return;
+                fbs.assign(ic, VK_NULL_HANDLE);
                 for (uint32_t i = 0; i < ic; i++) {
                     VkFramebufferCreateInfo fci2{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-                    fci2.renderPass = o.renderPassLoad;
+                    fci2.renderPass = rp;
                     fci2.attachmentCount = 1;
                     fci2.pAttachments = &o.swapViews[i];
                     fci2.width = o.extent.width;
                     fci2.height = o.extent.height;
                     fci2.layers = 1;
-                    createFB(o.dev, &fci2, nullptr, &o.framebuffersLoad[i]);
+                    createFB(o.dev, &fci2, nullptr, &fbs[i]);
                 }
-            }
+            };
+            // LOAD 叠加 + 最终 present（CA -> PRESENT）
+            mkRP(VK_ATTACHMENT_LOAD_OP_LOAD, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, &o.renderPassLoad);
+            // LOAD 叠加 + 继续持有（CA -> CA）
+            mkRP(VK_ATTACHMENT_LOAD_OP_LOAD, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, &o.renderPassLoadKeep);
+            // 首次合成（新图）+ 继续持有（UNDEFINED -> CA）
+            mkRP(VK_ATTACHMENT_LOAD_OP_CLEAR, VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, &o.renderPassKeep);
+            mkFB(o.renderPassLoad, o.framebuffersLoad);
+            mkFB(o.renderPassLoadKeep, o.framebuffersLoadKeep);
+            mkFB(o.renderPassKeep, o.framebuffersKeep);
+            fprintf(stderr, "[vk] singlepresent rp=%d loadKeep=%d keep=%d\n",
+                    o.renderPassLoad != VK_NULL_HANDLE,
+                    o.renderPassLoadKeep != VK_NULL_HANDLE,
+                    o.renderPassKeep != VK_NULL_HANDLE);
         }
     }
 
-    // 取证开关 VK_BBSTAT=1（默认关）：分配主机可见缓冲，用来在 present 前拷出后缓冲像素
+    // 取证开关 VK_BBSTAT=1 / VK_DUMP_PRESENTS=1（默认关）：分配主机可见缓冲，
+    // 把 present 前的交换链像素拷出来做亮度统计 / 写 BMP。
     {
         const char* v = getenv("VK_BBSTAT");
-        if (v && v[0] == '1') {
+        const char* d = getenv("VK_DUMP_PRESENTS");
+        if ((v && v[0] == '1') || (d && d[0] == '1')) {
             o.statBytes = (size_t)o.extent.width * (size_t)o.extent.height * 4;
             VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
             bci.size = o.statBytes;
@@ -1342,8 +1410,15 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
     // 不能清空已经累积的顶点，否则整条 filter 链最后合成时 verts=0，屏幕只剩清屏色。
     // 这里只更新清屏色，等 EndFrame 时真正清屏。
     if (o.frameOpen && o.currentTarget == id) {
-        // 实验 VK_SINGLE_PRESENT=1：同一张交换链图本帧已被占用，直接复用，不 acquire 也不提交
+        // 实验 VK_SINGLE_PRESENT=1：同一张交换链图本帧已被占用，直接复用，不 acquire 也不提交。
+        // 这里不能改 bbLoad：新 acquire 的图 bbLoad=false（必须 CLEAR），已叠加的图 bbLoad=true（必须 LOAD）。
         if (id == 0 && o.bbHeld && o.renderPassLoad != VK_NULL_HANDLE) {
+            static uint64_t s_reuse = 0;
+            s_reuse++;
+            if (s_reuse <= 2000) {
+                fprintf(stderr, "[vk] bind0-reuse n=%llu load=%d clear=(%.2f,%.2f,%.2f)\n",
+                        (unsigned long long)s_reuse, o.bbLoad ? 1 : 0, r, g, b);
+            }
             o.clearR = r;
             o.clearG = g;
             o.clearB = b;
@@ -1618,10 +1693,38 @@ void VkRenderer::EndFrame() {
     VkFramebuffer fb = o.framebuffers[o.frameImageIndex];
     VkRenderPass rp = o.renderPass;
     VkExtent2D ext = o.extent;
-    // 实验 VK_SINGLE_PRESENT=1：本帧该图已有内容 → 用 LOAD pass 叠加，不清屏
-    if (o.currentTarget == 0 && o.bbLoad && o.renderPassLoad != VK_NULL_HANDLE) {
-        fb = o.framebuffersLoad[o.frameImageIndex];
-        rp = o.renderPassLoad;
+    // 实验 VK_SINGLE_PRESENT=1：一视觉帧只 present 一次（真实 swap 由 gl_fbo 置 presentReq）。
+    // 中间合成必须把图保持在 COLOR_ATTACHMENT_OPTIMAL；只有最终那次以 PRESENT_SRC 收尾。
+    bool singlePresent = (o.renderPassLoad != VK_NULL_HANDLE &&
+                          o.renderPassLoadKeep != VK_NULL_HANDLE &&
+                          o.renderPassKeep != VK_NULL_HANDLE);
+    bool willPresent = true;
+    bool finalPresent = true;   // 本次 pass 结束时图是否已转成 PRESENT_SRC
+    if (o.currentTarget == 0) {
+        if (!singlePresent) {
+            fb = o.framebuffers[o.frameImageIndex];
+            rp = o.renderPass;
+            willPresent = true;
+            finalPresent = true;
+        } else {
+            willPresent = (o.bbHeld && o.presentReq);
+            finalPresent = willPresent;
+            if (o.bbLoad) {
+                rp = willPresent ? o.renderPassLoad : o.renderPassLoadKeep;
+                fb = willPresent ? o.framebuffersLoad[o.frameImageIndex]
+                                 : o.framebuffersLoadKeep[o.frameImageIndex];
+            } else {
+                rp = willPresent ? o.renderPass : o.renderPassKeep;
+                fb = willPresent ? o.framebuffers[o.frameImageIndex]
+                                 : o.framebuffersKeep[o.frameImageIndex];
+            }
+            if (fb == VK_NULL_HANDLE || rp == VK_NULL_HANDLE) {
+                fprintf(stderr, "[vk] singlepresent pass missing (willPresent=%d load=%d)\n",
+                        willPresent ? 1 : 0, o.bbLoad ? 1 : 0);
+                o.frameOpen = false;
+                return;
+            }
+        }
     }
     {
         static uint64_t s_frames = 0;
@@ -1735,7 +1838,10 @@ void VkRenderer::EndFrame() {
     bool doStat = (o.statBuf != VK_NULL_HANDLE && o.statPtr && o.currentTarget == 0 && totalVerts > 0);
     if (doStat) {
         VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-        b.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        // 本次 pass 的 finalLayout 决定当前真实布局（PRESENT_SRC 或 COLOR_ATTACHMENT_OPTIMAL）
+        VkImageLayout curLayout = finalPresent ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+                                               : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        b.oldLayout = curLayout;
         b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1759,7 +1865,7 @@ void VkRenderer::EndFrame() {
 
         VkImageMemoryBarrier b2 = b;
         b2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        b2.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        b2.newLayout = curLayout;
         b2.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
         b2.dstAccessMask = 0;
         g_cmdBarrier(o.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -1789,18 +1895,35 @@ void VkRenderer::EndFrame() {
         static uint64_t s_stat = 0;
         s_stat++;
         if (s_stat <= 20000) {
-            fprintf(stderr, "[vk] bbstat n=%llu f=%llu mean=%.2f nb=%.2f img=%u\n",
+            fprintf(stderr, "[vk] bbstat n=%llu f=%llu mean=%.2f nb=%.2f img=%u load=%d final=%d\n",
                     (unsigned long long)s_stat, (unsigned long long)g_drawFrame,
                     cnt ? sum / (double)cnt : 0.0, cnt ? 100.0 * (double)nb / (double)cnt : 0.0,
-                    o.frameImageIndex);
+                    o.frameImageIndex, o.bbLoad ? 1 : 0, finalPresent ? 1 : 0);
+        }
+        // 取证 VK_DUMP_PRESENTS=1（默认关）：落盘前 24 张交换链图 BMP，供与窗口截图比对
+        static int s_dump = -1;
+        if (s_dump < 0) {
+            const char* dv = getenv("VK_DUMP_PRESENTS");
+            s_dump = (dv && dv[0] == '1') ? 1 : 0;
+        }
+        if (s_dump) {
+            static uint64_t s_dumped = 0;
+            if (s_dumped < 24) {
+                char name[160];
+                snprintf(name, sizeof(name), "vk_pres_%02llu_f%llu_mean%.0f.bmp",
+                         (unsigned long long)s_dumped, (unsigned long long)g_drawFrame,
+                         cnt ? sum / (double)cnt : 0.0);
+                s_dumped++;
+                WriteBmpBGRA(name, px, o.extent.width, o.extent.height);
+                fprintf(stderr, "[vk] dump %s\n", name);
+            }
         }
     }
 
     if (o.currentTarget == 0) {
         // 实验 VK_SINGLE_PRESENT=1：中间合成只提交几何、保持 image 不归还；
         // 只有真实 swap（gl_fbo 调 RequestPresent）才 present 一次。
-        bool skipPresent = (o.renderPassLoad != VK_NULL_HANDLE && o.bbHeld && !o.presentReq);
-        if (skipPresent) {
+        if (!willPresent) {
             static uint64_t s_nopres = 0;
             s_nopres++;
             if (s_nopres <= 20000) {
@@ -1814,15 +1937,23 @@ void VkRenderer::EndFrame() {
             static uint64_t s_pres = 0;
             s_pres++;
             if (s_pres <= 20000) {
-                fprintf(stderr, "[vk] pres n=%llu f=%llu img=%u tex=%u verts=%zu\n",
+                fprintf(stderr, "[vk] pres n=%llu f=%llu img=%u tex=%u verts=%zu load=%d\n",
                         (unsigned long long)s_pres, (unsigned long long)g_drawFrame,
-                        o.frameImageIndex, g_bbLastTex, totalVerts);
+                        o.frameImageIndex, g_bbLastTex, totalVerts, o.bbLoad ? 1 : 0);
             }
             VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
             pi.swapchainCount = 1;
             pi.pSwapchains = &o.swapchain;
             pi.pImageIndices = &o.frameImageIndex;
-            g_present(o.queue, &pi);
+            VkResult pr = g_present(o.queue, &pi);
+            static uint64_t s_badPres = 0;
+            if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR) {
+                s_badPres++;
+                if (s_badPres <= 2000) {
+                    fprintf(stderr, "[vk] present failed r=%d n=%llu\n", (int)pr,
+                            (unsigned long long)s_badPres);
+                }
+            }
             o.bbHeld = false;
             o.presentReq = false;
         }
