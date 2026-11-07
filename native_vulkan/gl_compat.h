@@ -274,4 +274,11 @@ void lime_gl_vertex_attrib4fv (int index, double v);
 void lime_gl_viewport (int x, int y, int width, int height);
 void lime_gl_wait_sync (value sync, int flags, int timeoutA, int timeoutB);
 
+// ---- packet 解码通道（mix C：openfl 侧记录 -> native 解码）----
+// 注册由 patch_lime.py 注入的 DEFINE_PRIME0/2 行完成；VK_PKT=0 时全部空实现。
+int lime_vk_pkt_mode ();
+int lime_vk_pkt_emit (double pointer, int bytes);
+int lime_vk_pkt_utag ();
+int lime_vk_pkt_frame (int frameGen, double animTime);
+
 } // namespace lime

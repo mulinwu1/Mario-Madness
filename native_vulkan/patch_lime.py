@@ -7,16 +7,15 @@ GLSLANG_ANDROID_DIR = os.environ.get("GLSLANG_ANDROID_DIR", "").strip().replace(
 
 
 def detect_platform():
-    # 平台必须显式或可推断，不能默认按 Windows 走：安卓若注入了 vk_renderer.cpp
-    # 这类含平台实现的源文件却没注入对应平台文件，会在编译期直接失败。
+    # 判定顺序：显式 LIME_PLATFORM 永远最高优先；缺失时只信 Python 自身运行平台。
+    # 不能用 ANDROID_NDK_ROOT / ANDROID_NDK_HOME 推断：GitHub 的 windows-latest
+    # 镜像自带这两个变量，会把 Windows 轮误判成 android（run 42395291038 的根因）。
     p = os.environ.get("LIME_PLATFORM", "").strip().lower()
     if p in ("windows", "android"):
         return p
     if p:
         print("ERROR: LIME_PLATFORM=%r (expected windows|android)" % p)
         sys.exit(1)
-    if os.environ.get("ANDROID_NDK_ROOT") or os.environ.get("ANDROID_NDK_HOME"):
-        return "android"
     return "windows" if sys.platform.startswith("win") else "android"
 
 
@@ -112,6 +111,26 @@ if '#include "../vulkan/gl_compat.h"' not in text:
     else:
         print("WARN: OpenGLBindings.h include anchor not found")
 
+# 2b) 登记 packet 解码通道的 cpp prim。
+# 这些符号不是 lime 原生导出的，OpenGLBindings 的注册表里没有它们；不解 CFFI.load 会失败。
+PKT_PRIM_LINES = [
+    "DEFINE_PRIME0 (lime_vk_pkt_mode);",
+    "DEFINE_PRIME2 (lime_vk_pkt_emit);",
+    "DEFINE_PRIME0 (lime_vk_pkt_utag);",
+    "DEFINE_PRIME2 (lime_vk_pkt_frame);",
+]
+if "lime_vk_pkt_mode" not in text:
+    prim_anchor = "\tDEFINE_PRIME4v (lime_gl_wait_sync);"
+    if prim_anchor in text:
+        injected = prim_anchor + "\n" + "".join("\t%s\n" % l for l in PKT_PRIM_LINES)
+        text = text.replace(prim_anchor, injected, 1)
+        print("registered packet prims:", len(PKT_PRIM_LINES))
+    else:
+        print("ERROR: DEFINE_PRIME anchor for packet prims not found")
+        sys.exit(1)
+else:
+    print("packet prims already registered")
+
 open(p, "w", encoding="utf-8").write(text)
 
 # 3) Build.xml: 按平台注入源文件；不要加 gl_stubs.cpp（会重复符号）
@@ -123,6 +142,8 @@ COMMON_SOURCES = [
     "gl_fbo.cpp",
     "gl_texture_params.cpp",
     "gl_state.cpp",
+    "vk_packet.cpp",
+    "gl_packet.cpp",
 ]
 PLATFORM_SOURCES = {
     "windows": ["vk_platform_win32.cpp"],
@@ -130,6 +151,27 @@ PLATFORM_SOURCES = {
 }
 
 sources = COMMON_SOURCES + PLATFORM_SOURCES[PLATFORM]
+
+
+def assert_sources_present():
+    # 准备阶段结束后，树里必须真的有这些文件。否则不要把它拖到链接阶段变成
+    # 上百行 LNK2019（run 42395291038 就是这样浪费了 87 秒）。
+    need = sources + ["gl_compat.h", "vk_packet.h", "gl_packet.h"]
+    missing = [n for n in need if not os.path.exists(os.path.join(VULKAN_DIR, n))]
+    if not missing:
+        return
+    print("ERROR: platform=%s build is missing sources: %s" % (PLATFORM, ", ".join(missing)))
+    print("ERROR: actual contents of %s:" % VULKAN_DIR)
+    try:
+        for name in sorted(os.listdir(VULKAN_DIR)):
+            print("  %s" % name)
+    except OSError as exc:
+        print("  (cannot list: %s)" % exc)
+    sys.exit(1)
+
+
+assert_sources_present()
+
 inject = "".join('\t\t<file name="src/graphics/vulkan/%s" />\n' % name for name in sources)
 
 if PLATFORM == "android":
@@ -148,7 +190,14 @@ xml = open(b, encoding="utf-8").read()
 anchor = '<file name="src/graphics/Image.cpp" />'
 platform_needle = PLATFORM_SOURCES[PLATFORM][0]
 if platform_needle in xml:
-    print("build.xml already patched (platform=%s)" % PLATFORM)
+    # 缓存树可能带着上一轮补丁（源文件清单不全）。这里逐项核对，
+    # 缺一个就失败，避免用旧清单编出一个缺符号的 ndll。
+    stale = [n for n in sources if ('src/graphics/vulkan/%s"' % n) not in xml]
+    if stale:
+        print("ERROR: build.xml is patched but stale (platform=%s), missing: %s" % (PLATFORM, ", ".join(stale)))
+        print("ERROR: reset the cached lime source and re-run, do not link with an incomplete source list")
+        sys.exit(1)
+    print("build.xml already patched (platform=%s, %d sources verified)" % (PLATFORM, len(sources)))
 elif "vk_renderer.cpp" in xml:
     print("ERROR: build.xml already has vulkan sources but missing %s" % platform_needle)
     sys.exit(1)

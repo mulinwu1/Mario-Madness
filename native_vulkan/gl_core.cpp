@@ -3,6 +3,7 @@
 #include "gl_vk_bridge.h"
 #include "gl_vk_contract.h"
 #include "gl_state.h"
+#include "gl_packet.h"
 
 #include <vector>
 #include <cstring>
@@ -843,5 +844,52 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
 int lime_gl_get_error() {
     return glstate::TakeError();
 }
+
+// ---------------------------------------------------------------- packet 解码桥
+// 只读快照：emit 调用内抓取，随后解码器只看 DrawRecord。实现在本文件是为了
+// 不把 g_attrs/g_buffers/g_tex* 暴露到新文件里（避免解码侧耦合渲染器内部）。
+
+namespace pkt {
+
+bool SnapshotAttr (int index, AttrSnap* out) {
+    if (!out || index < 0 || index >= 16) return false;
+    const AttribState& a = g_attrs[index];
+    memset(out, 0, sizeof(*out));
+    out->bufferName = (a.buffer > 0) ? (uint32_t)a.buffer : 0u;
+    out->byteOffset = (a.client || a.offset < 0.0) ? 0u : (uint32_t)a.offset;
+    out->stride = a.stride;
+    out->size = a.size;
+    out->glType = a.type;
+    out->kind = 0;
+    out->enabled = a.enabled ? 1 : 0;
+    out->client = a.client ? 1 : 0;
+    out->constSet = g_attrConstSet[index] ? 1 : 0;
+    out->constN = (uint8_t)g_attrConstN[index];
+    for (int k = 0; k < 4; k++) out->constValue[k] = g_attrConst[index][k];
+    out->clientPtr = (a.client && a.clientPtr) ? (const void*)a.clientPtr : nullptr;
+    return true;
+}
+
+int SnapshotTexBound (int unit) {
+    if (unit < 0 || unit >= (int)g_texBound.size()) return 0;
+    return g_texBound[(size_t)unit];
+}
+
+uint32_t SnapshotTexVk (int glName) {
+    return S_STATE_getTextureId(glName);
+}
+
+bool SnapshotBuffer (int name, const uint8_t** data, uint32_t* bytes) {
+    if (data) *data = nullptr;
+    if (bytes) *bytes = 0;
+    if (name <= 0 || name >= (int)g_buffers.size()) return false;
+    const std::vector<unsigned char>& d = g_buffers[(size_t)name].data;
+    if (d.empty()) return false;
+    if (data) *data = d.data();
+    if (bytes) *bytes = (uint32_t)d.size();
+    return true;
+}
+
+} // namespace pkt
 
 } // namespace lime

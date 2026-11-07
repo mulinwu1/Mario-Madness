@@ -1093,6 +1093,20 @@ int GetStencilRef(int face) {
     return g_state.stencilRef;
 }
 
+bool GetStencilFace(int face, int* compareOp, uint32_t* compareMask, uint32_t* writeMask,
+                    int* failOp, int* passDepthFailOp, int* passOp) {
+    // 0x0404 = GL_FRONT, 0x0405 = GL_BACK（本阶段 ref 前后同值，其余按面独立）
+    if (face != 0x0404 && face != 0x0405) return false;
+    const FaceState& s = (face == 0x0404) ? g_state.frontStencil : g_state.backStencil;
+    if (compareOp) *compareOp = s.func;
+    if (compareMask) *compareMask = s.valueMask;
+    if (writeMask) *writeMask = s.writeMask;
+    if (failOp) *failOp = s.sfail;
+    if (passDepthFailOp) *passDepthFailOp = s.dpfail;
+    if (passOp) *passOp = s.dppass;
+    return true;
+}
+
 bool GetColorMask(int* out4) {
     if (!out4) return false;
     for (int i = 0; i < 4; i++) out4[i] = g_state.colorMask[i] ? 1 : 0;

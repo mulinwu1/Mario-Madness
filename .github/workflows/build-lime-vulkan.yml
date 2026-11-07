@@ -20,7 +20,7 @@ jobs:
             native_vulkan
           sparse-checkout-cone-mode: false
 
-      # key 必须跟着源码走：只用常量 key + 整目录缓存，会把上一轮的 obj/ndll 一直带过来
+      # key 必须跟着源码走：只用常量 key 会把上一轮的东西一直带过来
       - name: Compute source hash
         id: srchash
         shell: pwsh
@@ -34,20 +34,21 @@ jobs:
           Write-Host "source hash: $hash ($($files.Count) files)"
           "hash=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      # 缓存三块最耗时的东西：haxelib 库、Vulkan 头、lime 源码(含 SDL 子模块)+编译中间产物
-      # 命中后 clone / 下载 / SDL 重编都能跳过
+      # 只缓存"下载物"（haxelib、Vulkan 头、glslang 官方包），不缓存任何构建树：
+      # lime-src 整目录缓存会带 obj/ndll，造出"旧产物 + 新 mtime"的假成功，
+      # 断言只能挡住 ndll，挡不住 obj。宁可每轮全量重编。
       - name: Restore build caches
         uses: actions/cache@v6
         with:
           path: |
             ~\haxelib
             vkh
-            C:\lime-src
-            C:\glslang
-          key: lime-vk-v3-${{ runner.os }}-${{ steps.srchash.outputs.hash }}
+            C:\glslang\include
+            C:\glslang\lib
+          key: lime-vk-v4-${{ runner.os }}-${{ steps.srchash.outputs.hash }}
           restore-keys: |
-            lime-vk-v3-${{ runner.os }}-
-            lime-vk-v3-
+            lime-vk-v4-${{ runner.os }}-
+            lime-vk-v4-
             lime-vk-v2-
 
       - name: Install Haxe 4.2.5 and Neko
@@ -105,6 +106,8 @@ jobs:
       # glslang 16.6.0 官方 Windows 静态库是 /MD 构建，直接链接进 hxcpp 的 /MT ndll 会
       # 报 LNK2038 RuntimeLibrary 不匹配。所以这里把官方库包成一个独立 DLL
       # (lime_glslang.dll)，ndll 侧只链它的 import lib，两边 CRT 互不干扰。
+      # 我们自己的产物一律落 C:\glslang\out，与缓存的 include/lib（官方包）分开，
+      # 这样缓存里不会混进任何 .dll/.lib/.obj 产物。
       - name: Fetch glslang 16.6.0 and build lime_glslang.dll
         shell: pwsh
         run: |
@@ -123,11 +126,13 @@ jobs:
           }
           Write-Host "glslang.lib bytes: $((Get-Item 'C:\glslang\lib\glslang.lib').Length)"
 
-          if (-not (Test-Path 'C:\glslang\bin\lime_glslang.dll')) {
+          New-Item -ItemType Directory -Force -Path C:\glslang\out | Out-Null
+          $out = 'C:\glslang\out'
+          if (-not (Test-Path "$out\lime_glslang.dll")) {
             $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
             $vs = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
             $log = 'C:\glslang\shim_build.log'
-            cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cl /nologo /c /MD /O2 native_vulkan\glslang_shim.cpp /Fo:C:\glslang\glslang_shim.obj && link /nologo /DLL /out:C:\glslang\bin\lime_glslang.dll /implib:C:\glslang\lib\lime_glslang.lib /def:native_vulkan\glslang_shim.def C:\glslang\glslang_shim.obj C:\glslang\lib\glslang.lib C:\glslang\lib\glslang-default-resource-limits.lib C:\glslang\lib\SPIRV-Tools.lib C:\glslang\lib\SPIRV-Tools-opt.lib > $log 2>&1"
+            cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && cl /nologo /c /MD /O2 native_vulkan\glslang_shim.cpp /Fo:$out\glslang_shim.obj && link /nologo /DLL /out:$out\lime_glslang.dll /implib:$out\lime_glslang.lib /def:native_vulkan\glslang_shim.def $out\glslang_shim.obj C:\glslang\lib\glslang.lib C:\glslang\lib\glslang-default-resource-limits.lib C:\glslang\lib\SPIRV-Tools.lib C:\glslang\lib\SPIRV-Tools-opt.lib > $log 2>&1"
             if ($LASTEXITCODE -ne 0) {
               Get-Content $log
               throw "lime_glslang.dll build failed ($LASTEXITCODE)"
@@ -136,30 +141,41 @@ jobs:
           } else {
             Write-Host "lime_glslang.dll cached"
           }
-          Get-Item C:\glslang\bin\lime_glslang.dll, C:\glslang\lib\lime_glslang.lib | Select-Object FullName, Length
+          Get-Item C:\glslang\out\lime_glslang.dll, C:\glslang\out\lime_glslang.lib | Select-Object FullName, Length
 
       - name: Prepare lime source and inject vulkan
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          if (-not (Test-Path "C:\lime-src\.git")) {
-            git clone --depth 1 --branch 8.0.2 --recursive --shallow-submodules https://github.com/openfl/lime.git C:\lime-src
-          } else {
-            Write-Host "lime source cached, resetting working tree"
-            git -C C:\lime-src checkout -- .
-            # 只清 untracked，不加 -x，保留 obj/ndll 等构建产物用于增量编译
-            git -C C:\lime-src clean -fd
-            git -C C:\lime-src submodule update --init --recursive --depth 1
-          }
+          # lime-src 不进缓存：树里只要带上一轮的 obj/ndll，就可能出现"旧产物 + 新 mtime"
+          # 的假成功。固定从干净 clone 开始，全量重编（几十秒），换掉这一类误判。
+          if (Test-Path 'C:\lime-src') { Remove-Item 'C:\lime-src' -Recurse -Force }
+          git clone --depth 1 --branch 8.0.2 --recursive --shallow-submodules https://github.com/openfl/lime.git C:\lime-src
           New-Item -ItemType Directory -Force -Path C:\lime-src\project\src\graphics\vulkan | Out-Null
-          Copy-Item native_vulkan\vk_shaders_spv.h, native_vulkan\vk_renderer.h, native_vulkan\vk_renderer.cpp, native_vulkan\gl_core.cpp, native_vulkan\gl_compat.h, native_vulkan\gl_vk_bridge.h, native_vulkan\gl_vk_c.h, native_vulkan\gl_vk_contract.h, native_vulkan\gl_vk_contract.cpp, native_vulkan\gl_fbo.cpp, native_vulkan\gl_texture_params.cpp, native_vulkan\gl_state.h, native_vulkan\gl_state.cpp, native_vulkan\gl_shader.h, native_vulkan\gl_shader.cpp C:\lime-src\project\src\graphics\vulkan\ -Force
+          # 拷贝清单必须覆盖 patch_lime.py 的全部 sources（含平台文件与新增的 packet 源），
+          # 少一个会在准备阶段的 assert_sources_present() 直接 exit 1
+          $files = @(
+            'vk_shaders_spv.h', 'vk_renderer.h', 'vk_renderer.cpp', 'gl_core.cpp', 'gl_compat.h',
+            'gl_vk_bridge.h', 'gl_vk_c.h', 'gl_vk_contract.h', 'gl_vk_contract.cpp', 'gl_fbo.cpp',
+            'gl_texture_params.cpp', 'gl_state.h', 'gl_state.cpp', 'gl_shader.h', 'gl_shader.cpp',
+            'vk_platform.h', 'vk_platform_win32.cpp', 'vk_platform_android.cpp',
+            'vk_packet.h', 'vk_packet.cpp', 'gl_packet.h', 'gl_packet.cpp'
+          )
+          Copy-Item -Path ($files | ForEach-Object { "native_vulkan\$_" }) -Destination C:\lime-src\project\src\graphics\vulkan\ -Force
           # vulkan_core.h 会引用 vk_video/ 下的视频编码头，两个目录都要复制
           Copy-Item vkh\include\vulkan C:\lime-src\project\include\ -Recurse -Force
           Copy-Item vkh\include\vk_video C:\lime-src\project\include\ -Recurse -Force
           # hxcpp 编译只认 lime 自己的 -Iinclude，glslang 头也照同样方式落进去
           Copy-Item C:\glslang\include\glslang C:\lime-src\project\include\ -Recurse -Force
           $env:LIME_SRC = "C:\lime-src"
-          python native_vulkan\patch_lime.py
+          # 平台判定钉死：主线已改为显式变量最高优先，不再读 runner 自带的 NDK 变量
+          $env:LIME_PLATFORM = 'windows'
+          $plog = Join-Path $env:GITHUB_WORKSPACE 'prepare-lime.log'
+          python native_vulkan\patch_lime.py 2>&1 | Tee-Object -FilePath $plog -Append
+          $code = $LASTEXITCODE
+          Write-Host "patch_lime exit=$code"
+          "patch_lime exit=$code" | Out-File $plog -Append
+          if ($code -ne 0) { Write-Host "prepare failed"; exit 1 }
           haxelib dev lime C:\lime-src
           Get-ChildItem C:\lime-src\project\src\graphics\vulkan | Select-Object Name, Length
 
@@ -170,7 +186,7 @@ jobs:
           $log = Join-Path $env:GITHUB_WORKSPACE 'build-lime.log'
           $started = Get-Date
           "build_started: $($started.ToString('o'))" | Out-File $log
-          # 缓存树里可能躺上一轮的 ndll；先删，避免"文件在 = 产物已更新"的误判
+          # 兜底：即便以后有人把 lime-src 加回缓存，这一步也保证不用旧 ndll
           if (Test-Path $ndll) {
             Remove-Item $ndll -Force
             "removed stale ndll: $ndll" | Out-File $log -Append
@@ -188,7 +204,7 @@ jobs:
             $info = Get-Item $ndll
             $info | Select-Object FullName, Length
             $info | ForEach-Object { "ndll: $($_.FullName) $($_.Length) B  LastWriteTime=$($_.LastWriteTime.ToString('o'))" } | Out-File $log -Append
-            # 必须是本轮生成的：比构建开始时间新，否则就是缓存里的旧文件
+            # 必须是本轮生成的：比构建开始时间新，否则就是上一次留下的旧文件
             if ($info.LastWriteTime -le $started) {
               Write-Host "ndll is stale (older than build start): $($info.LastWriteTime)"
               "ASSERT FAIL: ndll stale" | Out-File $log -Append
@@ -213,12 +229,15 @@ jobs:
           }
 
       # 失败时也要有日志可查：与产物上传分开，always()
+      # 准备阶段（patch_lime / assert_sources_present）失败也有 prepare-lime.log
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: lime-vulkan-build-log
-          path: build-lime.log
+          path: |
+            build-lime.log
+            prepare-lime.log
           if-no-files-found: warn
           retention-days: 7
 
@@ -229,5 +248,15 @@ jobs:
           name: lime-vulkan-ndll
           path: |
             C:\lime-src\ndll\Windows64\lime.ndll
-            C:\glslang\bin\lime_glslang.dll
+            C:\glslang\out\lime_glslang.dll
           retention-days: 7
+
+      # 缓存路径已不含 lime-src / glslang\out；这步是兜底，确保任何残留产物都不会被
+      # post-job 的 cache save 收进去（含失败轮）
+      - name: Drop build artifacts before cache save
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($p in @('C:\lime-src\ndll\Windows64\lime.ndll', 'C:\glslang\out\lime_glslang.dll', 'C:\glslang\out\lime_glslang.lib', 'C:\glslang\out\glslang_shim.obj')) {
+            if (Test-Path $p) { Remove-Item $p -Force; Write-Host "removed $p" }
+          }

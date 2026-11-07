@@ -707,6 +707,13 @@ uint32_t gl_vk_current_target () {
     return g_currentTarget;
 }
 
+// packet 解码用：GL FBO 名 → VkRenderer RenderTarget id（>0）。0 表示后备缓冲或尚未创建。
+uint32_t gl_vk_fbo_target (int fboName) {
+    if (fboName <= 0 || (size_t)fboName >= g_fbos.size ()) return 0;
+    const Fbo& f = g_fbos[(size_t)fboName];
+    return f.used ? f.rtId : 0;
+}
+
 bool gl_vk_handle_clear () {
     VkRenderer* r = gl_vk_get_renderer ();
     if (!r) return false;

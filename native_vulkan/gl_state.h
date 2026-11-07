@@ -196,6 +196,9 @@ void GetViewportBox(int out[4]);
 float GetLineWidth();
 // 前后强制同值，face 参数保留只为接口对齐；提交时用 FRONT_AND_BACK。
 int GetStencilRef(int face);
+// 单面模板状态（Vulkan 数值）。face 取 GL_FRONT(0x0404) / GL_BACK(0x0405)。
+bool GetStencilFace(int face, int* compareOp, uint32_t* compareMask, uint32_t* writeMask,
+                    int* failOp, int* passDepthFailOp, int* passOp);
 bool GetColorMask(int* out4);
 bool GetDepthRangef(float out2[2]);
 

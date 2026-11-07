@@ -13,6 +13,8 @@ VkRenderer* gl_vk_get_renderer();
 bool gl_vk_handle_clear();
 void gl_vk_present_frame();
 uint32_t gl_vk_current_target();
+// GL FBO 名 → RenderTarget id；0 = 后备缓冲/未创建（packet 的 rtImage 用）
+uint32_t gl_vk_fbo_target(int fboName);
 
 // 纹理查询（gl_texture_params.cpp 提供）
 uint32_t gl_vk_texture_id(int glName);

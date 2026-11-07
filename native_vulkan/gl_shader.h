@@ -76,6 +76,15 @@ VkDescriptorSet gl_shader_descriptor_set (int program, bool offscreen);
 // uniform buffer 的字节大小（std140）。渲染器可在每帧 draw 前调用 upload。
 uint32_t gl_shader_uniform_buffer_size (int program);
 
+// 只读访问 CPU 侧 uniform 镜像（packet 解码在 emit 时复制这份快照）。
+// 未链接 / 无 uniform / 镜像大小不一致时返回 false。
+bool gl_shader_uniform_block (int program, const uint8_t** data, uint32_t* size);
+
+// sampler 槽位数量与第 index 个槽位的纹理单元（按 shader 声明顺序展开数组）。
+// 用于 packet 的 slots= 字段与 8 个纹理槽抓取；无 program 返回 0 / -1。
+int gl_shader_sampler_count (int program);
+int gl_shader_sampler_unit (int program, int index);
+
 // 把 CPU 侧 uniform 镜像写入 host visible buffer 并更新 descriptor set（仅 UBO 部分）。
 bool gl_shader_upload_uniforms (int program);
 

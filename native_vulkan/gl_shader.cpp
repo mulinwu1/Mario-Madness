@@ -2350,6 +2350,46 @@ uint32_t gl_shader_uniform_buffer_size (int program) {
 
 }
 
+bool gl_shader_uniform_block (int program, const uint8_t** data, uint32_t* size) {
+
+	if (data) *data = NULL;
+	if (size) *size = 0;
+	Program* p = FindProgram (program);
+	if (!p || p->uniformSize == 0 || p->uniformData.size () != p->uniformSize) return false;
+	if (data) *data = p->uniformData.data ();
+	if (size) *size = p->uniformSize;
+	return true;
+
+}
+
+int gl_shader_sampler_count (int program) {
+
+	Program* p = FindProgram (program);
+	if (!p) return 0;
+	int n = 0;
+	for (size_t i = 0; i < p->uniforms.size (); i++) {
+		if (p->uniforms[i].kind != BASE_SAMPLER) continue;
+		n += (p->uniforms[i].arraySize > 0) ? p->uniforms[i].arraySize : 1;
+	}
+	return n;
+
+}
+
+int gl_shader_sampler_unit (int program, int index) {
+
+	Program* p = FindProgram (program);
+	if (!p || index < 0) return -1;
+	for (size_t i = 0; i < p->uniforms.size (); i++) {
+		const UniformInfo& u = p->uniforms[i];
+		if (u.kind != BASE_SAMPLER) continue;
+		int count = (u.arraySize > 0) ? u.arraySize : 1;
+		if (index < count) return u.textureUnit + index;
+		index -= count;
+	}
+	return -1;
+
+}
+
 bool gl_shader_upload_uniforms (int program) {
 
 	Program* p = FindProgram (program);
