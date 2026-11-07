@@ -720,8 +720,19 @@ bool gl_vk_handle_clear () {
         return true;
     }
     if (!g_backbufferOpen) {
-        r->BindRenderTarget (0, c[0], c[1], c[2], c[3]);
-        g_backbufferOpen = true;
+        bool ok = r->BindRenderTarget (0, c[0], c[1], c[2], c[3]);
+        // 只有渲染器侧真的开帧成功才置真。原来无条件置 true，
+        // 交换链过期/acquire 失败会被这一行掩盖成"后缓冲是开着的"。
+        if (ok) {
+            g_backbufferOpen = true;
+        } else {
+            static uint64_t s_bad = 0;
+            s_bad++;
+            if (s_bad <= 2000) {
+                fprintf (stderr, "[glvk] bbopen ok=0 f=%llu\n",
+                         (unsigned long long)r->FrameIndex ());
+            }
+        }
     }
     // 后缓冲帧已经打开：清屏色在打开时已取，EndFrame 时才真正使用
     return true;
