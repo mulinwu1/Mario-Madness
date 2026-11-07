@@ -2719,6 +2719,61 @@ void lime_gl_link_program (int program) {
 
 	}
 
+	// 诊断：把前 4 个成功链接的游戏 program 的 GLSL 与属性/uniform 落盘（只读，不影响渲染）
+	if (target->linkOk) {
+
+		static int s_dumps = 0;
+
+		if (s_dumps < 4) {
+
+			s_dumps++;
+
+			char path[128];
+			snprintf (path, sizeof (path), "vk_prog_%d.vert", program);
+			FILE* fv = fopen (path, "wb");
+
+			if (fv) {
+
+				fwrite (target->glslVertex.c_str (), 1, target->glslVertex.size (), fv);
+				fclose (fv);
+
+			}
+
+			snprintf (path, sizeof (path), "vk_prog_%d.frag", program);
+			FILE* ff = fopen (path, "wb");
+
+			if (ff) {
+
+				fwrite (target->glslFragment.c_str (), 1, target->glslFragment.size (), ff);
+				fclose (ff);
+
+			}
+
+			fprintf (stderr, "[gl_shader] dump program=%d vlen=%d flen=%d attribs=%d uniforms=%d ubo=%u\n",
+				program, (int) target->glslVertex.size (), (int) target->glslFragment.size (),
+				(int) target->attribs.size (), (int) target->uniforms.size (), target->uniformSize);
+
+			for (size_t i = 0; i < target->attribs.size () && i < 12; i++) {
+
+				fprintf (stderr, "[gl_shader] attr prog=%d loc=%d type=%d n=%d name=%s\n", program,
+					target->attribs[i].location, target->attribs[i].glType,
+					target->attribs[i].arraySize, target->attribs[i].name.c_str ());
+
+			}
+
+			for (size_t i = 0; i < target->uniforms.size () && i < 16; i++) {
+
+				fprintf (stderr, "[gl_shader] unif prog=%d loc=%d type=%d kind=%d bind=%d name=%s\n", program,
+					target->uniforms[i].location, target->uniforms[i].glType,
+					target->uniforms[i].kind, target->uniforms[i].binding,
+					target->uniforms[i].name.c_str ());
+
+			}
+
+		}
+
+	}
+
 }
 
 void lime_gl_validate_program (int handle) {
