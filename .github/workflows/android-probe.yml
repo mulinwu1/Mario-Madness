@@ -21,13 +21,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - name: Init timing
-        run: |
-          echo "PROBE_T0=$(date +%s)" >> "$GITHUB_ENV"
-          echo "PROBE_OUT=$GITHUB_WORKSPACE/probe-out" >> "$GITHUB_ENV"
-          mkdir -p "$GITHUB_WORKSPACE/probe-out"
-          touch "$GITHUB_WORKSPACE/probe-out/timings.txt"
-
       # 仓库有 1.8GB 资源，本探针只验工具链，稀疏检出只取 native_vulkan
       - name: "Checkout (sparse: native_vulkan)"
         uses: actions/checkout@v4
@@ -35,6 +28,14 @@ jobs:
           sparse-checkout: |
             native_vulkan
           sparse-checkout-cone-mode: false
+
+      # 产物/日志放 RUNNER_TEMP：checkout 的 clean 会把 workspace 里的未跟踪文件删掉
+      - name: Init timing
+        run: |
+          echo "PROBE_T0=$(date +%s)" >> "$GITHUB_ENV"
+          echo "PROBE_OUT=$RUNNER_TEMP/probe-out" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/probe-out"
+          echo "OUT=$RUNNER_TEMP/probe-out" >> "$GITHUB_ENV"
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4
@@ -44,17 +45,22 @@ jobs:
 
       - name: Install NDK ${{ env.NDK_VERSION }} via sdkmanager
         run: |
-          set -euo pipefail
+          set -uo pipefail
           t0=$(date +%s)
           SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
           echo "SDK=$SDK"
-          echo "--- 已装 NDK ---"
+          echo "--- 镜像里已装的 NDK ---"
           ls -1 "$SDK/ndk" 2>/dev/null || true
-          echo "--- sdkmanager 安装 ndk;${NDK_VERSION}（yes 喂默认值，防交互挂起）---"
-          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$SDK" "ndk;${NDK_VERSION}" 2>&1 | tail -n 20
+          echo "--- sdkmanager 安装 ndk;${NDK_VERSION} ---"
+          # 注意：yes 读完 stdin 会被 SIGPIPE 杀掉(退出141)，所以只看 sdkmanager 自己的退出码
+          yes | "$SDKM" --sdk_root="$SDK" "ndk;${NDK_VERSION}" 2>&1 \
+            | tee "$RUNNER_TEMP/probe-out/install-ndk.log" | tail -n 6
+          code=${PIPESTATUS[1]}
+          echo "sdkmanager exit=$code"
+          [ "$code" -eq 0 ] || { echo "sdkmanager 装 NDK 失败"; exit "$code"; }
           NDK_DIR="$SDK/ndk/${NDK_VERSION}"
-          test -d "$NDK_DIR" || { echo "NDK 目录不存在: $NDK_DIR"; exit 1; }
-          echo "--- NDK 目录 ---"
+          [ -d "$NDK_DIR" ] || { echo "NDK 目录不存在: $NDK_DIR"; exit 1; }
           cat "$NDK_DIR/source.properties"
           {
             echo "ANDROID_NDK_ROOT=$NDK_DIR"
@@ -63,19 +69,22 @@ jobs:
             echo "ANDROID_SDK_ROOT=$SDK"
             echo "ANDROID_HOME=$SDK"
           } >> "$GITHUB_ENV"
-          echo "install-ndk: $(( $(date +%s) - t0 ))s" | tee -a "$PROBE_OUT/timings.txt"
+          echo "install-ndk: $(( $(date +%s) - t0 ))s" | tee -a "$RUNNER_TEMP/probe-out/timings.txt"
 
       - name: Install Haxe ${{ env.HAXE_VERSION }} + Neko ${{ env.NEKO_VERSION }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           t0=$(date +%s)
+          O="$RUNNER_TEMP/probe-out"
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/haxe.tar.gz" \
-            "https://github.com/HaxeFoundation/haxe/releases/download/${HAXE_VERSION}/haxe-${HAXE_VERSION}-linux64.tar.gz"
+            "https://github.com/HaxeFoundation/haxe/releases/download/${HAXE_VERSION}/haxe-${HAXE_VERSION}-linux64.tar.gz" \
+            || { echo "下载 haxe 失败"; exit 1; }
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/neko.tar.gz" \
-            "https://github.com/HaxeFoundation/neko/releases/download/v2-3-0/neko-${NEKO_VERSION}-linux64.tar.gz"
+            "https://github.com/HaxeFoundation/neko/releases/download/v2-3-0/neko-${NEKO_VERSION}-linux64.tar.gz" \
+            || { echo "下载 neko 失败"; exit 1; }
           mkdir -p "$HOME/haxe" "$HOME/neko"
-          tar -xzf "$RUNNER_TEMP/haxe.tar.gz" -C "$HOME/haxe"
-          tar -xzf "$RUNNER_TEMP/neko.tar.gz" -C "$HOME/neko"
+          tar -xzf "$RUNNER_TEMP/haxe.tar.gz" -C "$HOME/haxe" || exit 1
+          tar -xzf "$RUNNER_TEMP/neko.tar.gz" -C "$HOME/neko" || exit 1
           HAXE_DIR=$(dirname "$(find "$HOME/haxe" -maxdepth 2 -type f -name haxe | head -n 1)")
           NEKO_DIR=$(dirname "$(find "$HOME/neko" -maxdepth 2 -type f -name neko | head -n 1)")
           echo "HAXE_DIR=$HAXE_DIR"
@@ -91,59 +100,67 @@ jobs:
           } >> "$GITHUB_ENV"
           export PATH="$HAXE_DIR:$NEKO_DIR:$PATH"
           export NEKOPATH="$NEKO_DIR" HAXE_STD_PATH="$HAXE_DIR/std"
-          haxe -version
-          neko -version
+          haxe -version || exit 1
+          neko -version || exit 1
           yes | haxelib setup "$HOME/haxelib" >/dev/null 2>&1 || true
-          haxelib config
-          echo "install-haxe-neko: $(( $(date +%s) - t0 ))s" | tee -a "$PROBE_OUT/timings.txt"
+          haxelib config || exit 1
+          echo "install-haxe-neko: $(( $(date +%s) - t0 ))s" | tee -a "$O/timings.txt"
 
       - name: Install hxcpp ${{ env.HXCPP_VERSION }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           t0=$(date +%s)
-          yes | haxelib install hxcpp "${HXCPP_VERSION}" 2>&1 | tail -n 15
+          O="$RUNNER_TEMP/probe-out"
+          yes | haxelib install hxcpp "${HXCPP_VERSION}" 2>&1 | tee "$O/install-hxcpp.log" | tail -n 12
+          code=${PIPESTATUS[1]}
+          echo "haxelib install hxcpp exit=$code"
+          [ "$code" -eq 0 ] || { echo "haxelib 装 hxcpp 失败"; exit "$code"; }
           haxelib list | grep -i hxcpp || true
-          echo "--- hxcpp 首次自举（会本地编译 hxcpp host，耗时较长）---"
-          haxelib run hxcpp 2>&1 | tail -n 30 || { echo "hxcpp 自举失败"; exit 1; }
-          echo "install-hxcpp: $(( $(date +%s) - t0 ))s" | tee -a "$PROBE_OUT/timings.txt"
+          echo "--- hxcpp 首次自举（会本地编译 hxcpp host，耗时较长；退出码仅记录，不据此判失败）---"
+          haxelib run hxcpp 2>&1 | tail -n 20; echo "hxcpp self-build exit=${PIPESTATUS[0]}"
+          echo "install-hxcpp: $(( $(date +%s) - t0 ))s" | tee -a "$O/timings.txt"
 
       # 第一版不打 patch_lime.py、不注入 native_vulkan：只验工具链能否出 liblime.so
       - name: Clone lime ${{ env.LIME_VERSION }} + haxelib dev
         run: |
-          set -euo pipefail
+          set -uo pipefail
           t0=$(date +%s)
+          O="$RUNNER_TEMP/probe-out"
           git clone --depth 1 --branch "${LIME_VERSION}" --recursive --shallow-submodules \
-            https://github.com/openfl/lime.git "$HOME/lime-src"
-          haxelib dev lime "$HOME/lime-src"
+            https://github.com/openfl/lime.git "$HOME/lime-src" 2>&1 | tail -n 5
+          [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "clone lime 失败"; exit 1; }
+          haxelib dev lime "$HOME/lime-src" || exit 1
           haxelib list | grep -i lime || true
-          ls "$HOME/lime-src/project/Build.xml"
-          echo "clone-lime: $(( $(date +%s) - t0 ))s" | tee -a "$PROBE_OUT/timings.txt"
+          ls "$HOME/lime-src/project/Build.xml" || exit 1
+          echo "clone-lime: $(( $(date +%s) - t0 ))s" | tee -a "$O/timings.txt"
 
       - name: lime rebuild android
         run: |
           set -uo pipefail
           t0=$(date +%s)
-          cd "$HOME/lime-src"
+          O="$RUNNER_TEMP/probe-out"
+          cd "$HOME/lime-src" || exit 1
           echo "--- lime setup android（无 TTY，yes 喂默认值；失败不阻断）---"
           yes | haxelib run lime setup android 2>&1 | tail -n 10 || true
           echo "--- lime rebuild android ---"
-          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
-          haxelib run lime rebuild android 2>&1 | tee "$PROBE_OUT/lime-rebuild.log" | tail -n 60
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT  ABI=$ANDROID_ABI"
+          haxelib run lime rebuild android 2>&1 | tee "$O/lime-rebuild.log" | tail -n 60
           code=${PIPESTATUS[0]}
           echo "lime rebuild android exit=$code"
-          echo "build-lime-android: $(( $(date +%s) - t0 ))s" | tee -a "$PROBE_OUT/timings.txt"
+          echo "build-lime-android: $(( $(date +%s) - t0 ))s" | tee -a "$O/timings.txt"
           exit "$code"
 
       - name: Assert liblime.so is AArch64
         if: always()
         run: |
           set -uo pipefail
+          O="$RUNNER_TEMP/probe-out"
           echo "--- find liblime.so ---"
           find "$HOME/lime-src" -name 'liblime.so' -printf '%p  %s bytes\n' 2>/dev/null || true
           SO=$(find "$HOME/lime-src" -name 'liblime.so' 2>/dev/null | head -n 1)
           if [ -z "$SO" ]; then
             echo "ASSERT FAIL: 没找到 liblime.so"
-            echo "--- ndll 目录实际内容 ---"
+            echo "--- ndll 实际内容 ---"
             find "$HOME/lime-src/ndll" "$HOME/lime-src/project" -maxdepth 4 \( -name '*.so' -o -name '*.a' -o -name 'obj' \) 2>/dev/null | head -n 40 || true
             exit 1
           fi
@@ -152,16 +169,24 @@ jobs:
             echo "ASSERT FAIL: $SO 不是 AArch64"
             exit 1
           fi
-          cp "$SO" "$PROBE_OUT/liblime.so"
-          ls -l "$PROBE_OUT/liblime.so"
+          cp "$SO" "$O/liblime.so"
+          ls -l "$O/liblime.so"
 
       - name: Timing summary
         if: always()
         run: |
           echo "--- 每步耗时 ---"
-          cat "$PROBE_OUT/timings.txt" || true
+          cat "$RUNNER_TEMP/probe-out/timings.txt" || true
           echo "--- 总耗时 ---"
           if [ -n "${PROBE_T0:-}" ]; then echo "total: $(( $(date +%s) - PROBE_T0 ))s"; fi
+
+      # checkout 的 clean 会清 workspace，所以最后再把产物拷进去给 upload-artifact 用
+      - name: Collect outputs
+        if: always()
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/probe-out"
+          cp -a "$RUNNER_TEMP/probe-out/." "$GITHUB_WORKSPACE/probe-out/" 2>/dev/null || true
+          ls -l "$GITHUB_WORKSPACE/probe-out" || true
 
       - name: Upload artifact
         if: always()
@@ -171,5 +196,7 @@ jobs:
           path: |
             probe-out/liblime.so
             probe-out/lime-rebuild.log
+            probe-out/install-ndk.log
+            probe-out/install-hxcpp.log
             probe-out/timings.txt
           if-no-files-found: warn
