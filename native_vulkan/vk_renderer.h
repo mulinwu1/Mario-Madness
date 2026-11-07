@@ -42,6 +42,8 @@ public:
     void ResetLastGeometryTarget();
     // 当前提交帧号，用于把截图与日志行对齐
     uint64_t FrameIndex() const;
+    // 本帧后缓冲最后一次采样的纹理 id（0 = 没采样过）
+    uint32_t BackbufferLastSample() const;
 
     // raw vertex submission (GL-style): verts are x,y,u,v float4 per vertex
     void DrawRaw(uint32_t texId, const float* verts, int vertexCount);

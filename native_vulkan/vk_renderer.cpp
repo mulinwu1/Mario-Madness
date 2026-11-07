@@ -5,6 +5,7 @@
 #include <vulkan/vulkan.h>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 
 #define MAX_SPRITES 4096
@@ -145,6 +146,8 @@ static PFN_vkGetInstanceProcAddr g_gipa = nullptr;
 
 // 提交计数：DrawRaw 的取证日志按它分组，判断“同一帧内”的绘制
 static uint64_t g_drawFrame = 0;
+// 上一帧后缓冲最后一次采样到的纹理 id，用于区分两次后缓冲合成各自画的是哪一层
+static uint32_t g_bbLastTex = 0;
 
 static uint32_t FindMemType(const VkPhysicalDeviceMemoryProperties& mp, uint32_t bits, VkMemoryPropertyFlags flags) {
     for (uint32_t i = 0; i < 32; i++) {
@@ -1119,6 +1122,7 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount) {
 
     // 采样源尺寸：uv 归一化要用（有的路径传进来的 uv 是像素值而不是 0..1）
     float tw = 0.0f, th = 0.0f;
+    if (o.currentTarget == 0) g_bbLastTex = texId;
     if (texId >= 1000) {
         uint32_t ti = texId - 1000;
         tw = (float)o.targets[ti].w;
@@ -1236,6 +1240,10 @@ uint32_t VkRenderer::LastGeometryTarget() const {
 
 uint64_t VkRenderer::FrameIndex() const {
     return g_drawFrame;
+}
+
+uint32_t VkRenderer::BackbufferLastSample() const {
+    return g_bbLastTex;
 }
 
 void VkRenderer::ResetLastGeometryTarget() {
@@ -1479,9 +1487,10 @@ void VkRenderer::EndFrame() {
                     if (totalVerts > 0) o.targets[ti].lastWriteFrame = s_frames;
                 }
             }
-            fprintf(stderr, "[vk] submit frame=%llu t=%lld tgt=%u verts=%zu ranges=%zu delsample=%lld created=%llu\n",
+            fprintf(stderr, "[vk] submit frame=%llu t=%lld tgt=%u verts=%zu ranges=%zu delsample=%lld created=%llu tex=%u\n",
                     (unsigned long long)s_frames, (long long)time(nullptr), o.currentTarget,
-                    totalVerts, ranges.size(), delsample, (unsigned long long)created);
+                    totalVerts, ranges.size(), delsample, (unsigned long long)created,
+                    (o.currentTarget == 0) ? g_bbLastTex : 0u);
             s_submitLog++;
         }
         if (s_frames == 1 || s_frames % 30 == 0 || o.currentTarget == 0) {
@@ -1572,6 +1581,7 @@ void VkRenderer::EndFrame() {
     }
 
     o.frameOpen = false;
+    g_bbLastTex = 0;
     for (auto& t : o.textures) t.verts.clear();
     for (auto& t : o.targets) t.verts.clear();
 }

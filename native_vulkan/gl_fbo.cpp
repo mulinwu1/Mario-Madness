@@ -21,6 +21,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -161,10 +162,60 @@ void GetClearColor (float* c) {
     if (cs && cs->getClearColor) cs->getClearColor (c);
 }
 
+// ---------------------------------------------------------------- 实验开关
+// VK_SINGLE_COMP=1：后缓冲这一次只采样了 1001（场景层 1002 没进后缓冲）时，
+// 用 1002 全屏覆盖一次再 present。默认关闭；关闭时本文件路径与 logdiag 版一致。
+bool CompOverrideEnabled () {
+    static int s_enabled = -1;
+    if (s_enabled < 0) {
+        const char* v = getenv ("VK_SINGLE_COMP");
+        s_enabled = (v && v[0] == '1') ? 1 : 0;
+    }
+    return s_enabled != 0;
+}
+
+// 在后缓冲当前这批顶点里追加一张全屏 1002。只加几何、不 acquire、不额外 present，
+// 所以交换链 image 的“acquire -> 本帧 present 归还”周期不变。
+bool DrawSceneOverlay (VkRenderer* r) {
+    if (!r) return false;
+    if (r->BackbufferLastSample () != 1001) return false;
+
+    uint32_t src = 0;
+    int tw = 0, th = 0;
+    // 场景层在本工程里固定是 1002；不可用时退回本帧最后绑定的离屏目标
+    if (r->GetRenderTargetSize (1002, &tw, &th) && tw > 0 && th > 0) {
+        src = 1002;
+    } else if (g_lastTarget >= 1000 && g_lastTarget != 1001 &&
+               r->GetRenderTargetSize (g_lastTarget, &tw, &th) && tw > 0 && th > 0) {
+        src = g_lastTarget;
+    }
+    if (src == 0) return false;
+
+    float W = (float)r->ScreenWidth ();
+    float H = (float)r->ScreenHeight ();
+    float quad[24] = {
+        0.0f, 0.0f, 0.0f, 0.0f,
+        W,    0.0f, 1.0f, 0.0f,
+        0.0f, H,    0.0f, 1.0f,
+        0.0f, H,    0.0f, 1.0f,
+        W,    0.0f, 1.0f, 0.0f,
+        W,    H,    1.0f, 1.0f,
+    };
+    r->DrawRaw (src, quad, 6);
+    fprintf (stderr, "[glvk] comp-override f=%llu src=%u %dx%d -> %dx%d\n",
+             (unsigned long long)r->FrameIndex (), src, tw, th, (int)W, (int)H);
+    return true;
+}
+
 // 结束已经打开的帧（后缓冲会 present，离屏目标只提交）
 void CloseOpenFrame () {
     VkRenderer* r = gl_vk_get_renderer ();
     if (g_currentTarget != 0 || g_backbufferOpen) {
+        // 实验：这帧后缓冲只采样了 1001 就 present → 先补一张 1002 全屏。
+        // 开关关闭时 DrawSceneOverlay 不会被调用，行为与 logdiag 版完全一致。
+        if (r && CompOverrideEnabled () && g_currentTarget == 0) {
+            DrawSceneOverlay (r);
+        }
         if (r) r->PresentTarget ();
     }
     g_currentTarget = 0;
@@ -649,9 +700,8 @@ void gl_vk_present_frame () {
         fprintf (stderr, "[glvk] present f=%llu cur=%u last=%u pending=%d\n",
                  (unsigned long long)r->FrameIndex (),
                  g_currentTarget, g_lastTarget, (int)r->FrameHasGeometry ());
-        // 关键：OpenFL 的整帧常常停在最后一个离屏目标上，如果直接 EndFrame，
-        // 渲染结果只留在 FBO 里，后缓冲从来没被画过 → 屏幕只有清屏色（黑屏）。
-        // 所以提交前先把最后一张离屏图铺满后缓冲。
+        // 合成顺序日志：本视觉帧每次 present 实际铺了哪张离屏图（0 = 没合成，lime 已直接画后缓冲）
+        uint32_t composed = 0;
         if (g_currentTarget >= 1000) {
             float c[4];
             GetClearColor (c);
@@ -677,6 +727,7 @@ void gl_vk_present_frame () {
                     W,    H,    (float)tw, (float)th,
                 };
                 r->DrawRaw (src, quad, 6);
+                composed = src;
                 g_backbufferOpen = true;
                 fprintf (stderr, "[glvk] blit cur=%u src=%u %dx%d -> %dx%d\n",
                          g_currentTarget, src, tw, th, (int)W, (int)H);
@@ -706,10 +757,23 @@ void gl_vk_present_frame () {
                     W,    H,    (float)tw, (float)th,
                 };
                 r->DrawRaw (src, quad, 6);
+                composed = src;
                 g_backbufferOpen = true;
                 fprintf (stderr, "[glvk] blit last src=%u %dx%d -> %dx%d\n",
                          src, tw, th, (int)W, (int)H);
             }
+        }
+        // 实验：本次 present 的后缓冲只采样了 1001（场景层 1002 没进后缓冲）→
+        // 先补一张 1002 全屏再提交。只追加几何，present 次数与顺序都不变。
+        // 开关关闭时不进入，行为与 logdiag 版完全一致。
+        if (CompOverrideEnabled () && g_currentTarget == 0) {
+            if (DrawSceneOverlay (r)) composed = 1002;
+        }
+        static uint64_t s_compLog = 0;
+        if (s_compLog < 20000) {
+            fprintf (stderr, "[glvk] comp f=%llu order=%u cur=%u\n",
+                     (unsigned long long)r->FrameIndex (), composed, g_currentTarget);
+            s_compLog++;
         }
         r->EndFrame ();
         // 本帧结束即失效：下一帧必须由新的提交重新标记，避免取到上一帧的目标
