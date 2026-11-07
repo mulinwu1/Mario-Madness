@@ -6,6 +6,7 @@
 
 #include <android/native_window.h>
 #include <dlfcn.h>
+#include <unistd.h>
 #include <vulkan/vulkan.h>
 
 #include "vk_platform.h"
@@ -68,6 +69,30 @@ bool CreateSurface (uint64_t instance, void* gipa, void* nativeWindow,
 
     *outSurface = (uint64_t)surf;
     return true;
+}
+
+// 与桌面版等价：从 /proc/self/exe 取进程可执行文件路径再取 dirname。
+// 安卓上通常是 /system/bin/app_process*，其目录对外部资源查找没有意义；
+// 调用方 fopen 失败后会回退到内嵌资源，所以这里即使返回非空也不会造成误加载。
+void ExeDir (char* out, int outCap) {
+    if (!out || outCap <= 0) return;
+    out[0] = '\0';
+
+    char p[1024];
+    int n = (int)readlink ("/proc/self/exe", p, sizeof (p) - 1);
+    if (n <= 0) return;
+    p[n] = '\0';
+
+    int cut = -1;
+    for (int i = n - 1; i >= 0; --i) {
+        if (p[i] == '/') { cut = i; break; }
+    }
+    if (cut < 0) return;
+
+    int len = cut + 1;
+    if (len > outCap - 1) len = outCap - 1;
+    for (int i = 0; i < len; ++i) out[i] = p[i];
+    out[len] = '\0';
 }
 
 }

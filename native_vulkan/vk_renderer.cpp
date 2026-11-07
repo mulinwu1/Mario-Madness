@@ -268,12 +268,12 @@ static std::vector<char> ReadFileLocal(const std::string& path) {
     return buf;
 }
 
+// 平台无关：路径解析在 vk_platform_win32.cpp / vk_platform_android.cpp 里。
+// 本文件（以及所有 COMMON_SOURCES）不得出现任何 Win32 符号。
 static std::string ExeDirLocal() {
-    char p[MAX_PATH];
-    GetModuleFileNameA(nullptr, p, MAX_PATH);
-    std::string s(p);
-    size_t pos = s.find_last_of("\\/");
-    return pos == std::string::npos ? std::string("") : s.substr(0, pos + 1);
+    char dir[1024];
+    vkplat::ExeDir(dir, (int)sizeof(dir));
+    return std::string(dir);
 }
 
 // 取证：把交换链图（B8G8R8A8）写成 24 位 BMP，用于和窗口截图逐像素比对

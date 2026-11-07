@@ -69,4 +69,27 @@ bool CreateSurface (uint64_t instance, void* gipa, void* nativeWindow,
     return true;
 }
 
+// ExeDirLocal 的实现从 vk_renderer.cpp 搬到这里：共用文件里不能再出现 MAX_PATH /
+// GetModuleFileNameA（CI run 42395291038 的 C2065/C3861 就是这么来的）。
+void ExeDir (char* out, int outCap) {
+    if (!out || outCap <= 0) return;
+    out[0] = '\0';
+
+    char p[MAX_PATH];
+    DWORD n = GetModuleFileNameA (nullptr, p, MAX_PATH);
+    // 返回 MAX_PATH 表示缓冲被截断，此时路径不可靠，直接当作取不到
+    if (n == 0 || n >= (DWORD)MAX_PATH) return;
+
+    int cut = -1;
+    for (int i = (int)n - 1; i >= 0; --i) {
+        if (p[i] == '\\' || p[i] == '/') { cut = i; break; }
+    }
+    if (cut < 0) return;
+
+    int len = cut + 1;
+    if (len > outCap - 1) len = outCap - 1;
+    for (int i = 0; i < len; ++i) out[i] = p[i];
+    out[len] = '\0';
+}
+
 }
