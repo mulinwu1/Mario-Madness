@@ -18,7 +18,7 @@ permissions:
 jobs:
   build-vkpkt:
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       HAXE_VERSION: 4.2.5
       LIME_VERSION: 8.0.2
@@ -189,9 +189,10 @@ jobs:
           Copy-Item "$rj\include\rapidjson\*" (Join-Path $inc "rapidjson") -Recurse -Force
 
       # 冷构建：不使用任何 hxcpp/obj 缓存（单变量原则），保证产物一定是本轮新编的
+      # 单阶段：haxe 前台跑（输出实时进 Actions 日志）+ 独立监控进程（每 60s 一行心跳，卡死自动 taskkill）
       - name: Build game with openfl_vk_pkt
         shell: pwsh
-        timeout-minutes: 50
+        timeout-minutes: 150
         run: |
           $ErrorActionPreference = 'Stop'
           $buildStart = (Get-Date).ToUniversalTime()
@@ -201,95 +202,105 @@ jobs:
             Get-ChildItem $_.FullName -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
           }
           $hx = (Get-Command haxelib).Source
-          Remove-Item build.log, build.err, gen.log, empty.stdin -ErrorAction SilentlyContinue
-          New-Item -ItemType File -Path empty.stdin | Out-Null
+          $wd = (Get-Location).Path
+          Remove-Item build.log, build.err, hb.log, stall.txt, monitor.ps1 -ErrorAction SilentlyContinue
           Write-Host "openfl fork: $env:OPENFL_VKPKT_FORK"
           $cs = Get-CimInstance Win32_ComputerSystem
           Write-Host ("host memory: {0:N1} GB physical, {1} logical cores" -f ($cs.TotalPhysicalMemory/1GB), $env:NUMBER_OF_PROCESSORS)
           Write-Host 'hxcpp: 默认并行(=逻辑核数) + -D HXCPP_FAST_LINK；不传 -debug => 无 -Zi/无 vc.pdb'
           haxelib list
 
-          $peakMB = 0
-          # 流式阶段执行器：不再用 Start-Process 重定向；输出经 job 写入日志文件并用 Add-Content 逐行 flush，
-          # 主线程每 5s 把新行打到 stdout，每 30s 打一行 ::notice::[hb]（含已编 obj 数/峰值内存/最后一行）
-          function Invoke-Stage {
-            param([string]$StageName, [string[]]$StageArgs, [string]$LogFile, [int]$TimeoutMin)
-            Write-Host "::group::$StageName :: args=$($StageArgs -join ' ') timeout=${TimeoutMin}m"
-            $t0 = Get-Date
-            Remove-Item $LogFile, "$LogFile.exit" -ErrorAction SilentlyContinue
-            $wd = (Get-Location).Path
-            $job = Start-Job -ScriptBlock {
-              param($exe, $a, $log, $wd2)
-              Set-Location $wd2
-              & $exe @a 2>&1 | ForEach-Object {
-                $ln = "$_"
-                Add-Content -Path $log -Value $ln -Encoding UTF8
-                $ln
-              }
-              Add-Content -Path ($log + '.exit') -Value "$LASTEXITCODE"
-            } -ArgumentList $hx, $StageArgs, $LogFile, $wd
-            $printed = 0
-            $lastHb = (Get-Date).AddSeconds(-30)
-            $lastLine = '(no output yet)'
-            $timedOut = $false
-            while ($true) {
-              if (Test-Path $LogFile) {
-                $lines = @(Get-Content $LogFile -ErrorAction SilentlyContinue)
-                if ($lines.Count -gt $printed) {
-                  $lines[$printed..($lines.Count - 1)] | ForEach-Object { Write-Host "  | $_" }
-                  $printed = $lines.Count
-                  $lastLine = [string]$lines[-1]
-                }
-              }
-              $elapsed = [int]((Get-Date) - $t0).TotalSeconds
-              if (((Get-Date) - $lastHb).TotalSeconds -ge 30) {
-                $objs = @(Get-ChildItem obj -Recurse -Filter '*.obj' -File -ErrorAction SilentlyContinue).Count
-                $ws = @(Get-Process cl.exe, link.exe, c2.exe -ErrorAction SilentlyContinue | Measure-Object WorkingSet64 -Sum).Sum
-                $wsMB = 0
-                if ($ws) { $wsMB = [int][math]::Round($ws / 1MB) }
-                if ($wsMB -gt $peakMB) { $script:peakMB = $wsMB }
-                $short = ($lastLine -replace '[\r\n\t]', ' ')
-                if ($short.Length -gt 120) { $short = $short.Substring(0, 120) }
-                Write-Host "::notice::[hb] stage=$StageName elapsed=${elapsed}s obj=$objs mem=${wsMB}MB peak=${script:peakMB}MB last=$short"
-                $lastHb = Get-Date
-              }
-              if ($elapsed -ge ($TimeoutMin * 60)) { $timedOut = $true; break }
-              if ($job.State -ne 'Running' -and $job.State -ne 'NotStarted') { break }
-              Start-Sleep 5
-            }
-            if ($timedOut) { Stop-Job $job -ErrorAction SilentlyContinue }
-            Remove-Job $job -Force -ErrorAction SilentlyContinue
-            $code = -1
-            if (Test-Path "$LogFile.exit") { $code = [int](Get-Content "$LogFile.exit") }
-            $dur = [int]((Get-Date) - $t0).TotalSeconds
-            Write-Host "::endgroup::"
-            Write-Host "stage=$StageName exit=$code duration=${dur}s timedOut=$timedOut peak=${script:peakMB}MB"
-            if ($timedOut) {
-              Write-Host "=== $LogFile tail 40 (timeout) ==="
-              Get-Content $LogFile -Tail 40 -ErrorAction SilentlyContinue
-              throw "stage '$StageName' exceeded ${TimeoutMin}m hard timeout"
-            }
-            if ($code -ne 0) {
-              Write-Host "=== $LogFile tail 40 ==="
-              Get-Content $LogFile -Tail 40 -ErrorAction SilentlyContinue
-              throw "stage '$StageName' failed exit=$code"
+          $stageArgs = @('run','lime','build','windows','-D','HXCPP_FAST_LINK')
+          Write-Host "cmd: $hx $($stageArgs -join ' ')"
+
+          # 监控脚本：三个信号全部实测（取不到的写 NA，不写 0 假装有数）
+          # 1) haxe 累计 CPU 秒 + 与上次采样的增量 —— 增量 >0 就是"在动"的硬证据
+          # 2) haxe 工作集 MB
+          # 3) export 下 .cpp 数量与总字节（haxe 生成完会从 0 跳到几千）
+          # 另有 obj 数作为第二条硬证据；判定卡死 = haxe_cpu 连续 10 次采样无增量 且 cpp/obj 都没涨
+          Set-Content -Path monitor.ps1 -Encoding UTF8 -Value @'
+          param([string]$Wd, [string]$Marker, [string]$HbLog, [int]$MaxMin = 110, [int]$StallSamples = 10)
+          Set-Location $Wd
+          $t0 = Get-Date
+          $prevCpu = 0.0
+          $prevCpp = -1
+          $prevObj = -1
+          $flat = 0
+          function Kill-Tree {
+            foreach ($p in @(Get-Process -Name haxe, haxelib, neko, cl, link, c2 -ErrorAction SilentlyContinue)) {
+              & taskkill /PID $p.Id /T /F 2>&1 | Out-Null
             }
           }
-
-          # 阶段 1：只生成（hxcpp 的 HXCPP_GENERATE_MSVC 走 GenMsvc 分支，不编译不链接，见 BuildTool.hx:315-323）
-          # lime 本身没有 no-compilation 开关（CPPHelper.hx:54 那段是注释掉的死代码），故生成阶段只能借 hxcpp define
-          try {
-            Invoke-Stage 'gen (HXCPP_GENERATE_MSVC, no compile)' @('run','lime','build','windows','-D','HXCPP_GENERATE_MSVC','-D','HXCPP_FAST_LINK') 'gen.log' 8
-          } catch {
-            Write-Host "::warning::gen stage failed (non-fatal,继续全量构建): $_"
+          while ($true) {
+            Start-Sleep -Seconds 60
+            $elapsed = [int]((Get-Date) - $t0).TotalSeconds
+            $hp = @(Get-Process -Name haxe -ErrorAction SilentlyContinue)
+            if ($hp.Count -gt 0) {
+              $cpu = [double](($hp | Measure-Object -Property CPU -Sum).Sum)
+              $wsSum = ($hp | Measure-Object -Property WorkingSet64 -Sum).Sum
+              if ($wsSum) { $mem = [string][int][math]::Round($wsSum / 1MB) } else { $mem = 'NA' }
+              $delta = [math]::Round($cpu - $prevCpu, 1)
+              $prevCpu = $cpu
+            } else {
+              $cpu = 0.0
+              $mem = 'NA'
+              $delta = 0.0
+              $prevCpu = 0.0
+            }
+            $cpp = @(Get-ChildItem 'export' -Recurse -Filter '*.cpp' -File -ErrorAction SilentlyContinue)
+            $cppCount = $cpp.Count
+            $cppMB = 0
+            if ($cppCount -gt 0) { $cppMB = [int][math]::Round((($cpp | Measure-Object -Property Length -Sum).Sum) / 1MB) }
+            $objCount = @(Get-ChildItem 'export' -Recurse -Filter '*.obj' -File -ErrorAction SilentlyContinue).Count
+            Write-Host ("::notice::[hb] elapsed=${elapsed}s haxe_cpu=${cpu}s (+${delta}) mem=${mem}MB cpp=${cppCount} files=${cppMB}MB")
+            Write-Host ("  [hb-detail] obj=${objCount} flat=${flat}")
+            Add-Content -Path $HbLog -Value ("[hb] elapsed=${elapsed}s haxe_cpu=${cpu}s (+${delta}) mem=${mem}MB cpp=${cppCount} files=${cppMB}MB obj=${objCount}")
+            if ($delta -le 0 -and $cppCount -eq $prevCpp -and $objCount -eq $prevObj) { $flat++ } else { $flat = 0 }
+            $prevCpp = $cppCount
+            $prevObj = $objCount
+            if ($elapsed -ge ($MaxMin * 60)) {
+              Set-Content -Path $Marker -Value "stage hard timeout ${MaxMin}m (elapsed=${elapsed}s cpp=$cppCount obj=$objCount)"
+              Kill-Tree
+              break
+            }
+            if ($flat -ge $StallSamples) {
+              Set-Content -Path $Marker -Value "stall: haxe_cpu delta=0 for $flat samples (~${flat}m); cpp=$cppCount obj=$objCount"
+              Kill-Tree
+              break
+            }
           }
-          $cppCount = @(Get-ChildItem obj -Recurse -Filter '*.cpp' -File -ErrorAction SilentlyContinue).Count
-          Write-Host "generated .cpp under obj: $cppCount"
+          '@
 
-          # 阶段 2：编译+链接。hxcpp 的 buildTarget() 是"逐组编译后立即链接"的单函数（BuildTool.hx:402-780），
-          # 没有 compile-only / link-only 开关，所以只能整段跑；进度靠心跳里的 obj 计数与内存峰值判断
-          Invoke-Stage 'build (compile+link)' @('run','lime','build','windows','-D','HXCPP_FAST_LINK') 'build.log' 25
-          Write-Host "final peak cl/link working set: $peakMB MB"
+          $monProc = Start-Process -FilePath (Get-Command pwsh).Source `
+            -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File', (Join-Path $wd 'monitor.ps1'),
+                            '-Wd', $wd, '-Marker', (Join-Path $wd 'stall.txt'), '-HbLog', (Join-Path $wd 'hb.log'),
+                            '-MaxMin', '110', '-StallSamples', '10') `
+            -NoNewWindow -PassThru
+
+          # 前台跑：stdout 逐行实时打到 Actions 日志并落 build.log；stderr 落 build.err
+          $runStart = Get-Date
+          & $hx @stageArgs 2> build.err | ForEach-Object {
+            Add-Content -Path 'build.log' -Value "$_" -Encoding UTF8
+            Write-Host "$_"
+          }
+          $code = $LASTEXITCODE
+          if ($null -eq $code) { $code = -1 }
+          $dur = [int]((Get-Date) - $runStart).TotalSeconds
+          Stop-Process -Id $monProc.Id -Force -ErrorAction SilentlyContinue
+          $stalled = Test-Path 'stall.txt'
+          Write-Host "build: exit=$code duration=${dur}s stalled=$stalled"
+          Write-Host '=== hb tail 8 ==='
+          Get-Content hb.log -Tail 8 -ErrorAction SilentlyContinue
+          if ($stalled) { Write-Host ("kill reason: " + ((Get-Content stall.txt -Raw) -replace "`r?`n", ' ')) }
+          if ($code -ne 0 -or $stalled) {
+            Write-Host '=== build.err (full) ==='
+            $errLines = @(Get-Content build.err -ErrorAction SilentlyContinue)
+            if ($errLines.Count -eq 0) { Write-Host '(build.err is empty)' } else { $errLines | ForEach-Object { Write-Host $_ } }
+            Write-Host '=== build.log tail 60 ==='
+            Get-Content build.log -Tail 60 -ErrorAction SilentlyContinue
+            throw "build failed: exit=$code stalled=$stalled duration=${dur}s"
+          }
+
           Get-ChildItem $outDir -Recurse -Filter 'Mario.exe' -File -ErrorAction SilentlyContinue |
             Select-Object FullName, Length, LastWriteTime | Format-Table -AutoSize
           # lime 把 ndll 放在 applicationDirectory（export\release\windows\bin），直接贴着 exe 放
@@ -350,6 +361,8 @@ jobs:
           path: |
             build.log
             build.err
+            hb.log
+            stall.txt
           if-no-files-found: warn
           retention-days: 7
 
