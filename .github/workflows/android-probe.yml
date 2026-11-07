@@ -124,6 +124,23 @@ jobs:
           haxelib run hxcpp 2>&1 | tail -n 20; echo "hxcpp self-build exit=${PIPESTATUS[0]}"
           echo "install-hxcpp: $(( $(date +%s) - t0 ))s" | tee -a "$O/timings.txt"
 
+      # lime 的 tools 编译时要 -lib format；缺它 rebuild 会在第一秒就报
+      # "Cannot process [format]: Library format is not installed"
+      - name: Install lime toolchain deps (format, hxp)
+        run: |
+          set -uo pipefail
+          set +e
+          t0=$(date +%s)
+          O="$RUNNER_TEMP/probe-out"
+          for lib in format hxp; do
+            yes | haxelib install "$lib" 2>&1 | tee "$O/install-$lib.log" | tail -n 6
+            code=${PIPESTATUS[1]}
+            echo "haxelib install $lib exit=$code"
+            [ "$code" -eq 0 ] || { echo "装 $lib 失败"; exit 1; }
+          done
+          haxelib list
+          echo "install-lime-deps: $(( $(date +%s) - t0 ))s" | tee -a "$O/timings.txt"
+
       # 第一版不打 patch_lime.py、不注入 native_vulkan：只验工具链能否出 liblime.so
       - name: Clone lime ${{ env.LIME_VERSION }} + haxelib dev
         run: |
@@ -204,5 +221,7 @@ jobs:
             probe-out/lime-rebuild.log
             probe-out/install-ndk.log
             probe-out/install-hxcpp.log
+            probe-out/install-format.log
+            probe-out/install-hxp.log
             probe-out/timings.txt
           if-no-files-found: warn
