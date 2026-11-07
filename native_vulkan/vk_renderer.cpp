@@ -97,6 +97,11 @@ struct VkRenderer::Impl {
     float* uboPtr = nullptr;
 
     std::vector<TexSlot> textures;
+    // 取证：present 前把交换链图拷到主机可见缓冲，算亮度统计（VK_BBSTAT=1，默认关）
+    VkBuffer statBuf = VK_NULL_HANDLE;
+    VkDeviceMemory statMem = VK_NULL_HANDLE;
+    void* statPtr = nullptr;
+    size_t statBytes = 0;
     std::vector<RenderTarget> targets;
     uint32_t currentTarget = 0;
     // 最后一次真正收到顶点并提交的离屏目标（present 选源用）
@@ -125,6 +130,7 @@ static PFN_vkAllocateDescriptorSets g_allocDS;
 static PFN_vkUpdateDescriptorSets g_updateDS;
 static PFN_vkCmdPipelineBarrier g_cmdBarrier;
 static PFN_vkCmdCopyBufferToImage g_cmdCopyImg;
+static PFN_vkCmdCopyImageToBuffer g_cmdCopyImgToBuf;
 static PFN_vkCmdBindPipeline g_bindPipe;
 static PFN_vkCmdBindDescriptorSets g_bindDS;
 static PFN_vkCmdBindVertexBuffers g_bindVB;
@@ -274,6 +280,7 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     g_updateDS = (PFN_vkUpdateDescriptorSets)o.gipa(o.inst, "vkUpdateDescriptorSets");
     g_cmdBarrier = (PFN_vkCmdPipelineBarrier)o.gipa(o.inst, "vkCmdPipelineBarrier");
     g_cmdCopyImg = (PFN_vkCmdCopyBufferToImage)o.gipa(o.inst, "vkCmdCopyBufferToImage");
+    g_cmdCopyImgToBuf = (PFN_vkCmdCopyImageToBuffer)o.gipa(o.inst, "vkCmdCopyImageToBuffer");
     g_bindPipe = (PFN_vkCmdBindPipeline)o.gipa(o.inst, "vkCmdBindPipeline");
     g_bindDS = (PFN_vkCmdBindDescriptorSets)o.gipa(o.inst, "vkCmdBindDescriptorSets");
     g_bindVB = (PFN_vkCmdBindVertexBuffers)o.gipa(o.inst, "vkCmdBindVertexBuffers");
@@ -372,7 +379,7 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     swci.imageColorSpace = fmt.colorSpace;
     swci.imageExtent = o.extent;
     swci.imageArrayLayers = 1;
-    swci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    swci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     swci.preTransform = caps.currentTransform;
     swci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     swci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
@@ -426,6 +433,30 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
         fci.height = o.extent.height;
         fci.layers = 1;
         createFB(o.dev, &fci, nullptr, &o.framebuffers[i]);
+    }
+
+    // 取证开关 VK_BBSTAT=1（默认关）：分配主机可见缓冲，用来在 present 前拷出后缓冲像素
+    {
+        const char* v = getenv("VK_BBSTAT");
+        if (v && v[0] == '1') {
+            o.statBytes = (size_t)o.extent.width * (size_t)o.extent.height * 4;
+            VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            bci.size = o.statBytes;
+            bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            if (g_createBuf(o.dev, &bci, nullptr, &o.statBuf) == VK_SUCCESS) {
+                VkMemoryRequirements smr{};
+                g_getBufReqs(o.dev, o.statBuf, &smr);
+                VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+                mai.allocationSize = smr.size;
+                mai.memoryTypeIndex = FindMemType(memProps, smr.memoryTypeBits,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                if (g_allocMem(o.dev, &mai, nullptr, &o.statMem) == VK_SUCCESS) {
+                    g_bindBufMem(o.dev, o.statBuf, o.statMem, 0);
+                    g_mapMem(o.dev, o.statMem, 0, o.statBytes, 0, &o.statPtr);
+                }
+            }
+        }
     }
 
     VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -1637,6 +1668,42 @@ void VkRenderer::EndFrame() {
         }
     }
     g_endRP(o.cmd);
+
+    // 取证 VK_BBSTAT=1（默认关）：present 前把后缓冲拷到主机缓冲，供亮度统计。
+    // 只在本层 target=0 且有几何时做；barrier 走 PRESENT_SRC -> TRANSFER_SRC -> PRESENT_SRC。
+    bool doStat = (o.statBuf != VK_NULL_HANDLE && o.statPtr && o.currentTarget == 0 && totalVerts > 0);
+    if (doStat) {
+        VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = o.swapImages[o.frameImageIndex];
+        b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        b.subresourceRange.levelCount = 1;
+        b.subresourceRange.layerCount = 1;
+        b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        g_cmdBarrier(o.cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent.width = (uint32_t)o.extent.width;
+        region.imageExtent.height = (uint32_t)o.extent.height;
+        region.imageExtent.depth = 1;
+        g_cmdCopyImgToBuf(o.cmd, o.swapImages[o.frameImageIndex], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                          o.statBuf, 1, &region);
+
+        VkImageMemoryBarrier b2 = b;
+        b2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        b2.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        b2.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        b2.dstAccessMask = 0;
+        g_cmdBarrier(o.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                     VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &b2);
+    }
     g_endCB(o.cmd);
 
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -1644,6 +1711,29 @@ void VkRenderer::EndFrame() {
     si.pCommandBuffers = &o.cmd;
     g_submit(o.queue, 1, &si, VK_NULL_HANDLE);
     g_waitIdle(o.queue);
+
+    if (doStat) {
+        const uint8_t* px = (const uint8_t*)o.statPtr;
+        double sum = 0;
+        size_t nb = 0, cnt = 0;
+        for (size_t yy = 0; yy < (size_t)o.extent.height; yy += 4) {
+            for (size_t xx = 0; xx < (size_t)o.extent.width; xx += 4) {
+                size_t idx = (yy * (size_t)o.extent.width + xx) * 4;
+                int v = ((int)px[idx] + (int)px[idx + 1] + (int)px[idx + 2]) / 3;
+                sum += v;
+                if (v > 24) nb++;
+                cnt++;
+            }
+        }
+        static uint64_t s_stat = 0;
+        s_stat++;
+        if (s_stat <= 20000) {
+            fprintf(stderr, "[vk] bbstat n=%llu f=%llu mean=%.2f nb=%.2f img=%u\n",
+                    (unsigned long long)s_stat, (unsigned long long)g_drawFrame,
+                    cnt ? sum / (double)cnt : 0.0, cnt ? 100.0 * (double)nb / (double)cnt : 0.0,
+                    o.frameImageIndex);
+        }
+    }
 
     if (o.currentTarget == 0) {
         // 取证：每次 present 一行（一个视觉帧通常 2 次，其中只有 ContextFlip 那次
