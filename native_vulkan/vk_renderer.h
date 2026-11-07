@@ -83,6 +83,8 @@ public:
 private:
     struct Impl;
     Impl* impl;
+    // 交换链过期（present/acquire 返回 OUT_OF_DATE/SUBOPTIMAL）后的重建
+    bool RecreateSwapchain();
     // 真正上传的实现；CreateTexture 负责大图降级后再转调它
     uint32_t CreateTextureOnce(int w, int h, const unsigned char* rgba);
 };
