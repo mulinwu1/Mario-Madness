@@ -1569,16 +1569,17 @@ void VkRenderer::EndFrame() {
     g_waitIdle(o.queue);
 
     if (o.currentTarget == 0) {
-        // 对照实验（默认关闭）：VK_SINGLE_COMP=1 时跳过每视觉帧第一次后缓冲上屏，
-        // 只让第二次（phase%9==6）真正 present。用于验证"中间态被上屏/被抓"假设。
+        // 对照实验（默认关闭）：VK_SINGLE_COMP=1 时，跳过"后缓冲只采样 1001（噪声层）"那次上屏，
+        // 只保留采样 1002（完整合成）那次。判据用实际采样到的纹理 id，不依赖周期相位。
         static int s_singleComp = -1;
         if (s_singleComp < 0) {
             const char* e = getenv("VK_SINGLE_COMP");
             s_singleComp = (e && e[0] == '1') ? 1 : 0;
         }
-        bool skipPresent = s_singleComp && (g_drawFrame % 9u) == 2u;
+        bool skipPresent = s_singleComp && g_bbLastTex == 1001;
         if (skipPresent) {
-            fprintf(stderr, "[vk] present-skip f=%llu phase=2\n", (unsigned long long)g_drawFrame);
+            fprintf(stderr, "[vk] present-skip f=%llu tex=%u\n",
+                    (unsigned long long)g_drawFrame, g_bbLastTex);
         } else {
             VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
             pi.swapchainCount = 1;
