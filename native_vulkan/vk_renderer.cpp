@@ -1343,8 +1343,8 @@ void VkRenderer::DrawSprite(uint32_t texId, float x, float y, float w, float h,
         if (ti >= o.targets.size() || !o.targets[ti].used) return;
         if (o.currentTarget == texId) {
             // 探针：目标是当前渲染目标时顶点被静默丢弃（缺口 B 的唯一证据点）
-            fprintf(stderr, "[vk] draw-selfdrop tex=%u cur=%u f=%llu n=%d\n",
-                    texId, o.currentTarget, (unsigned long long) g_drawFrame, vertexCount);
+            fprintf(stderr, "[vk] draw-selfdrop tex=%u cur=%u f=%llu n=6 sprite\n",
+                    texId, o.currentTarget, (unsigned long long) g_drawFrame);
             return;
         } // no self sampling
         vertsPtr = &o.targets[ti].verts;
