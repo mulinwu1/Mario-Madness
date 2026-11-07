@@ -1,0 +1,307 @@
+name: Build Game Exe (vkpkt, exe only)
+
+# 只编 exe：不调用 build-lime-vulkan、不等 ndll job。
+# native_vulkan/** 自 cb85f074 未改，ndll 已在上一轮产出，重复 rebuild 纯属浪费。
+# ndll 相关硬断言在本文件里全部跳过；只保留 exe 的三条硬断言。
+on:
+  workflow_dispatch:
+    inputs:
+      ndll_run_id:
+        description: "（可选）build-lime-vulkan 的 run id；留空则不打 artifact，直接用 haxelib lime 自带 ndll"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build-vkpkt:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      HAXE_VERSION: 4.2.5
+      LIME_VERSION: 8.0.2
+      HXCPP_VERSION: 4.3.2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # 前置硬门：分叉源码必须在仓库里（vendor/openfl）。缺了就直接失败，
+      # 否则编出来的是上游 openfl 9.2.0，exe 里永远不会有记录侧。
+      - name: Assert openfl fork is committed in repo
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $need = @(
+            'vendor\openfl\haxelib.json',
+            'vendor\openfl\src\openfl\display3D\_internal\VKPktNative.hx',
+            'vendor\openfl\src\openfl\display3D\_internal\VKDrawSink.hx',
+            'vendor\openfl\src\openfl\display3D\Context3D.hx'
+          )
+          foreach ($f in $need) {
+            if (-not (Test-Path $f)) { throw "openfl fork missing in repo: $f (commit vendor/openfl first)" }
+          }
+          $ctx = Get-Content 'vendor\openfl\src\openfl\display3D\Context3D.hx' -Raw
+          if ($ctx -notmatch 'VKPktNative') { throw 'vendor/openfl Context3D.hx has no VKPktNative wiring' }
+          Write-Host 'openfl fork present: OK'
+
+      # 可选：只有当外部给了 ndll_run_id 才去下 artifact；缺省完全跳过 ndll 断言
+      - name: Download Vulkan lime ndll (optional, given run)
+        if: ${{ inputs.ndll_run_id != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh run download ${{ inputs.ndll_run_id }} -n lime-vulkan-ndll -D lime-vulkan-artifact
+          if (-not (Test-Path 'lime-vulkan-artifact\lime.ndll')) { throw 'lime.ndll not found in downloaded artifact' }
+
+      - name: Install Haxe 4.2.5 and Neko
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path C:\haxe | Out-Null
+          New-Item -ItemType Directory -Force -Path C:\neko | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/HaxeFoundation/haxe/releases/download/4.2.5/haxe-4.2.5-win64.zip" -OutFile C:\haxe\haxe.zip -UseBasicParsing
+          Invoke-WebRequest -Uri "https://github.com/HaxeFoundation/neko/releases/download/v2-3-0/neko-2.3.0-win64.zip" -OutFile C:\neko\neko.zip -UseBasicParsing
+          Expand-Archive -Path C:\haxe\haxe.zip -DestinationPath C:\haxe -Force
+          Expand-Archive -Path C:\neko\neko.zip -DestinationPath C:\neko -Force
+          $haxeDir = (Get-ChildItem C:\haxe -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'haxe.exe') } | Select-Object -First 1).FullName
+          $nekoDir = (Get-ChildItem C:\neko -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'neko.exe') } | Select-Object -First 1).FullName
+          Add-Content -Path $env:GITHUB_ENV -Value "NEKOPATH=$nekoDir"
+          Add-Content -Path $env:GITHUB_ENV -Value "HAXE_STD_PATH=$haxeDir\std"
+          Add-Content -Path $env:GITHUB_PATH -Value $haxeDir
+          Add-Content -Path $env:GITHUB_PATH -Value $nekoDir
+          $env:PATH = "$haxeDir;$nekoDir;$env:PATH"
+          haxe -version
+          neko -version
+
+      - name: Install haxelibs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path "$env:USERPROFILE\haxelib\hxcpp\.current")) { haxelib install hxcpp $env:HXCPP_VERSION }
+          haxelib install lime $env:LIME_VERSION
+          haxelib install openfl 9.2.0
+          haxelib install flixel 5.3.1
+          haxelib install flixel-addons 3.1.1
+          haxelib install flixel-ui 2.5.0
+          haxelib install hxCodec 2.6.1
+          haxelib install hscript
+          haxelib install discord_rpc
+          haxelib install linc_luajit
+          haxelib install format
+          haxelib install hxp
+          haxelib list
+
+      # 用仓库内的分叉 openfl 覆盖 haxelib 里的上游 9.2.0（haxelib dev 不复制、只改解析路径）
+      - name: Point openfl at vendor/openfl
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $fork = (Resolve-Path 'vendor\openfl').Path
+          haxelib dev openfl $fork
+          $lines = @(haxelib path openfl)
+          Write-Host "haxelib path openfl -> $($lines -join '; ')"
+          if (-not ($lines[0] -match 'vendor\\openfl\\src')) {
+            throw "openfl does not resolve to vendor/openfl/src: $($lines[0])"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "OPENFL_VKPKT_FORK=$fork"
+
+      # 定义走 Project.xml（lime 会把它翻成 -D openfl_vk_pkt 写进生成的 hxml）；
+      # 幂等插入，重复跑不会叠加。
+      - name: Enable openfl_vk_pkt in Project.xml
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $px = Get-Content Project.xml -Raw
+          if ($px -match 'openfl_vk_pkt') {
+            Write-Host 'Project.xml already has openfl_vk_pkt'
+          } else {
+            $px = $px -replace '</project>', "`t<haxedef name=`"openfl_vk_pkt`" />`n</project>"
+            Set-Content -Path Project.xml -Value $px -NoNewline
+            Write-Host 'inserted <haxedef name="openfl_vk_pkt" />'
+          }
+          $check = Get-Content Project.xml -Raw
+          if ($check -notmatch '<haxedef name="openfl_vk_pkt"') { throw 'failed to enable openfl_vk_pkt in Project.xml' }
+
+      # 有 artifact 就覆盖 haxelib 里的 ndll；没有就原地用 haxelib lime 自带的那份，
+      # 并记录 VULKAN_LIME_NDLL 供打包步骤贴到 exe 旁边。
+      - name: Wire lime ndll into haxelib lime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $devFile = "$env:USERPROFILE\haxelib\.dev\lime"
+          if (Test-Path $devFile) { Write-Host 'removing stale lime dev entry'; Remove-Item $devFile -Force }
+          $limeRoot = "$env:USERPROFILE\haxelib\lime\$($env:LIME_VERSION -replace '\.',',')"
+          if (-not (Test-Path $limeRoot)) { throw "haxelib lime not found: $limeRoot" }
+          $targets = @(Get-ChildItem "$limeRoot\ndll" -Recurse -Filter 'lime.ndll' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+          if ($targets.Count -eq 0) { throw 'no lime.ndll under haxelib lime' }
+          $artifact = $null
+          if (Test-Path 'lime-vulkan-artifact\lime.ndll') { $artifact = (Resolve-Path 'lime-vulkan-artifact\lime.ndll').Path }
+          if ($artifact) {
+            foreach ($t in $targets) { Copy-Item $artifact $t -Force; Write-Host "patched: $t" }
+            Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_LIME_NDLL=$artifact"
+          } else {
+            Write-Host 'no ndll artifact: using haxelib lime ndll as-is (exe-only run)'
+            Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_LIME_NDLL=$($targets[0])"
+          }
+          $shim = (Resolve-Path 'lime-vulkan-artifact\lime_glslang.dll' -ErrorAction SilentlyContinue)
+          if ($shim) { Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_LIME_SHIM=$($shim.Path)" }
+          else { Write-Host 'WARN: lime_glslang.dll not in artifact; packaging will rely on the local shim' }
+
+      # discord_rpc 的 native 源码 haxelib 包里缺失，需要手工补齐（与既有构建一致）
+      - name: Patch discord_rpc native sources
+        shell: pwsh
+        run: |
+          $drRoot = "$env:USERPROFILE\haxelib\discord_rpc"
+          $verDir = Get-ChildItem $drRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\d' } | Select-Object -First 1
+          if (-not $verDir) { Write-Host 'discord_rpc dir missing, skip'; exit 0 }
+          $header = Join-Path $verDir.FullName "lib\discord-rpc\include\discord-rpc.h"
+          if (-not (Test-Path $header)) {
+            $tmp = "C:\discord-rpc-src"
+            git clone --depth 1 --branch v2.1.0 --recursive --shallow-submodules https://github.com/discord/discord-rpc.git $tmp
+            New-Item -ItemType Directory -Force -Path (Join-Path $verDir.FullName "lib\discord-rpc") | Out-Null
+            Copy-Item "$tmp\include" (Join-Path $verDir.FullName "lib\discord-rpc\include") -Recurse -Force
+            Copy-Item "$tmp\src" (Join-Path $verDir.FullName "lib\discord-rpc\src") -Recurse -Force
+          }
+          $inc = Join-Path $verDir.FullName "lib\discord-rpc\include"
+          if (Test-Path "$inc\discord_rpc.h") { Copy-Item "$inc\discord_rpc.h" "$inc\discord-rpc.h" -Force }
+          $rj = "C:\rapidjson-src"
+          git clone --depth 1 https://github.com/Tencent/rapidjson.git $rj
+          New-Item -ItemType Directory -Force -Path (Join-Path $verDir.FullName "lib\discord-rpc\src\rapidjson") | Out-Null
+          Copy-Item "$rj\include\rapidjson\*" (Join-Path $verDir.FullName "lib\discord-rpc\src\rapidjson") -Recurse -Force
+          New-Item -ItemType Directory -Force -Path (Join-Path $inc "rapidjson") | Out-Null
+          Copy-Item "$rj\include\rapidjson\*" (Join-Path $inc "rapidjson") -Recurse -Force
+
+      # 冷构建：不使用任何 hxcpp/obj 缓存（单变量原则），保证产物一定是本轮新编的
+      - name: Build game with openfl_vk_pkt
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $buildStart = (Get-Date).ToUniversalTime()
+          Add-Content -Path $env:GITHUB_ENV -Value "VKPKT_BUILD_START=$($buildStart.ToString('o'))"
+          $outDir = "export\release\windows"
+          Get-ChildItem 'assets' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            Get-ChildItem $_.FullName -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          $hx = (Get-Command haxelib).Source
+          Remove-Item build.log, build.err, empty.stdin -ErrorAction SilentlyContinue
+          New-Item -ItemType File -Path empty.stdin | Out-Null
+          Write-Host "openfl fork: $env:OPENFL_VKPKT_FORK"
+          haxelib list
+          $p = Start-Process -FilePath $hx -ArgumentList "run","lime","build","windows" `
+               -NoNewWindow -RedirectStandardOutput build.log -RedirectStandardError build.err `
+               -RedirectStandardInput empty.stdin -PassThru
+          $deadline = (Get-Date).AddMinutes(75)
+          while (-not $p.HasExited) {
+            if ((Get-Date) -gt $deadline) { Write-Host "=== TIMEOUT, killing $($p.Id) ==="; Stop-Process -Id $p.Id -Force; break }
+            Get-Content build.log -Tail 4 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  out| $_" }
+            Start-Sleep 20
+          }
+          $code = $p.ExitCode
+          Write-Host "lime build exit code: $code"
+          if ($code -ne 0) {
+            Write-Host '=== build.log (tail 60) ==='
+            Get-Content build.log -Tail 60 -ErrorAction SilentlyContinue
+            Write-Host '=== build.err (tail 30) ==='
+            Get-Content build.err -Tail 30 -ErrorAction SilentlyContinue
+            throw "lime build failed, exit code $code"
+          }
+          Get-ChildItem $outDir -Recurse -Filter 'Mario.exe' -File -ErrorAction SilentlyContinue |
+            Select-Object FullName, Length, LastWriteTime | Format-Table -AutoSize
+          # lime 把 ndll 放在 applicationDirectory（export\release\windows\bin），直接贴着 exe 放
+          $builtExe = Get-ChildItem $outDir -Recurse -Filter 'Mario.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $builtExe) { throw "no Mario.exe produced under $outDir" }
+          Copy-Item $env:VULKAN_LIME_NDLL (Join-Path $builtExe.Directory.FullName 'lime.ndll') -Force
+          if ($env:VULKAN_LIME_SHIM) { Copy-Item $env:VULKAN_LIME_SHIM (Join-Path $builtExe.Directory.FullName 'lime_glslang.dll') -Force }
+
+      # 关键断言 1：生成的 hxml 里必须同时出现分叉 classpath 与 openfl_vk_pkt
+      - name: Assert generated hxml wired to fork + define
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $hxmls = @(Get-ChildItem 'export' -Recurse -Filter '*.hxml' -File -ErrorAction SilentlyContinue)
+          if ($hxmls.Count -eq 0) { throw 'no generated .hxml under export; cannot verify define wiring' }
+          $hit = @()
+          foreach ($h in $hxmls) {
+            $t = Get-Content $h.FullName -Raw
+            if ($t -match 'openfl_vk_pkt' -and $t -match 'vendor[/\\]openfl') { $hit += $h.FullName }
+          }
+          if ($hit.Count -eq 0) {
+            $sample = Get-Content $hxmls[0].FullName -Raw
+            Write-Host "=== first hxml ($($hxmls[0].FullName)) ==="
+            Write-Host $sample
+            throw 'generated hxml has no (vendor/openfl classpath + openfl_vk_pkt) combination'
+          }
+          Write-Host "wiring OK: $($hit -join '; ')"
+
+      # 关键断言 2：exe 里必须搜到记录侧符号，且 exe 是本轮新编的（不是缓存旧物）
+      - name: Assert exe contains packet recorder and is freshly built
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-ChildItem 'export\release\windows' -Recurse -Filter 'Mario.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw 'Mario.exe not found under export\release\windows' }
+          $txt = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe.FullName))
+          foreach ($sym in @('lime_vk_pkt_emit','VKDrawSink','VKPktNative','[vkpkt]')) {
+            if (-not $txt.Contains($sym)) { throw "exe missing packet recorder symbol: $sym" }
+          }
+          if (-not $txt.Contains('lime_gl_draw_arrays')) { throw 'exe missing control symbol lime_gl_draw_arrays (scan invalid)' }
+          $start = [datetime]::Parse($env:VKPKT_BUILD_START).ToUniversalTime()
+          if ($exe.LastWriteTime.ToUniversalTime() -lt $start) {
+            throw "Mario.exe is stale (not rebuilt this run): mtime=$($exe.LastWriteTime.ToUniversalTime().ToString('o')) start=$($start.ToString('o'))"
+          }
+          Write-Host "exe OK: $($exe.FullName) size=$($exe.Length) mtime=$($exe.LastWriteTime.ToUniversalTime().ToString('o'))"
+          Add-Content -Path $env:GITHUB_ENV -Value "VKPKT_EXE=$($exe.FullName)"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-log-vkpkt-exe-only
+          path: |
+            build.log
+            build.err
+          if-no-files-found: warn
+          retention-days: 7
+
+      # 独立产物名与目录：不覆盖既有 mario-vulkan-win64 包，也不碰本地 angle_full\bin\Mario.exe
+      - name: Assemble package (vk pkt)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Remove-Item pkg-vkpkt -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path pkg-vkpkt | Out-Null
+          $exe = Get-Item $env:VKPKT_EXE
+          $ndll = Join-Path $exe.Directory.FullName 'lime.ndll'
+          if (-not (Test-Path $ndll)) { throw 'lime.ndll not found next to exe' }
+          Copy-Item $exe.FullName pkg-vkpkt
+          Copy-Item $ndll pkg-vkpkt
+          Get-ChildItem $exe.Directory -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in '.dll', '.ico' } | ForEach-Object { Copy-Item $_.FullName pkg-vkpkt -Force }
+          $lines = @(
+            'Mario Madness - vkpkt exe (openfl_vk_pkt recorder; exe-only run)',
+            '',
+            '[run]',
+            '  set VK_PKT=1',
+            '  set VK_PKT_EXEC=1',
+            '  set VK_PKT_FRAMES=all',
+            '  Mario.exe',
+            '',
+            '[deploy]',
+            '  extract into vk_test_vkpkt\ (separate dir). Never overwrite angle_full\bin\Mario.exe.'
+          )
+          Set-Content -Path pkg-vkpkt\RUNNING.txt -Value $lines -Encoding UTF8
+          Get-ChildItem pkg-vkpkt | Select-Object Name, Length | Format-Table -AutoSize
+
+      - name: Upload vkpkt package
+        uses: actions/upload-artifact@v7
+        with:
+          name: mario-vulkan-win64-vkpkt-exe-only
+          path: pkg-vkpkt/*
+          if-no-files-found: error
+          retention-days: 7
