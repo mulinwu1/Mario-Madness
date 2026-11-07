@@ -91,6 +91,11 @@ struct VkRenderer::Impl {
     VkDeviceMemory vbMem = VK_NULL_HANDLE;
     float* vbPtr = nullptr;
     size_t vbBytes = 0;
+    // 常量顶点属性：loc5(alpha 乘数)/loc6(colorMultiplier)/loc7(colorOffset)。
+    // 用 stride=0 的绑定给所有顶点同一组值；loc1 里已经携带逐顶点 alpha。
+    VkBuffer attrBuf = VK_NULL_HANDLE;
+    VkDeviceMemory attrMem = VK_NULL_HANDLE;
+    float* attrPtr = nullptr;
 
     VkBuffer ubo = VK_NULL_HANDLE;
     VkDeviceMemory uboMem = VK_NULL_HANDLE;
@@ -667,11 +672,16 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
 
     // 顶点布局按内嵌着色器实际 loc：0=Position(vec4) 1=Alpha(float)
     // 2=ColorMultiplier(vec4) 3=ColorOffset(vec4) 4=TextureCoord(vec2)，共 15 floats
-    VkVertexInputBindingDescription vbind{};
-    vbind.binding = 0;
-    vbind.stride = sizeof(float) * 15;
-    vbind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    VkVertexInputAttributeDescription vattr[5]{};
+    VkVertexInputBindingDescription vbind[2]{};
+    vbind[0].binding = 0;
+    vbind[0].stride = sizeof(float) * 15;
+    vbind[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    // binding1 = stride 0 的常量绑定，供 loc5/6/7 使用（否则未绑定属性读到 0，
+    // 顶点着色器 openfl_Alphav = openfl_Alpha * alpha 会把 alpha 抹成 0）
+    vbind[1].binding = 1;
+    vbind[1].stride = 0;
+    vbind[1].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    VkVertexInputAttributeDescription vattr[8]{};
     vattr[0].location = 0;
     vattr[0].binding = 0;
     vattr[0].format = VK_FORMAT_R32G32B32A32_SFLOAT;
@@ -692,10 +702,23 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     vattr[4].binding = 0;
     vattr[4].format = VK_FORMAT_R32G32_SFLOAT;
     vattr[4].offset = sizeof(float) * 13;
+    // loc5=alpha -> 1.0；loc6=colorMultiplier -> (1,1,1,1)；loc7=colorOffset -> 0
+    vattr[5].location = 5;
+    vattr[5].binding = 1;
+    vattr[5].format = VK_FORMAT_R32_SFLOAT;
+    vattr[5].offset = 0;
+    vattr[6].location = 6;
+    vattr[6].binding = 1;
+    vattr[6].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    vattr[6].offset = sizeof(float) * 1;
+    vattr[7].location = 7;
+    vattr[7].binding = 1;
+    vattr[7].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    vattr[7].offset = sizeof(float) * 5;
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    vi.vertexBindingDescriptionCount = 1;
-    vi.pVertexBindingDescriptions = &vbind;
-    vi.vertexAttributeDescriptionCount = 5;
+    vi.vertexBindingDescriptionCount = 2;
+    vi.pVertexBindingDescriptions = vbind;
+    vi.vertexAttributeDescriptionCount = 8;
     vi.pVertexAttributeDescriptions = vattr;
 
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
@@ -766,6 +789,25 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     void* vp2 = nullptr;
     g_mapMem(o.dev, o.vbMem, 0, vmr.size, 0, &vp2);
     o.vbPtr = (float*)vp2;
+
+    // 常量顶点属性缓冲（binding1, stride=0）：loc5=1.0 / loc6=(1,1,1,1) / loc7=0
+    static const float kConstAttrs[9] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    VkBufferCreateInfo abci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    abci.size = sizeof(kConstAttrs);
+    abci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    g_createBuf(o.dev, &abci, nullptr, &o.attrBuf);
+    VkMemoryRequirements amr{};
+    g_getBufReqs(o.dev, o.attrBuf, &amr);
+    VkMemoryAllocateInfo amai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    amai.allocationSize = amr.size;
+    amai.memoryTypeIndex = FindMemType(memProps, amr.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    g_allocMem(o.dev, &amai, nullptr, &o.attrMem);
+    g_bindBufMem(o.dev, o.attrBuf, o.attrMem, 0);
+    void* ap2 = nullptr;
+    g_mapMem(o.dev, o.attrMem, 0, amr.size, 0, &ap2);
+    o.attrPtr = (float*)ap2;
+    if (o.attrPtr) memcpy(o.attrPtr, kConstAttrs, sizeof(kConstAttrs));
 
     o.textures.resize(MAX_TEXTURES);
     fprintf(stderr, "[vk] init ok swapchain=%ux%u images=%zu format=%d\n",
@@ -1890,13 +1932,18 @@ void VkRenderer::EndFrame() {
         o.uboPtr[12] = -1.0f;
         o.uboPtr[13] = -1.0f;
         o.uboPtr[15] = 1.0f;
+        // hasTransform 在 std140 里是 byte 84（float index 21）。置 1 才会走
+        // flixel_texture2D 的 color * openfl_Alphav 分支；否则 alpha 被整个忽略，
+        // 3× 黑色全屏源以 alpha=1 盖住所有层（黑帧）。hasColorTransform 保持 0。
+        o.uboPtr[21] = 1.0f;
     }
 
     g_beginRP(o.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
     if (totalVerts > 0) {
         g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeline);
-        VkDeviceSize off = 0;
-        g_bindVB(o.cmd, 0, 1, &o.vb, &off);
+        VkBuffer vbufs[2] = {o.vb, o.attrBuf};
+        VkDeviceSize voffs[2] = {0, 0};
+        g_bindVB(o.cmd, 0, 2, vbufs, voffs);
         for (auto& r : ranges) {
             g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeLayout, 0, 1, &r.set, 0, nullptr);
             g_cmdDraw(o.cmd, (uint32_t)r.count, 1, (uint32_t)r.first, 0);
