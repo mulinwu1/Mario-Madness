@@ -1,13 +1,50 @@
 ﻿#include "vk_renderer.h"
 #include "vk_shaders_spv.h"
-#define VK_USE_PLATFORM_WIN32_KHR
+#include "vk_platform.h"
 #define VK_NO_PROTOTYPES
+#include "gl_shader.h"
+#include "gl_state.h"
 #include <vulkan/vulkan.h>
+#include <algorithm>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
+#include <ctime>
+
+// gl_fbo 侧的当前目标（只读探针用，定义在 lime 命名空间的 gl_fbo.cpp:706）
+namespace lime { uint32_t gl_vk_current_target (); }
+
+// 接线探针（本轮只接不选）：gl_shader 自己建的管线。它不参与任何 draw，
+// 只在 render pass 开头绑一次、紧接着换回固定管线（两次绑定之间没有 draw）。
+static VkPipeline g_probePipeline = VK_NULL_HANDLE;
+static int g_probeProgram = 0;
+
+// 取证探针（只记状态，不改行为）：后缓冲帧是否已 open 但还没 close。
+// 用来把"合成 quad 落进一个不会 EndFrame 的帧"与"BindRenderTarget(0) 失败"分开。
+static int g_bbOpen = 0;
+// 按 program 累计的绘制/整屏/顶点数（只计数，不受逐条日志上限影响）
+static uint64_t g_progDraw[256];
+static uint64_t g_progWhole[256];
+static uint64_t g_progVerts[256];
+static uint64_t g_progDrawTotal = 0;
 
 #define MAX_SPRITES 4096
 #define MAX_TEXTURES 512
+
+// 交换链 extent：安卓常见 ROTATE_90/270，此时 imageExtent 是旋转前的尺寸，
+// 宽高必须和窗口尺寸交换，否则整幅被拉伸。桌面 currentTransform 恒为 IDENTITY，行为不变。
+static VkExtent2D PickSwapchainExtent (const VkSurfaceCapabilitiesKHR& caps, int fbWidth, int fbHeight) {
+    VkExtent2D e = caps.currentExtent;
+    if (e.width == 0xFFFFFFFFu) {
+        e.width = (uint32_t)fbWidth;
+        e.height = (uint32_t)fbHeight;
+    }
+    if (caps.currentTransform & (VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR |
+                                 VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR)) {
+        std::swap (e.width, e.height);
+    }
+    return e;
+}
 
 struct TexSlot {
     VkImage image = VK_NULL_HANDLE;
@@ -31,12 +68,23 @@ struct RenderTarget {
     int w = 0, h = 0;
     bool used = false;
     std::vector<float> verts;
+    // 取证用：创建帧号 / 最后一次"真的有顶点"的提交帧号（0 = 从未写过）
+    uint64_t createdFrame = 0;
+    uint64_t lastWriteFrame = 0;
 };
 
+// 取证用：当前挂着但未提交的顶点总数（顶点 = 15 floats）
+static size_t PendingVertsOf (const std::vector<TexSlot>& tex, const std::vector<RenderTarget>& tgt) {
+    size_t n = 0;
+    for (auto& t : tex) n += t.verts.size() / 15;
+    for (auto& t : tgt) n += t.verts.size() / 15;
+    return n;
+}
+
 struct VkRenderer::Impl {
-    HWND hwnd = nullptr;
+    void* nativeWindow = nullptr;
     int width = 0, height = 0;
-    HMODULE dll = nullptr;
+    void* vkLib = nullptr;
 
     PFN_vkGetInstanceProcAddr gipa = nullptr;
     PFN_vkDestroyInstance destroyInstance = nullptr;
@@ -67,6 +115,7 @@ struct VkRenderer::Impl {
     std::vector<VkImage> swapImages;
     std::vector<VkImageView> swapViews;
     VkFormat colorFormat = VK_FORMAT_UNDEFINED;
+    VkColorSpaceKHR colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     VkExtent2D extent{};
 
     VkRenderPass renderPass = VK_NULL_HANDLE;
@@ -86,14 +135,42 @@ struct VkRenderer::Impl {
     VkDeviceMemory vbMem = VK_NULL_HANDLE;
     float* vbPtr = nullptr;
     size_t vbBytes = 0;
+    // 常量顶点属性：loc5(alpha 乘数)/loc6(colorMultiplier)/loc7(colorOffset)。
+    // 用 stride=0 的绑定给所有顶点同一组值；loc1 里已经携带逐顶点 alpha。
+    VkBuffer attrBuf = VK_NULL_HANDLE;
+    VkDeviceMemory attrMem = VK_NULL_HANDLE;
+    float* attrPtr = nullptr;
 
     VkBuffer ubo = VK_NULL_HANDLE;
     VkDeviceMemory uboMem = VK_NULL_HANDLE;
     float* uboPtr = nullptr;
 
     std::vector<TexSlot> textures;
+    // 实验 VK_SINGLE_PRESENT=1（默认关）：一视觉帧只 acquire/present 一次；
+    // 中途绑定后缓冲只提交几何（LOAD pass 叠加），不 flip。
+    VkRenderPass renderPassLoad = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> framebuffersLoad;
+    // 单次 present 的中间合成必须保持内容：交换链图在两次合成之间停留在
+    // COLOR_ATTACHMENT_OPTIMAL（不能用 PRESENT_SRC 作 initialLayout，实测会丢内容）。
+    VkRenderPass renderPassLoadKeep = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> framebuffersLoadKeep;
+    VkRenderPass renderPassKeep = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> framebuffersKeep;
+    bool bbHeld = false;
+    bool bbLoad = false;
+    bool presentReq = false;
+    // 交换链脏标记：present/acquire 返回 OUT_OF_DATE 或 SUBOPTIMAL 后置位，
+    // 下一次开后缓冲帧前无条件重建（原来全仓库没有重建分支 → 后缓冲永久开不起来）
+    bool swapDirty = false;
+    // 取证：present 前把交换链图拷到主机可见缓冲，算亮度统计（VK_BBSTAT=1，默认关）
+    VkBuffer statBuf = VK_NULL_HANDLE;
+    VkDeviceMemory statMem = VK_NULL_HANDLE;
+    void* statPtr = nullptr;
+    size_t statBytes = 0;
     std::vector<RenderTarget> targets;
     uint32_t currentTarget = 0;
+    // 最后一次真正收到顶点并提交的离屏目标（present 选源用）
+    uint32_t lastGeomTarget = 0;
     uint32_t frameImageIndex = 0;
     bool frameOpen = false;
     float clearR = 0, clearG = 0, clearB = 0, clearA = 1;
@@ -118,7 +195,10 @@ static PFN_vkAllocateDescriptorSets g_allocDS;
 static PFN_vkUpdateDescriptorSets g_updateDS;
 static PFN_vkCmdPipelineBarrier g_cmdBarrier;
 static PFN_vkCmdCopyBufferToImage g_cmdCopyImg;
+static PFN_vkCmdCopyImageToBuffer g_cmdCopyImgToBuf;
 static PFN_vkCmdBindPipeline g_bindPipe;
+static PFN_vkCmdSetViewport g_setViewport;
+static PFN_vkCmdSetScissor g_setScissor;
 static PFN_vkCmdBindDescriptorSets g_bindDS;
 static PFN_vkCmdBindVertexBuffers g_bindVB;
 static PFN_vkCmdDraw g_cmdDraw;
@@ -137,6 +217,11 @@ static PFN_vkCreateGraphicsPipelines g_createPipe;
 
 static PFN_vkGetInstanceProcAddr g_gipa = nullptr;
 
+// 提交计数：DrawRaw 的取证日志按它分组，判断“同一帧内”的绘制
+static uint64_t g_drawFrame = 0;
+// 上一帧后缓冲最后一次采样到的纹理 id，用于区分两次后缓冲合成各自画的是哪一层
+static uint32_t g_bbLastTex = 0;
+
 static uint32_t FindMemType(const VkPhysicalDeviceMemoryProperties& mp, uint32_t bits, VkMemoryPropertyFlags flags) {
     for (uint32_t i = 0; i < 32; i++) {
         if ((bits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & flags) == flags) return i;
@@ -146,16 +231,29 @@ static uint32_t FindMemType(const VkPhysicalDeviceMemoryProperties& mp, uint32_t
 
 // 内嵌着色器的顶点格式：loc0=Position(vec4) loc1=Alpha loc2=ColorMultiplier(vec4)
 // loc3=ColorOffset(vec4) loc4=TexCoord(vec2)，共 15 个 float
-static void PushLimeVertex(std::vector<float>& out, float x, float y, float u, float v) {
+// 每个绘制可带一组“常量顶点属性”（GL 的 glVertexAttrib1f/4f），对应 openfl 的
+// per-draw alpha / colorMultiplier / colorOffset；默认 (alpha=1, mult=1, off=0)。
+static float g_drawAlpha = 1.0f;
+static float g_drawMult[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+static float g_drawOff[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+static void PushLimeVertex(std::vector<float>& out, float x, float y, float u, float v,
+                           float alpha, const float* mult, const float* off) {
     out.push_back(x);
     out.push_back(y);
     out.push_back(0.0f);
     out.push_back(1.0f);
-    out.push_back(1.0f);                                   // alpha
-    out.push_back(1.0f); out.push_back(1.0f); out.push_back(1.0f); out.push_back(1.0f); // colorMultiplier
-    out.push_back(0.0f); out.push_back(0.0f); out.push_back(0.0f); out.push_back(0.0f); // colorOffset
+    out.push_back(alpha);                                  // alpha
+    out.push_back(mult[0]); out.push_back(mult[1]);
+    out.push_back(mult[2]); out.push_back(mult[3]);        // colorMultiplier
+    out.push_back(off[0]); out.push_back(off[1]);
+    out.push_back(off[2]); out.push_back(off[3]);          // colorOffset
     out.push_back(u);
     out.push_back(v);
+}
+
+static void PushLimeVertex(std::vector<float>& out, float x, float y, float u, float v) {
+    PushLimeVertex(out, x, y, u, v, g_drawAlpha, g_drawMult, g_drawOff);
 }
 
 static std::vector<char> ReadFileLocal(const std::string& path) {
@@ -178,6 +276,43 @@ static std::string ExeDirLocal() {
     return pos == std::string::npos ? std::string("") : s.substr(0, pos + 1);
 }
 
+// 取证：把交换链图（B8G8R8A8）写成 24 位 BMP，用于和窗口截图逐像素比对
+static bool WriteBmpBGRA(const char* path, const uint8_t* px, int w, int h) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return false;
+    int row = w * 3;
+    int pad = (4 - (row % 4)) % 4;
+    size_t imgBytes = (size_t)(row + pad) * (size_t)h;
+    uint8_t hdr[54] = {0};
+    hdr[0] = 'B'; hdr[1] = 'M';
+    uint32_t total = (uint32_t)(54 + imgBytes);
+    memcpy(hdr + 2, &total, 4);
+    uint32_t off = 54;
+    memcpy(hdr + 10, &off, 4);
+    uint32_t hsz = 40;
+    memcpy(hdr + 14, &hsz, 4);
+    int32_t ww = w, hh = h;
+    memcpy(hdr + 18, &ww, 4);
+    memcpy(hdr + 22, &hh, 4);
+    uint16_t planes = 1, bpp = 24;
+    memcpy(hdr + 26, &planes, 2);
+    memcpy(hdr + 28, &bpp, 2);
+    uint32_t img = (uint32_t)imgBytes;
+    memcpy(hdr + 34, &img, 4);
+    fwrite(hdr, 1, 54, f);
+    uint8_t padbuf[3] = {0, 0, 0};
+    for (int y = h - 1; y >= 0; y--) {
+        const uint8_t* s = px + (size_t)y * (size_t)w * 4;
+        for (int x = 0; x < w; x++) {
+            uint8_t bgr[3] = {s[x * 4 + 0], s[x * 4 + 1], s[x * 4 + 2]};
+            fwrite(bgr, 1, 3, f);
+        }
+        if (pad) fwrite(padbuf, 1, (size_t)pad, f);
+    }
+    fclose(f);
+    return true;
+}
+
 VkRenderer::VkRenderer() : impl(new Impl()) {}
 
 VkRenderer::~VkRenderer() {
@@ -187,27 +322,38 @@ VkRenderer::~VkRenderer() {
 
 const char* VkRenderer::LastError() const { return impl->lastError; }
 
-bool VkRenderer::Init(HWND hwnd, int width, int height) {
+bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     Impl& o = *impl;
-    o.hwnd = hwnd;
+    o.nativeWindow = nativeWindow;
     o.width = width;
     o.height = height;
 
-    o.dll = LoadLibraryA("vulkan-1.dll");
-    if (!o.dll) { o.lastError = "vulkan-1.dll missing"; return false; }
-    o.gipa = (PFN_vkGetInstanceProcAddr)GetProcAddress(o.dll, "vkGetInstanceProcAddr");
-    auto createInstance = (PFN_vkCreateInstance)GetProcAddress(o.dll, "vkCreateInstance");
-    if (!o.gipa || !createInstance) { o.lastError = "vulkan entrypoints missing"; return false; }
+    char err[160] = {0};
+    o.vkLib = vkplat::LoadVulkan(err, (int)sizeof(err));
+    if (!o.vkLib) {
+        fprintf(stderr, "[vkerr] vk_load %s\n", err);
+        o.lastError = "vulkan loader missing";
+        return false;
+    }
+    o.gipa = (PFN_vkGetInstanceProcAddr)vkplat::Proc(o.vkLib, "vkGetInstanceProcAddr");
+    auto createInstance = (PFN_vkCreateInstance)vkplat::Proc(o.vkLib, "vkCreateInstance");
+    if (!o.gipa || !createInstance) {
+        fprintf(stderr, "[vkerr] vk_entrypoints gipa=%d createInstance=%d\n",
+                o.gipa != nullptr, createInstance != nullptr);
+        o.lastError = "vulkan entrypoints missing";
+        return false;
+    }
     g_gipa = o.gipa;
 
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.pApplicationName = "Lime Vulkan";
     app.apiVersion = VK_API_VERSION_1_0;
 
-    const char* exts[] = {"VK_KHR_surface", "VK_KHR_win32_surface"};
+    uint32_t extCount = 0;
+    const char* const* exts = vkplat::InstanceExtensions(&extCount);
     VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     ici.pApplicationInfo = &app;
-    ici.enabledExtensionCount = 2;
+    ici.enabledExtensionCount = extCount;
     ici.ppEnabledExtensionNames = exts;
 
     if (createInstance(&ici, nullptr, &o.inst) != VK_SUCCESS) { o.lastError = "instance failed"; return false; }
@@ -217,7 +363,6 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     auto getMemProps = (PFN_vkGetPhysicalDeviceMemoryProperties)o.gipa(o.inst, "vkGetPhysicalDeviceMemoryProperties");
     auto getQFP = (PFN_vkGetPhysicalDeviceQueueFamilyProperties)o.gipa(o.inst, "vkGetPhysicalDeviceQueueFamilyProperties");
     auto getSurfSupport = (PFN_vkGetPhysicalDeviceSurfaceSupportKHR)o.gipa(o.inst, "vkGetPhysicalDeviceSurfaceSupportKHR");
-    auto createSurface = (PFN_vkCreateWin32SurfaceKHR)o.gipa(o.inst, "vkCreateWin32SurfaceKHR");
     auto getSurfCaps = (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)o.gipa(o.inst, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
     auto getSurfFormats = (PFN_vkGetPhysicalDeviceSurfaceFormatsKHR)o.gipa(o.inst, "vkGetPhysicalDeviceSurfaceFormatsKHR");
     auto createDevice = (PFN_vkCreateDevice)o.gipa(o.inst, "vkCreateDevice");
@@ -262,7 +407,10 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     g_updateDS = (PFN_vkUpdateDescriptorSets)o.gipa(o.inst, "vkUpdateDescriptorSets");
     g_cmdBarrier = (PFN_vkCmdPipelineBarrier)o.gipa(o.inst, "vkCmdPipelineBarrier");
     g_cmdCopyImg = (PFN_vkCmdCopyBufferToImage)o.gipa(o.inst, "vkCmdCopyBufferToImage");
+    g_cmdCopyImgToBuf = (PFN_vkCmdCopyImageToBuffer)o.gipa(o.inst, "vkCmdCopyImageToBuffer");
     g_bindPipe = (PFN_vkCmdBindPipeline)o.gipa(o.inst, "vkCmdBindPipeline");
+    g_setViewport = (PFN_vkCmdSetViewport)o.gipa(o.inst, "vkCmdSetViewport");
+    g_setScissor = (PFN_vkCmdSetScissor)o.gipa(o.inst, "vkCmdSetScissor");
     g_bindDS = (PFN_vkCmdBindDescriptorSets)o.gipa(o.inst, "vkCmdBindDescriptorSets");
     g_bindVB = (PFN_vkCmdBindVertexBuffers)o.gipa(o.inst, "vkCmdBindVertexBuffers");
     g_cmdDraw = (PFN_vkCmdDraw)o.gipa(o.inst, "vkCmdDraw");
@@ -279,7 +427,7 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     g_createPL = (PFN_vkCreatePipelineLayout)o.gipa(o.inst, "vkCreatePipelineLayout");
     g_createPipe = (PFN_vkCreateGraphicsPipelines)o.gipa(o.inst, "vkCreateGraphicsPipelines");
 
-    if (!enumDev || !getProps || !getMemProps || !getQFP || !getSurfSupport || !createSurface ||
+    if (!enumDev || !getProps || !getMemProps || !getQFP || !getSurfSupport ||
         !createDevice || !createSwap || !getImages || !createRP || !createFB || !createPool || !allocCB) {
         o.lastError = "missing vulkan functions";
         return false;
@@ -306,10 +454,13 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
                 VK_VERSION_MAJOR(sp.apiVersion), VK_VERSION_MINOR(sp.apiVersion), VK_VERSION_PATCH(sp.apiVersion));
     }
 
-    VkWin32SurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
-    sci.hinstance = GetModuleHandle(nullptr);
-    sci.hwnd = hwnd;
-    if (createSurface(o.inst, &sci, nullptr, &o.surf) != VK_SUCCESS) { o.lastError = "surface failed"; return false; }
+    uint64_t surf = 0;
+    if (!vkplat::CreateSurface((uint64_t)o.inst, (void*)o.gipa, nativeWindow, &surf, err, (int)sizeof(err))) {
+        fprintf(stderr, "[vkerr] surface %s\n", err);
+        o.lastError = "surface failed";
+        return false;
+    }
+    o.surf = (VkSurfaceKHR)surf;
 
     uint32_t qn = 0;
     getQFP(o.phys, &qn, nullptr);
@@ -349,9 +500,11 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     VkSurfaceFormatKHR fmt = fmts[0];
     for (auto& f : fmts) if (f.format == VK_FORMAT_B8G8R8A8_UNORM) { fmt = f; break; }
     o.colorFormat = fmt.format;
+    o.colorSpace = fmt.colorSpace;
 
-    o.extent = caps.currentExtent;
-    if (o.extent.width == 0xFFFFFFFF) { o.extent.width = (uint32_t)width; o.extent.height = (uint32_t)height; }
+    o.extent = PickSwapchainExtent (caps, width, height);
+    fprintf(stderr, "[vk] swapchain extent=%ux%u preTransform=0x%x\n",
+            o.extent.width, o.extent.height, (unsigned)caps.currentTransform);
 
     VkSwapchainCreateInfoKHR swci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
     swci.surface = o.surf;
@@ -360,7 +513,7 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     swci.imageColorSpace = fmt.colorSpace;
     swci.imageExtent = o.extent;
     swci.imageArrayLayers = 1;
-    swci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    swci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     swci.preTransform = caps.currentTransform;
     swci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     swci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
@@ -414,6 +567,84 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
         fci.height = o.extent.height;
         fci.layers = 1;
         createFB(o.dev, &fci, nullptr, &o.framebuffers[i]);
+    }
+
+    // 实验 VK_SINGLE_PRESENT=1（默认关）：同一张交换链图在一个视觉帧内多次合成，
+    // 第二次起用 LOAD pass 叠加上一层内容，最后只在真实 swap 时 present 一次。
+    // 关键：中间合成结束在 COLOR_ATTACHMENT_OPTIMAL（不以 PRESENT_SRC 作 initialLayout）。
+    {
+        const char* v = getenv("VK_SINGLE_PRESENT");
+        if (v && v[0] == '1') {
+            auto mkRP = [&](VkAttachmentLoadOp lop, VkImageLayout init, VkImageLayout fin, VkRenderPass* out) {
+                VkAttachmentDescription a2 = att;
+                a2.loadOp = lop;
+                a2.initialLayout = init;
+                a2.finalLayout = fin;
+                VkRenderPassCreateInfo rpci2{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+                rpci2.attachmentCount = 1;
+                rpci2.pAttachments = &a2;
+                rpci2.subpassCount = 1;
+                rpci2.pSubpasses = &sub;
+                *out = VK_NULL_HANDLE;
+                createRP(o.dev, &rpci2, nullptr, out);
+            };
+            auto mkFB = [&](VkRenderPass rp, std::vector<VkFramebuffer>& fbs) {
+                if (rp == VK_NULL_HANDLE) return;
+                fbs.assign(ic, VK_NULL_HANDLE);
+                for (uint32_t i = 0; i < ic; i++) {
+                    VkFramebufferCreateInfo fci2{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+                    fci2.renderPass = rp;
+                    fci2.attachmentCount = 1;
+                    fci2.pAttachments = &o.swapViews[i];
+                    fci2.width = o.extent.width;
+                    fci2.height = o.extent.height;
+                    fci2.layers = 1;
+                    createFB(o.dev, &fci2, nullptr, &fbs[i]);
+                }
+            };
+            // LOAD 叠加 + 最终 present（CA -> PRESENT）
+            mkRP(VK_ATTACHMENT_LOAD_OP_LOAD, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, &o.renderPassLoad);
+            // LOAD 叠加 + 继续持有（CA -> CA）
+            mkRP(VK_ATTACHMENT_LOAD_OP_LOAD, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, &o.renderPassLoadKeep);
+            // 首次合成（新图）+ 继续持有（UNDEFINED -> CA）
+            mkRP(VK_ATTACHMENT_LOAD_OP_CLEAR, VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, &o.renderPassKeep);
+            mkFB(o.renderPassLoad, o.framebuffersLoad);
+            mkFB(o.renderPassLoadKeep, o.framebuffersLoadKeep);
+            mkFB(o.renderPassKeep, o.framebuffersKeep);
+            fprintf(stderr, "[vk] singlepresent rp=%d loadKeep=%d keep=%d\n",
+                    o.renderPassLoad != VK_NULL_HANDLE,
+                    o.renderPassLoadKeep != VK_NULL_HANDLE,
+                    o.renderPassKeep != VK_NULL_HANDLE);
+        }
+    }
+
+    // 取证开关 VK_BBSTAT=1 / VK_DUMP_PRESENTS=1（默认关）：分配主机可见缓冲，
+    // 把 present 前的交换链像素拷出来做亮度统计 / 写 BMP。
+    {
+        const char* v = getenv("VK_BBSTAT");
+        const char* d = getenv("VK_DUMP_PRESENTS");
+        if ((v && v[0] == '1') || (d && d[0] == '1')) {
+            o.statBytes = (size_t)o.extent.width * (size_t)o.extent.height * 4;
+            VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            bci.size = o.statBytes;
+            bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            if (g_createBuf(o.dev, &bci, nullptr, &o.statBuf) == VK_SUCCESS) {
+                VkMemoryRequirements smr{};
+                g_getBufReqs(o.dev, o.statBuf, &smr);
+                VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+                mai.allocationSize = smr.size;
+                mai.memoryTypeIndex = FindMemType(memProps, smr.memoryTypeBits,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                if (g_allocMem(o.dev, &mai, nullptr, &o.statMem) == VK_SUCCESS) {
+                    g_bindBufMem(o.dev, o.statBuf, o.statMem, 0);
+                    g_mapMem(o.dev, o.statMem, 0, o.statBytes, 0, &o.statPtr);
+                }
+            }
+        }
     }
 
     VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -507,11 +738,16 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
 
     // 顶点布局按内嵌着色器实际 loc：0=Position(vec4) 1=Alpha(float)
     // 2=ColorMultiplier(vec4) 3=ColorOffset(vec4) 4=TextureCoord(vec2)，共 15 floats
-    VkVertexInputBindingDescription vbind{};
-    vbind.binding = 0;
-    vbind.stride = sizeof(float) * 15;
-    vbind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    VkVertexInputAttributeDescription vattr[5]{};
+    VkVertexInputBindingDescription vbind[2]{};
+    vbind[0].binding = 0;
+    vbind[0].stride = sizeof(float) * 15;
+    vbind[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    // binding1 = stride 0 的常量绑定，供 loc5/6/7 使用（否则未绑定属性读到 0，
+    // 顶点着色器 openfl_Alphav = openfl_Alpha * alpha 会把 alpha 抹成 0）
+    vbind[1].binding = 1;
+    vbind[1].stride = 0;
+    vbind[1].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    VkVertexInputAttributeDescription vattr[8]{};
     vattr[0].location = 0;
     vattr[0].binding = 0;
     vattr[0].format = VK_FORMAT_R32G32B32A32_SFLOAT;
@@ -532,21 +768,38 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     vattr[4].binding = 0;
     vattr[4].format = VK_FORMAT_R32G32_SFLOAT;
     vattr[4].offset = sizeof(float) * 13;
+    // loc5=alpha -> 1.0；loc6=colorMultiplier -> (1,1,1,1)；loc7=colorOffset -> 0
+    vattr[5].location = 5;
+    vattr[5].binding = 1;
+    vattr[5].format = VK_FORMAT_R32_SFLOAT;
+    vattr[5].offset = 0;
+    vattr[6].location = 6;
+    vattr[6].binding = 1;
+    vattr[6].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    vattr[6].offset = sizeof(float) * 1;
+    vattr[7].location = 7;
+    vattr[7].binding = 1;
+    vattr[7].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    vattr[7].offset = sizeof(float) * 5;
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    vi.vertexBindingDescriptionCount = 1;
-    vi.pVertexBindingDescriptions = &vbind;
-    vi.vertexAttributeDescriptionCount = 5;
+    vi.vertexBindingDescriptionCount = 2;
+    vi.pVertexBindingDescriptions = vbind;
+    vi.vertexAttributeDescriptionCount = 8;
     vi.pVertexAttributeDescriptions = vattr;
 
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    VkViewport vp{0, 0, (float)o.extent.width, (float)o.extent.height, 0, 1};
-    VkRect2D sc{{0, 0}, o.extent};
+    // 视口/剪裁改为动态状态：管线不再绑死创建时的 extent。
+    // 写死的 viewport 会让 resize 后（或创建时尺寸不对时）画面只落在左下/左侧一小块。
     VkPipelineViewportStateCreateInfo vps{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
     vps.viewportCount = 1;
-    vps.pViewports = &vp;
+    vps.pViewports = nullptr;
     vps.scissorCount = 1;
-    vps.pScissors = &sc;
+    vps.pScissors = nullptr;
+    VkDynamicState dynStates[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo pds{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    pds.dynamicStateCount = 2;
+    pds.pDynamicStates = dynStates;
     VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
     rs.polygonMode = VK_POLYGON_MODE_FILL;
     rs.cullMode = VK_CULL_MODE_NONE;
@@ -578,6 +831,7 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     gp.pVertexInputState = &vi;
     gp.pInputAssemblyState = &ia;
     gp.pViewportState = &vps;
+    gp.pDynamicState = &pds;
     gp.pRasterizationState = &rs;
     gp.pMultisampleState = &ms;
     gp.pColorBlendState = &cbs;
@@ -607,7 +861,57 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     g_mapMem(o.dev, o.vbMem, 0, vmr.size, 0, &vp2);
     o.vbPtr = (float*)vp2;
 
+    // 常量顶点属性缓冲（binding1, stride=0）：loc5=1.0 / loc6=(1,1,1,1) / loc7=0
+    static const float kConstAttrs[9] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    VkBufferCreateInfo abci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    abci.size = sizeof(kConstAttrs);
+    abci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    g_createBuf(o.dev, &abci, nullptr, &o.attrBuf);
+    VkMemoryRequirements amr{};
+    g_getBufReqs(o.dev, o.attrBuf, &amr);
+    VkMemoryAllocateInfo amai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    amai.allocationSize = amr.size;
+    amai.memoryTypeIndex = FindMemType(memProps, amr.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    g_allocMem(o.dev, &amai, nullptr, &o.attrMem);
+    g_bindBufMem(o.dev, o.attrBuf, o.attrMem, 0);
+    void* ap2 = nullptr;
+    g_mapMem(o.dev, o.attrMem, 0, amr.size, 0, &ap2);
+    o.attrPtr = (float*)ap2;
+    if (o.attrPtr) memcpy(o.attrPtr, kConstAttrs, sizeof(kConstAttrs));
+    // 观测（非变量）：binding1 常量的 map 结果与真值。loc5=0 的两种可能（map 失败 / 没写进去）
+    // 靠这一行直接分辨，不需要再去猜。
+    fprintf(stderr, "[vk] attr const buf map=%s vals=%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f\n",
+            o.attrPtr ? "ok" : "NULL",
+            o.attrPtr ? o.attrPtr[0] : -1.0f, o.attrPtr ? o.attrPtr[1] : -1.0f,
+            o.attrPtr ? o.attrPtr[2] : -1.0f, o.attrPtr ? o.attrPtr[3] : -1.0f,
+            o.attrPtr ? o.attrPtr[4] : -1.0f, o.attrPtr ? o.attrPtr[5] : -1.0f,
+            o.attrPtr ? o.attrPtr[6] : -1.0f, o.attrPtr ? o.attrPtr[7] : -1.0f,
+            o.attrPtr ? o.attrPtr[8] : -1.0f);
+
     o.textures.resize(MAX_TEXTURES);
+
+    // 接线（本轮只接不选）：把设备上下文交给 gl_shader，让它能自己建管线。
+    // 注册本身不进入任何 draw 路径；离屏 render pass 本轮不注册（不做离屏管线）。
+    {
+        lime::GLShaderVkContext ctx{};
+        ctx.device = o.dev;
+        ctx.backbufferRenderPass = o.renderPass;
+        ctx.offscreenRenderPass = VK_NULL_HANDLE;
+        ctx.backbufferFormat = o.colorFormat;
+        ctx.offscreenFormat = VK_FORMAT_R8G8B8A8_UNORM;
+        ctx.viewportWidth = o.extent.width;
+        ctx.viewportHeight = o.extent.height;
+        ctx.uniformMemoryTypeIndex = FindMemType(memProps, 0xFFFFFFFFu,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        ctx.maxSamplers = 16;
+        ctx.getDeviceProcAddr = (PFN_vkGetDeviceProcAddr) o.gipa(o.inst, "vkGetDeviceProcAddr");
+        lime::gl_shader_vk_register(&ctx);
+        fprintf(stderr, "[progpipe] register ok avail=%d device=%p rp=%p fmt=%d vp=%ux%u memtype=%u\n",
+                lime::gl_shader_vk_available() ? 1 : 0, (void*) o.dev, (void*) o.renderPass,
+                (int) o.colorFormat, o.extent.width, o.extent.height,
+                (unsigned) ctx.uniformMemoryTypeIndex);
+    }
     fprintf(stderr, "[vk] init ok swapchain=%ux%u images=%zu format=%d\n",
             o.extent.width, o.extent.height, o.swapImages.size(), (int)o.colorFormat);
     return true;
@@ -827,6 +1131,22 @@ uint32_t VkRenderer::CreateTextureOnce(int w, int h, const unsigned char* rgba) 
         wds[1].pImageInfo = &dii;
         g_updateDS(o.dev, 2, wds, 0, nullptr);
 
+        // 取证（默认常开，仅大图打印一行）：确认大图上传的 CPU 数据本身是否全黑
+        if ((size_t)w * h >= (size_t)2048 * 2048) {
+            size_t cnt = 0, sum = 0, nb = 0;
+            size_t px = (size_t)w * h;
+            for (size_t k = 0; k < px; k += 97) {
+                const unsigned char* p = rgba + k * 4;
+                unsigned int v = (p[0] + p[1] + p[2]) / 3;
+                sum += v;
+                if (v >= 8) nb++;
+                cnt++;
+            }
+            fprintf(stderr, "[vk] texmean id=%u w=%d h=%d mean=%.2f nb=%.1f\n",
+                    (unsigned)i + 1, w, h,
+                    cnt ? (double)sum / (double)cnt : 0.0,
+                    cnt ? 100.0 * (double)nb / (double)cnt : 0.0);
+        }
         t.w = w;
         t.h = h;
         t.used = true;
@@ -867,6 +1187,15 @@ static VkSamplerAddressMode GlWrapToVk(int wrap) {
     }
 }
 
+bool VkRenderer::SetDrawColor(float alpha, const float* mult, const float* offset) {
+    g_drawAlpha = alpha;
+    for (int i = 0; i < 4; i++) {
+        g_drawMult[i] = mult ? mult[i] : 1.0f;
+        g_drawOff[i] = offset ? offset[i] : 0.0f;
+    }
+    return true;
+}
+
 bool VkRenderer::SetTextureSampler(uint32_t texId, int minFilter, int magFilter,
                                    int wrapS, int wrapT, int baseLevel, int maxLevel,
                                    float minLod, float maxLod) {
@@ -881,6 +1210,21 @@ bool VkRenderer::SetTextureSampler(uint32_t texId, int minFilter, int magFilter,
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     sci.magFilter = GlFilterToVk(magFilter);
     sci.minFilter = GlFilterToVk(minFilter);
+    // 诊断：实测游戏的采样方式（每个纹理 id 首次设置或参数变化时打印一次）
+    if (texId < 1024) {
+        static uint64_t s_sig[1024] = {0};
+        static bool s_seen[1024] = {false};
+        uint64_t sig = ((uint64_t)(uint32_t)minFilter << 48) | ((uint64_t)(uint32_t)magFilter << 32) |
+                       ((uint64_t)(uint32_t)wrapS << 16) | (uint32_t)wrapT;
+        if (!s_seen[texId] || s_sig[texId] != sig) {
+            s_seen[texId] = true;
+            s_sig[texId] = sig;
+            fprintf(stderr, "[sampler] tex=%u min=0x%x(%s) mag=0x%x(%s) wrapS=0x%x wrapT=0x%x\n",
+                    texId, minFilter, GlFilterToVk(minFilter) == VK_FILTER_NEAREST ? "NEAREST" : "LINEAR",
+                    magFilter, GlFilterToVk(magFilter) == VK_FILTER_NEAREST ? "NEAREST" : "LINEAR",
+                    wrapS, wrapT);
+        }
+    }
     // 目前纹理只有 1 级 mip，mip 模式保持 NEAREST 并把 maxLod 钳到 0，
     // 否则采样器会去取不存在的 level 导致黑边/全黑
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
@@ -1042,7 +1386,12 @@ void VkRenderer::DrawSprite(uint32_t texId, float x, float y, float w, float h,
     if (texId >= 1000) {
         uint32_t ti = texId - 1000;
         if (ti >= o.targets.size() || !o.targets[ti].used) return;
-        if (o.currentTarget == texId) return; // no self sampling
+        if (o.currentTarget == texId) {
+            // 探针：目标是当前渲染目标时顶点被静默丢弃（缺口 B 的唯一证据点）
+            fprintf(stderr, "[vk] draw-selfdrop tex=%u cur=%u f=%llu n=6 sprite\n",
+                    texId, o.currentTarget, (unsigned long long) g_drawFrame);
+            return;
+        } // no self sampling
         vertsPtr = &o.targets[ti].verts;
     } else {
         if (texId == 0 || texId > o.textures.size()) return;
@@ -1060,13 +1409,18 @@ void VkRenderer::DrawSprite(uint32_t texId, float x, float y, float w, float h,
     }
 }
 
-void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount) {
+void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, const float* vertexAlpha) {
     Impl& o = *impl;
     std::vector<float>* vertsPtr = nullptr;
     if (texId >= 1000) {
         uint32_t ti = texId - 1000;
         if (ti >= o.targets.size() || !o.targets[ti].used) return;
-        if (o.currentTarget == texId) return;
+        if (o.currentTarget == texId) {
+            // 探针：目标是当前渲染目标时顶点被静默丢弃（缺口 B 的唯一证据点）
+            fprintf(stderr, "[vk] draw-selfdrop tex=%u cur=%u f=%llu n=%d\n",
+                    texId, o.currentTarget, (unsigned long long) g_drawFrame, vertexCount);
+            return;
+        }
         vertsPtr = &o.targets[ti].verts;
     } else {
         if (texId == 0 || texId > o.textures.size()) return;
@@ -1095,13 +1449,143 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount) {
 
     // 采样源尺寸：uv 归一化要用（有的路径传进来的 uv 是像素值而不是 0..1）
     float tw = 0.0f, th = 0.0f;
+    if (o.currentTarget == 0) g_bbLastTex = texId;
     if (texId >= 1000) {
         uint32_t ti = texId - 1000;
         tw = (float)o.targets[ti].w;
         th = (float)o.targets[ti].h;
+        // 取证：采样的离屏源是否真的被写过、创建于哪一帧（判断"采样空目标"）
+        static uint64_t s_sampleLog = 0;
+        if (s_sampleLog < 20000) {
+            fprintf(stderr, "[vkdraw] sample src=%u cur=%u srcLastWrite=%llu srcCreated=%llu\n",
+                    texId, o.currentTarget,
+                    (unsigned long long)o.targets[ti].lastWriteFrame,
+                    (unsigned long long)o.targets[ti].createdFrame);
+            s_sampleLog++;
+        }
     } else {
         tw = (float)o.textures[texId - 1].w;
         th = (float)o.textures[texId - 1].h;
+    }
+
+    // 实验开关 VK_SKIP_3X=1：跳过"采样源尺寸 >= 2× 屏幕"的整图绘制（当前是
+    // 2763x2073 的 3× 画布）。默认关闭；只用于判定它是不是黑帧的直接来源。
+    {
+        static int s_skip = -1;
+        if (s_skip < 0) {
+            const char* v = getenv ("VK_SKIP_3X");
+            s_skip = (v && v[0] == '1') ? 1 : 0;
+        }
+        if (s_skip && (tw >= 2.0f * (float)o.width || th >= 2.0f * (float)o.height)) {
+            static int s_n = 0;
+            if (s_n < 5) {
+                fprintf(stderr, "[vk] skip3x src=%u %dx%d cur=%u\n",
+                        texId, (int)tw, (int)th, o.currentTarget);
+            }
+            s_n++;
+            return;
+        }
+    }
+
+    // 采样方式实测：多数贴图是 LINEAR。像素坐标 uv 正好落在帧边界时，双线性
+    // 会混入相邻格（表现为贴图四周一圈异色边框）。按 min 侧 +0.5、max 侧 -0.5
+    // 内缩半像素，使采样点落在首/末纹素中心；只对像素坐标 uv 生效。
+    float uMin = 0, uMax = 0, vMin = 0, vMax = 0;
+    bool pixelUv = false;
+    if (vertexCount > 0) {
+        uMin = uMax = verts[2];
+        vMin = vMax = verts[3];
+        for (int i = 0; i < vertexCount; i++) {
+            float u = verts[i * 4 + 2];
+            float v = verts[i * 4 + 3];
+            if (u > 1.001f || u < -1.001f || v > 1.001f || v < -1.001f) pixelUv = true;
+            if (u < uMin) uMin = u;
+            if (u > uMax) uMax = u;
+            if (v < vMin) vMin = v;
+            if (v > vMax) vMax = v;
+        }
+    }
+
+    // 观测（非行为）：记录本笔 draw 对应的 GL program，并首次见到时打一次程序表。
+    int vkProg = lime::gl_shader_current_program ();
+    {
+        static unsigned s_progSeen[256] = {0};
+        if (vkProg >= 0 && vkProg < 256 && !s_progSeen[vkProg]) {
+            s_progSeen[vkProg] = 1;
+            fprintf(stderr, "[glprog] id=%d attrs=%d hasLoc5=%d ubo=%u\n",
+                    vkProg, lime::gl_shader_attribute_count(vkProg),
+                    lime::gl_shader_program_has_attribute(vkProg, 5) ? 1 : 0,
+                    (unsigned) lime::gl_shader_uniform_buffer_size(vkProg));
+        }
+    }
+
+    // 接线探针（本轮不选管线）：对"没有 loc5"的 program 用渲染器自己的 60B 交错布局
+    // 建一条 gl_shader 管线，只为证明接线可用。该管线不进入任何 draw。
+    if (vkProg > 0 && vkProg < 256) {
+        static signed char s_built[256] = {0};
+        if (s_built[vkProg] == 0) {
+            if (lime::gl_shader_program_has_attribute (vkProg, 5)) {
+                s_built[vkProg] = -2;
+                fprintf(stderr, "[progpipe] build prog=%d skipped reason=hasLoc5\n", vkProg);
+            } else {
+                static const lime::GLShaderVertexAttribute s_vattrs[5] = {
+                    {0, 0, 103 /* R32G32_SFLOAT */, 0},
+                    {1, 0, 100 /* R32_SFLOAT */, 16},
+                    {2, 0, 109 /* R32G32B32A32_SFLOAT */, 20},
+                    {3, 0, 109, 36},
+                    {4, 0, 103, 52},
+                };
+                lime::GLShaderVertexLayout layout{0, 60, s_vattrs, 5};
+                bool ok = lime::gl_shader_build_pipeline (vkProg, &layout, false);
+                VkPipeline pipe = ok ? lime::gl_shader_pipeline (vkProg, false) : VK_NULL_HANDLE;
+                s_built[vkProg] = ok ? 1 : -1;
+                if (ok && pipe) {
+                    g_probePipeline = pipe;
+                    g_probeProgram = vkProg;
+                }
+                fprintf(stderr, "[progpipe] build prog=%d attrs=%d ok=%d pipeline=%p\n",
+                        vkProg, lime::gl_shader_attribute_count (vkProg), ok ? 1 : 0, (void*) pipe);
+            }
+        }
+    }
+    // 取证：每次绘制一条紧凑记录（纹理 id/尺寸、uv 范围、顶点包围盒、是否触发
+    // 归一化分支、uv 是否覆盖整张贴图）。前 12 帧全量，之后只打"覆盖整图"的嫌疑绘制
+    {
+        float xMin = verts[0], xMax = verts[0], yMin = verts[1], yMax = verts[1];
+        for (int i = 0; i < vertexCount; i++) {
+            float x = verts[i * 4 + 0];
+            float y = verts[i * 4 + 1];
+            if (x < xMin) xMin = x; if (x > xMax) xMax = x;
+            if (y < yMin) yMin = y; if (y > yMax) yMax = y;
+        }
+        // norm=1 表示走了像素坐标分支（uv 已按纹理尺寸归一化并内缩）；
+        // whole=1 表示 uv 跨度接近整张贴图 → 该绘制很可能把整图铺进四边形
+        bool spansWhole = false;
+        if (!pixelUv) spansWhole = (uMax - uMin) >= 0.9f && (vMax - vMin) >= 0.9f;
+        else if (tw > 0 && th > 0) spansWhole = (uMax - uMin) >= tw * 0.9f && (vMax - vMin) >= th * 0.9f;
+        float aMin = g_drawAlpha, aMax = g_drawAlpha;
+        if (vertexAlpha) {
+            aMin = vertexAlpha[0]; aMax = vertexAlpha[0];
+            for (int i = 1; i < vertexCount; i++) {
+                if (vertexAlpha[i] < aMin) aMin = vertexAlpha[i];
+                if (vertexAlpha[i] > aMax) aMax = vertexAlpha[i];
+            }
+        }
+        static uint64_t s_logged = 0;
+        if (s_logged < 6000 && (g_drawFrame <= 12 || spansWhole)) {
+            fprintf(stderr, "[vkdraw] f=%llu cur=%u tex=%u tsz=%.0fx%.0f n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] norm=%d whole=%d asrc=%s amin=%.3f amax=%.3f prog=%d\n",
+                    (unsigned long long)g_drawFrame, o.currentTarget, texId, tw, th, vertexCount,
+                    uMin, uMax, vMin, vMax, xMin, xMax, yMin, yMax,
+                    pixelUv ? 1 : 0, spansWhole ? 1 : 0, vertexAlpha ? "arr" : "const", aMin, aMax, vkProg);
+            s_logged++;
+        }
+        // 按 program 只计数不逐条打：主菜单段的 prog 分布靠这里，不受 6000 条上限影响
+        if (vkProg >= 0 && vkProg < 256) {
+            g_progDraw[vkProg]++;
+            if (spansWhole) g_progWhole[vkProg]++;
+            g_progVerts[vkProg] += (uint64_t) vertexCount;
+        }
+        g_progDrawTotal++;
     }
 
     vertsPtr->reserve(vertsPtr->size() + (size_t)vertexCount * 15);
@@ -1110,11 +1594,24 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount) {
         float py = verts[i * 4 + 1];
         float u = verts[i * 4 + 2];
         float v = verts[i * 4 + 3];
-        // 像素坐标直接进顶点：像素→NDC 的换算由 UBO 里的投影矩阵完成
-        // uv 超出 0..1 说明传进来的是像素坐标，按采样源尺寸归一化，否则采样越界全黑
-        if (u > 1.001f || u < -1.001f) u = tw > 0 ? u / tw : 1.0f;
-        if (v > 1.001f || v < -1.001f) v = th > 0 ? v / th : 1.0f;
-        PushLimeVertex(*vertsPtr, px, py, u, v);
+        if (pixelUv) {
+            // 内缩与归一化必须一起做：若先 +0.5 再判断 |u|>1.001，min=0 的
+            // 顶点会变成 0.5 而躲过归一化，整屏采样错位
+            float eu = u, ev = v;
+            if (u <= uMin + 1e-3f && u < uMax) eu = u + 0.5f;
+            else if (u >= uMax - 1e-3f) eu = u - 0.5f;
+            if (v <= vMin + 1e-3f && v < vMax) ev = v + 0.5f;
+            else if (v >= vMax - 1e-3f) ev = v - 0.5f;
+            u = tw > 0 ? eu / tw : 1.0f;
+            v = th > 0 ? ev / th : 1.0f;
+        } else {
+            // 像素坐标直接进顶点：像素→NDC 的换算由 UBO 里的投影矩阵完成
+            // uv 超出 0..1 说明传进来的是像素坐标，按采样源尺寸归一化，否则采样越界全黑
+            if (u > 1.001f || u < -1.001f) u = tw > 0 ? u / tw : 1.0f;
+            if (v > 1.001f || v < -1.001f) v = th > 0 ? v / th : 1.0f;
+        }
+        PushLimeVertex(*vertsPtr, px, py, u, v,
+                       vertexAlpha ? vertexAlpha[i] : g_drawAlpha, g_drawMult, g_drawOff);
     }
 }
 
@@ -1141,17 +1638,184 @@ bool VkRenderer::FrameHasGeometry() const {
     return false;
 }
 
+uint32_t VkRenderer::LastGeometryTarget() const {
+    return impl->lastGeomTarget;
+}
+
+uint64_t VkRenderer::FrameIndex() const {
+    return g_drawFrame;
+}
+
+uint32_t VkRenderer::BackbufferLastSample() const {
+    return g_bbLastTex;
+}
+
+void VkRenderer::ResetLastGeometryTarget() {
+    impl->lastGeomTarget = 0;
+}
+
+// 交换链重建：present/acquire 一旦返回 OUT_OF_DATE 或 SUBOPTIMAL，旧交换链上
+// 所有后续 acquire 都会继续失败，而后缓冲帧开不起来 → 永久停在上一张清屏帧。
+// 这里按 surface 当前能力重建交换链 + image view + 全部 framebuffer。
+bool VkRenderer::RecreateSwapchain() {
+    Impl& o = *impl;
+    if (!o.dev || !o.swapchain || !o.gipa) return false;
+    auto createSwap = (PFN_vkCreateSwapchainKHR)o.gipa(o.inst, "vkCreateSwapchainKHR");
+    auto getImages = (PFN_vkGetSwapchainImagesKHR)o.gipa(o.inst, "vkGetSwapchainImagesKHR");
+    auto getSurfCaps = (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)o.gipa(o.inst,
+            "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+    auto createFB = (PFN_vkCreateFramebuffer)o.gipa(o.inst, "vkCreateFramebuffer");
+    if (!o.destroyFramebuffer || !o.destroyImageView || !o.destroySwapchain ||
+        !createSwap || !getImages || !getSurfCaps || !createFB) return false;
+
+    // 每帧提交后本来就 g_waitIdle(queue)，这里再等一次确保没有在飞的引用
+    if (g_waitIdle) g_waitIdle(o.queue);
+
+    uint32_t oldImages = (uint32_t)o.swapImages.size();
+    uint32_t oldExtW = o.extent.width, oldExtH = o.extent.height;
+
+    auto dropFB = [&](std::vector<VkFramebuffer>& fbs) {
+        for (auto fb : fbs) if (fb) o.destroyFramebuffer(o.dev, fb, nullptr);
+        fbs.clear();
+    };
+    dropFB(o.framebuffers);
+    dropFB(o.framebuffersLoad);
+    dropFB(o.framebuffersLoadKeep);
+    dropFB(o.framebuffersKeep);
+    for (auto v : o.swapViews) if (v) o.destroyImageView(o.dev, v, nullptr);
+    o.swapViews.clear();
+    o.swapImages.clear();
+    o.destroySwapchain(o.dev, o.swapchain, nullptr);
+    o.swapchain = VK_NULL_HANDLE;
+
+    VkSurfaceCapabilitiesKHR caps{};
+    if (getSurfCaps(o.phys, o.surf, &caps) != VK_SUCCESS) {
+        fprintf(stderr, "[vk] swapchain recreate ok=0 path=caps\n");
+        return false;
+    }
+    o.extent = PickSwapchainExtent (caps, o.width, o.height);
+    if (o.extent.width == 0 || o.extent.height == 0) {
+        fprintf(stderr, "[vk] swapchain recreate ok=0 path=zeroextent\n");
+        return false;
+    }
+
+    VkSwapchainCreateInfoKHR swci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+    swci.surface = o.surf;
+    swci.minImageCount = caps.minImageCount + 1;
+    swci.imageFormat = o.colorFormat;
+    swci.imageColorSpace = o.colorSpace;
+    swci.imageExtent = o.extent;
+    swci.imageArrayLayers = 1;
+    swci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    swci.preTransform = caps.currentTransform;
+    swci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    swci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    swci.clipped = VK_TRUE;
+    VkResult cr = createSwap(o.dev, &swci, nullptr, &o.swapchain);
+    if (cr != VK_SUCCESS) {
+        o.swapchain = VK_NULL_HANDLE;
+        fprintf(stderr, "[vk] swapchain recreate ok=0 path=create err=%d\n", (int)cr);
+        return false;
+    }
+
+    uint32_t ic = 0;
+    getImages(o.dev, o.swapchain, &ic, nullptr);
+    o.swapImages.resize(ic);
+    getImages(o.dev, o.swapchain, &ic, o.swapImages.data());
+    o.swapViews.assign(ic, VK_NULL_HANDLE);
+    for (uint32_t i = 0; i < ic; i++) {
+        VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vci.image = o.swapImages[i];
+        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vci.format = o.colorFormat;
+        vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        vci.subresourceRange.levelCount = 1;
+        vci.subresourceRange.layerCount = 1;
+        g_createView(o.dev, &vci, nullptr, &o.swapViews[i]);
+    }
+
+    auto mkFBSet = [&](VkRenderPass rp, std::vector<VkFramebuffer>& fbs) {
+        if (rp == VK_NULL_HANDLE) return;
+        fbs.assign(ic, VK_NULL_HANDLE);
+        for (uint32_t i = 0; i < ic; i++) {
+            VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+            fci.renderPass = rp;
+            fci.attachmentCount = 1;
+            fci.pAttachments = &o.swapViews[i];
+            fci.width = o.extent.width;
+            fci.height = o.extent.height;
+            fci.layers = 1;
+            createFB(o.dev, &fci, nullptr, &fbs[i]);
+        }
+    };
+    mkFBSet(o.renderPass, o.framebuffers);
+    mkFBSet(o.renderPassLoad, o.framebuffersLoad);
+    mkFBSet(o.renderPassLoadKeep, o.framebuffersLoadKeep);
+    mkFBSet(o.renderPassKeep, o.framebuffersKeep);
+
+    o.frameImageIndex = 0;
+    o.bbHeld = false;
+    o.bbLoad = false;
+    fprintf(stderr, "[vk] swapchain recreate ok=1 oldImages=%u newImages=%u %ux%u -> %ux%u\n",
+            oldImages, ic, oldExtW, oldExtH, o.extent.width, o.extent.height);
+    return true;
+}
+
 bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float a) {
     Impl& o = *impl;
     // 同一目标重复绑定（OpenFL 每个 pass 开头都会 glClear，gl_vk_handle_clear 又会 Bind 一次）
     // 不能清空已经累积的顶点，否则整条 filter 链最后合成时 verts=0，屏幕只剩清屏色。
     // 这里只更新清屏色，等 EndFrame 时真正清屏。
     if (o.frameOpen && o.currentTarget == id) {
-        o.clearR = r;
-        o.clearG = g;
-        o.clearB = b;
-        o.clearA = a;
-        return true;
+        // 实验 VK_SINGLE_PRESENT=1：同一张交换链图本帧已被占用，直接复用，不 acquire 也不提交。
+        // 这里不能改 bbLoad：新 acquire 的图 bbLoad=false（必须 CLEAR），已叠加的图 bbLoad=true（必须 LOAD）。
+        if (id == 0 && o.bbHeld && o.renderPassLoad != VK_NULL_HANDLE) {
+            static uint64_t s_reuse = 0;
+            s_reuse++;
+            if (s_reuse <= 2000) {
+                fprintf(stderr, "[vk] bind0-reuse n=%llu load=%d clear=(%.2f,%.2f,%.2f)\n",
+                        (unsigned long long)s_reuse, o.bbLoad ? 1 : 0, r, g, b);
+            }
+            o.clearR = r;
+            o.clearG = g;
+            o.clearB = b;
+            o.clearA = a;
+            if (id == 0) {
+                g_bbOpen = 1;
+                fprintf(stderr, "[vk] bbframe open f=%llu ok=1 target=0 path=reuse load=%d\n",
+                        (unsigned long long) g_drawFrame, o.bbLoad ? 1 : 0);
+            }
+            return true;
+        }
+        // 取证开关 VK_FRESH_IMG=1（默认关）：第二次绑定后缓冲时，若已累积几何，
+        // 先 EndFrame 做一次 present 归还当前 image，再 acquire 新图。
+        // 目的：保持 acquire↔present 一一对应（不重走 §17 的 skip-present），
+        // 验证"同一张 img0 被 present 两次"是不是黑帧的直接机制。
+        static int s_fresh = -1;
+        if (s_fresh < 0) {
+            const char* v = getenv ("VK_FRESH_IMG");
+            s_fresh = (v && v[0] == '1') ? 1 : 0;
+        }
+        if (!(s_fresh && id == 0 && FrameHasGeometry())) {
+            o.clearR = r;
+            o.clearG = g;
+            o.clearB = b;
+            o.clearA = a;
+            if (id == 0) {
+                g_bbOpen = 1;
+                fprintf(stderr, "[vk] bbframe open f=%llu ok=1 target=0 path=same load=%d\n",
+                        (unsigned long long) g_drawFrame, o.bbLoad ? 1 : 0);
+            }
+            return true;
+        }
+        EndFrame ();
+    }
+    // 探针（只记状态）：0 → 离屏切换时后缓冲若还挂着一批没提交的顶点，这批顶点
+    // 会被 1641 的 flush 条件（只对 currentTarget>=1000）跳过，从而并进离屏 pass。
+    if (o.frameOpen && o.currentTarget == 0 && id >= 1000) {
+        size_t pv = PendingVertsOf (o.textures, o.targets);
+        fprintf(stderr, "[vk] bbframe migrate f=%llu from=0 to=%u pendingVerts=%zu\n",
+                (unsigned long long) g_drawFrame, id, pv);
     }
     // 切换目标前先把旧离屏 pass 真正提交进旧 FBO：否则整帧所有 pass 的顶点
     // 会被攒到 present 那一刻、用最后一张图（后缓冲）的投影一次性画出去，
@@ -1168,18 +1832,49 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
     // “先绑后缓冲、再画一张全屏 quad”，一清就把这批顶点吃掉 → 屏幕只剩清屏色。
     // 顶点在 EndFrame 提交后由 EndFrame 自己清。
     if (id == 0) {
-        VkResult ar = g_acquire(o.dev, o.swapchain, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE, &o.frameImageIndex);
-        if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) return false;
+        // 交换链脏（present/acquire 曾返回 OUT_OF_DATE/SUBOPTIMAL）→ 开帧前无条件重建。
+        // 不依赖 acquire 是否报错：present 只要失败一次，[vk] pres 就停更、后缓冲再也开不起来。
+        if (o.swapDirty) {
+            if (RecreateSwapchain()) o.swapDirty = false;
+            else return false;
+        }
+        if (o.bbHeld && o.renderPassLoad != VK_NULL_HANDLE) {
+            // 实验 VK_SINGLE_PRESENT=1：本帧已持有同一张图，后续合成用 LOAD pass 叠加
+            o.bbLoad = true;
+        } else {
+            VkResult ar = g_acquire(o.dev, o.swapchain, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE, &o.frameImageIndex);
+            if (ar == VK_SUBOPTIMAL_KHR) o.swapDirty = true;
+            if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
+                o.swapDirty = true;
+                fprintf(stderr, "[vk] bbframe open f=%llu ok=0 target=0 path=acquire err=%d swapDirty=1\n",
+                        (unsigned long long) g_drawFrame, (int) ar);
+                return false;
+            }
+            o.bbHeld = true;
+            o.bbLoad = false;
+        }
+        g_bbOpen = 1;
+        fprintf(stderr, "[vk] bbframe open f=%llu ok=1 target=0 path=acquire img=%u load=%d\n",
+                (unsigned long long) g_drawFrame, o.frameImageIndex, o.bbLoad ? 1 : 0);
     } else {
         uint32_t ti = id - 1000;
-        if (ti >= o.targets.size() || !o.targets[ti].used) return false;
+        if (ti >= o.targets.size() || !o.targets[ti].used) {
+            fprintf(stderr, "[vk] bbframe open f=%llu ok=0 target=%u path=offscreen\n",
+                    (unsigned long long) g_drawFrame, id);
+            return false;
+        }
     }
     o.frameOpen = true;
     return true;
 }
 
 void VkRenderer::PresentTarget() {
+    // FBO 切换触发的收尾：只提交几何，不当作真实 flip（真实 flip 由 gl_fbo 显式 RequestPresent）
     EndFrame();
+}
+
+void VkRenderer::RequestPresent() {
+    impl->presentReq = true;
 }
 
 uint32_t VkRenderer::CreateRenderTarget(int w, int h) {
@@ -1304,6 +1999,9 @@ uint32_t VkRenderer::CreateRenderTarget(int w, int h) {
     t.w = w;
     t.h = h;
     t.used = true;
+    t.createdFrame = g_drawFrame;
+    fprintf(stderr, "[vk] rt new id=%u %dx%d f=%llu\n", 1000 + idx, w, h,
+            (unsigned long long)g_drawFrame);
     return 1000 + idx;
 }
 
@@ -1314,40 +2012,223 @@ void VkRenderer::DestroyRenderTarget(uint32_t id) {
     if (ti >= o.targets.size()) return;
     RenderTarget& t = o.targets[ti];
     if (!t.used) return;
+    fprintf(stderr, "[vk] rt del id=%u %dx%d f=%llu lastWrite=%llu\n", id, t.w, t.h,
+            (unsigned long long)g_drawFrame, (unsigned long long)t.lastWriteFrame);
     if (t.fb) o.destroyFramebuffer(o.dev, t.fb, nullptr);
     if (t.rp) o.destroyRenderPass(o.dev, t.rp, nullptr);
     if (t.view) o.destroyImageView(o.dev, t.view, nullptr);
     if (t.image) o.destroyImage(o.dev, t.image, nullptr);
     if (t.mem) o.freeMemory(o.dev, t.mem, nullptr);
     t = RenderTarget();
+    // 目标 id 按槽位复用，留着旧 id 会让 present 采样到无关的目标
+    if (o.lastGeomTarget == id) o.lastGeomTarget = 0;
 }
 
 void VkRenderer::EndFrame() {
     Impl& o = *impl;
-    if (!o.frameOpen) return;
+    // 探针（审计口径）：每个视觉帧只出一次的两份状态快照——渲染器 currentTarget 与 gl_fbo g_currentTarget
+    if (o.presentReq) {
+        fprintf(stderr, "[vk] efstate f=%llu req=1 open=%d cur=%u gcur=%u bbHeld=%d bbOpen=%d\n",
+                (unsigned long long) g_drawFrame, o.frameOpen ? 1 : 0, o.currentTarget,
+                lime::gl_vk_current_target (), o.bbHeld ? 1 : 0, g_bbOpen);
+    }
+    if (!o.frameOpen) {
+        // 审计要求：不再用 g_bbOpen 门控，每次空 EndFrame 都打，否则"零 noop"无法区分原因
+        fprintf(stderr, "[vk] bbframe close f=%llu target=%u noop=1 BBOPEN=%d req=%d\n",
+                (unsigned long long) g_drawFrame, o.currentTarget, g_bbOpen, o.presentReq ? 1 : 0);
+        return;
+    }
+    // 探针（只记状态）：后缓冲 close 与 open 是否配对；离屏 close 时后缓冲还开着 = 顶点被并走
+    {
+        size_t pv = PendingVertsOf (o.textures, o.targets);
+        if (o.currentTarget == 0) {
+            fprintf(stderr, "[vk] bbframe close f=%llu target=0 verts=%zu open=%d\n",
+                    (unsigned long long) g_drawFrame, pv, g_bbOpen ? 1 : 0);
+            g_bbOpen = 0;
+        } else if (g_bbOpen) {
+            fprintf(stderr, "[vk] bbframe close f=%llu target=%u verts=%zu BBOPEN=1 backbufferNotClosed\n",
+                    (unsigned long long) g_drawFrame, o.currentTarget, pv);
+        }
+    }
 
     float* dst = o.vbPtr;
     struct DrawRange { VkDescriptorSet set; size_t first; size_t count; };
     std::vector<DrawRange> ranges;
     size_t totalVerts = 0;
 
-    auto pushBatch = [&](std::vector<float>& v, VkDescriptorSet set) {
+    // 取证：按提交实际拼出的批次顺序记录源 id（贴图 1..N，离屏 1000+槽位）
+    std::vector<uint32_t> batchIds;
+    auto pushBatch = [&](std::vector<float>& v, VkDescriptorSet set, uint32_t id) {
         if (v.empty()) return;
         size_t vc = v.size() / 15;
         if (totalVerts + vc > (size_t)MAX_SPRITES * 6) return;
         memcpy(dst + totalVerts * 15, v.data(), v.size() * sizeof(float));
         ranges.push_back({set, totalVerts, vc});
         totalVerts += vc;
+        batchIds.push_back(id);
     };
-    for (auto& t : o.textures) if (t.used) pushBatch(t.verts, t.set);
-    for (auto& t : o.targets) if (t.used) pushBatch(t.verts, t.set);
+    // 实验 VK_ORDER_11FIRST=1（默认关）：3× 全屏源（贴图 11）改为最先画，
+    // 而不是按 id 升序被放到最后盖住其它所有层。用于判定“黑帧=贴图 11 全屏覆盖”。
+    static int s_11first = -1;
+    if (s_11first < 0) {
+        const char* v = getenv("VK_ORDER_11FIRST");
+        s_11first = (v && v[0] == '1') ? 1 : 0;
+    }
+    // 实验 VK_SKIP_TEX=<id[,id]>（默认关）：整批丢掉指定贴图的顶点，用于定位覆盖源
+    static const char* s_skipCfg = getenv("VK_SKIP_TEX");
+    auto skipped = [](uint32_t id) {
+        if (!s_skipCfg || !s_skipCfg[0]) return false;
+        char buf[128];
+        snprintf(buf, sizeof(buf), ",%s,", s_skipCfg);
+        char key[32];
+        snprintf(key, sizeof(key), ",%u,", id);
+        return strstr(buf, key) != nullptr;
+    };
+    if (s_11first && o.textures.size() > 10 && o.textures[10].used) {
+        pushBatch(o.textures[10].verts, o.textures[10].set, 11);
+    }
+    for (size_t i = 0; i < o.textures.size(); i++) {
+        if (s_11first && i == 10) continue;
+        if (!o.textures[i].used) continue;
+        uint32_t id = (uint32_t)(i + 1);
+        if (skipped(id)) continue;
+        pushBatch(o.textures[i].verts, o.textures[i].set, id);
+    }
+    for (size_t i = 0; i < o.targets.size(); i++) {
+        if (o.targets[i].used) pushBatch(o.targets[i].verts, o.targets[i].set, (uint32_t)(1000 + i));
+    }
+
+    // 取证：VK_TAG_PRESENT=1 时在屏幕角落画一块白色小方块，标记本次后缓冲合成
+    // 采样的是哪条链：左下 = 1001（A 周期），右下 = 1002（B 周期）。
+    // 默认关闭；只用白色贴图（GL name 8，60x15，首像素 ffffffff），不改渲染结果。
+    {
+        static int s_tag = -1;
+        if (s_tag < 0) {
+            const char* v = getenv("VK_TAG_PRESENT");
+            s_tag = (v && v[0] == '1') ? 1 : 0;
+        }
+        if (s_tag && o.currentTarget == 0 && totalVerts > 0 &&
+                (g_bbLastTex == 1001 || g_bbLastTex == 1002) &&
+                o.textures.size() >= 8 && o.textures[7].used && o.textures[7].w == 60) {
+            float W = (float)o.width, H = (float)o.height;
+            float x0 = (g_bbLastTex == 1001) ? 0.0f : (W - 30.0f);
+            float y0 = H - 15.0f;
+            std::vector<float> q;
+            PushLimeVertex(q, x0, y0, 0.0f, 0.0f);
+            PushLimeVertex(q, x0 + 30.0f, y0, 1.0f, 0.0f);
+            PushLimeVertex(q, x0 + 30.0f, H, 1.0f, 1.0f);
+            PushLimeVertex(q, x0, y0, 0.0f, 0.0f);
+            PushLimeVertex(q, x0 + 30.0f, H, 1.0f, 1.0f);
+            PushLimeVertex(q, x0, H, 0.0f, 1.0f);
+            pushBatch(q, o.textures[7].set, 8);
+        }
+    }
+
+    // present 选源：记下最后一帧真正收到顶点（vertexCount>0）的离屏目标。
+    // 只绑了 FBO、clear 过、没写几何的目标会呈现为黑纹帧，不能拿它当合成源。
+    if (totalVerts > 0 && o.currentTarget >= 1000) {
+        o.lastGeomTarget = o.currentTarget;
+    }
 
     VkFramebuffer fb = o.framebuffers[o.frameImageIndex];
     VkRenderPass rp = o.renderPass;
     VkExtent2D ext = o.extent;
+    // 实验 VK_SINGLE_PRESENT=1：一视觉帧只 present 一次（真实 swap 由 gl_fbo 置 presentReq）。
+    // 中间合成必须把图保持在 COLOR_ATTACHMENT_OPTIMAL；只有最终那次以 PRESENT_SRC 收尾。
+    bool singlePresent = (o.renderPassLoad != VK_NULL_HANDLE &&
+                          o.renderPassLoadKeep != VK_NULL_HANDLE &&
+                          o.renderPassKeep != VK_NULL_HANDLE);
+    bool willPresent = true;
+    bool finalPresent = true;   // 本次 pass 结束时图是否已转成 PRESENT_SRC
+    if (o.currentTarget == 0) {
+        if (!singlePresent) {
+            fb = o.framebuffers[o.frameImageIndex];
+            rp = o.renderPass;
+            willPresent = true;
+            finalPresent = true;
+        } else {
+            willPresent = (o.bbHeld && o.presentReq);
+            finalPresent = willPresent;
+            if (o.bbLoad) {
+                rp = willPresent ? o.renderPassLoad : o.renderPassLoadKeep;
+                fb = willPresent ? o.framebuffersLoad[o.frameImageIndex]
+                                 : o.framebuffersLoadKeep[o.frameImageIndex];
+            } else {
+                rp = willPresent ? o.renderPass : o.renderPassKeep;
+                fb = willPresent ? o.framebuffers[o.frameImageIndex]
+                                 : o.framebuffersKeep[o.frameImageIndex];
+            }
+            if (fb == VK_NULL_HANDLE || rp == VK_NULL_HANDLE) {
+                fprintf(stderr, "[vk] singlepresent pass missing (willPresent=%d load=%d)\n",
+                        willPresent ? 1 : 0, o.bbLoad ? 1 : 0);
+                o.frameOpen = false;
+                return;
+            }
+        }
+    }
     {
         static uint64_t s_frames = 0;
         s_frames++;
+        g_drawFrame = s_frames;
+        // 每次提交一条不门控的 summary（含离屏目标），用于把黑帧对齐到具体提交：
+        // delsample = 距该目标上次真正写入的帧数（-1 = 从未写过）
+        static uint64_t s_submitLog = 0;
+        if (s_submitLog < 30000) {
+            long long delsample = -1;
+            uint64_t created = 0;
+            if (o.currentTarget >= 1000) {
+                uint32_t ti = o.currentTarget - 1000;
+                if (ti < o.targets.size() && o.targets[ti].used) {
+                    created = o.targets[ti].createdFrame;
+                    if (o.targets[ti].lastWriteFrame != 0) {
+                        delsample = (long long)(s_frames - o.targets[ti].lastWriteFrame);
+                    }
+                    if (totalVerts > 0) o.targets[ti].lastWriteFrame = s_frames;
+                }
+            }
+            char srcs[256] = {0};
+            {
+                size_t n = (batchIds.size() < 16) ? batchIds.size() : 16;
+                size_t pos = 0;
+                for (size_t i = 0; i < n && pos + 12 < sizeof(srcs); i++) {
+                    pos += (size_t)snprintf(srcs + pos, sizeof(srcs) - pos, "%s%u", i ? "," : "", batchIds[i]);
+                }
+                if (batchIds.size() > 16 && pos + 4 < sizeof(srcs)) snprintf(srcs + pos, sizeof(srcs) - pos, "+%zu", batchIds.size() - 16);
+            }
+            fprintf(stderr, "[vk] submit frame=%llu t=%lld tgt=%u verts=%zu ranges=%zu delsample=%lld created=%llu tex=%u srcs=%s\n",
+                    (unsigned long long)s_frames, (long long)time(nullptr), o.currentTarget,
+                    totalVerts, ranges.size(), delsample, (unsigned long long)created,
+                    (o.currentTarget == 0) ? g_bbLastTex : 0u, srcs);
+            s_submitLog++;
+        }
+        // 汇总（只计数，不逐条打）：tgt=0 的提交帧数/顶点/空帧，以及按 program 的累计绘制
+        {
+            static uint64_t s_t0 = 0, s_t0v = 0, s_t0empty = 0, s_t104 = 0, s_t105 = 0, s_osum = 0;
+            if (o.currentTarget == 0) {
+                s_t0++;
+                s_t0v += totalVerts;
+                if (totalVerts == 0) s_t0empty++;
+            } else if (o.currentTarget == 1004) {
+                s_t104++;
+            } else if (o.currentTarget == 1005) {
+                s_t105++;
+            }
+            s_osum++;
+            if (s_osum % 60 == 0) {
+                fprintf(stderr,
+                        "[vksum] f=%llu t0=%llu t0verts=%llu t0empty=%llu t1004=%llu t1005=%llu draws=%llu"
+                        " p1=%llu p2=%llu p3=%llu p4=%llu p5=%llu p6=%llu p7=%llu w1=%llu w5=%llu w6=%llu bbopen=%d\n",
+                        (unsigned long long) s_frames, (unsigned long long) s_t0, (unsigned long long) s_t0v,
+                        (unsigned long long) s_t0empty, (unsigned long long) s_t104, (unsigned long long) s_t105,
+                        (unsigned long long) g_progDrawTotal,
+                        (unsigned long long) g_progDraw[1], (unsigned long long) g_progDraw[2],
+                        (unsigned long long) g_progDraw[3], (unsigned long long) g_progDraw[4],
+                        (unsigned long long) g_progDraw[5], (unsigned long long) g_progDraw[6],
+                        (unsigned long long) g_progDraw[7],
+                        (unsigned long long) g_progWhole[1], (unsigned long long) g_progWhole[5],
+                        (unsigned long long) g_progWhole[6], g_bbOpen);
+            }
+        }
         if (s_frames == 1 || s_frames % 30 == 0 || o.currentTarget == 0) {
             float first[4] = {0, 0, 0, 0};
             if (totalVerts > 0) memcpy(first, o.vbPtr, sizeof(first));
@@ -1410,15 +2291,100 @@ void VkRenderer::EndFrame() {
 
     g_beginRP(o.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
     if (totalVerts > 0) {
+        // 接线探针（本轮只接不选，一次）：只在 backbuffer pass、且探针管线已建成时，
+        // 先绑探针管线再立刻换回固定管线；两次绑定之间没有任何 draw，故不改变像素。
+        static int s_probeEnabled = -1;
+        static int s_probeDone = 0;
+        if (s_probeEnabled < 0) {
+            const char* e = getenv("VK_PROGPIPE_PROBE");
+            s_probeEnabled = (e && e[0] == '0') ? 0 : 1;
+        }
+        if (s_probeEnabled && !s_probeDone && rp == o.renderPass
+                && g_probePipeline != VK_NULL_HANDLE) {
+            g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_probePipeline);
+            s_probeDone = 1;
+            fprintf(stderr, "[progpipe] bind ok prog=%d pipeline=%p rp=%p\n",
+                    g_probeProgram, (void*) g_probePipeline, (void*) rp);
+        }
+        // 每个 pass 都按 GL 侧当前 viewport/scissor 动态设置（管线里不再写死）。
+        // 这两个值就是 openfl 每帧/每次绑 RT 时通过 gl.viewport / gl.scissor 发下来的。
+        VkViewport dynVp = lime::glstate::GetVulkanViewport((int)ext.height);
+        if (dynVp.width <= 0.0f || dynVp.height <= 0.0f) {
+            dynVp = {0, 0, (float)ext.width, (float)ext.height, 0, 1};
+        }
+        VkRect2D dynSc = lime::glstate::GetVulkanScissor((int)ext.width, (int)ext.height);
+        if (dynSc.extent.width == 0 || dynSc.extent.height == 0) {
+            dynSc = {{0, 0}, ext};
+        }
+        g_setViewport(o.cmd, 0, 1, &dynVp);
+        g_setScissor(o.cmd, 0, 1, &dynSc);
+        // 观测（只在变化时打）：写死的 viewport 是"画面只在左侧一块"的直接嫌疑，
+        // 这条日志给出实际提交值与 pass 尺寸，用于与截图逐帧对齐。
+        {
+            static int s_lvp[4] = {-1, -1, -1, -1};
+            static int s_lsc[4] = {-1, -1, -1, -1};
+            int cvp[4] = {(int)dynVp.x, (int)dynVp.y, (int)dynVp.width, (int)dynVp.height};
+            int csc[4] = {(int)dynSc.offset.x, (int)dynSc.offset.y,
+                          (int)dynSc.extent.width, (int)dynSc.extent.height};
+            if (memcmp(cvp, s_lvp, sizeof(cvp)) != 0 || memcmp(csc, s_lsc, sizeof(csc)) != 0) {
+                memcpy(s_lvp, cvp, sizeof(cvp));
+                memcpy(s_lsc, csc, sizeof(csc));
+                fprintf(stderr, "[vk] vpstate f=%llu tgt=%u ext=%ux%u vp=%d,%d,%d,%d sc=%d,%d,%d,%d\n",
+                        (unsigned long long)g_drawFrame, (unsigned)o.currentTarget,
+                        ext.width, ext.height, cvp[0], cvp[1], cvp[2], cvp[3],
+                        csc[0], csc[1], csc[2], csc[3]);
+            }
+        }
         g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeline);
-        VkDeviceSize off = 0;
-        g_bindVB(o.cmd, 0, 1, &o.vb, &off);
+        VkBuffer vbufs[2] = {o.vb, o.attrBuf};
+        VkDeviceSize voffs[2] = {0, 0};
+        g_bindVB(o.cmd, 0, 2, vbufs, voffs);
         for (auto& r : ranges) {
             g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeLayout, 0, 1, &r.set, 0, nullptr);
             g_cmdDraw(o.cmd, (uint32_t)r.count, 1, (uint32_t)r.first, 0);
         }
     }
     g_endRP(o.cmd);
+
+    // 取证 VK_BBSTAT=1（默认关）：present 前把后缓冲拷到主机缓冲，供亮度统计。
+    // 只在本层 target=0 且有几何时做；barrier 走 PRESENT_SRC -> TRANSFER_SRC -> PRESENT_SRC。
+    bool doStat = (o.statBuf != VK_NULL_HANDLE && o.statPtr && o.currentTarget == 0 && totalVerts > 0 &&
+                   (size_t)o.extent.width * (size_t)o.extent.height * 4 <= o.statBytes);
+    if (doStat) {
+        VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        // 本次 pass 的 finalLayout 决定当前真实布局（PRESENT_SRC 或 COLOR_ATTACHMENT_OPTIMAL）
+        VkImageLayout curLayout = finalPresent ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+                                               : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        b.oldLayout = curLayout;
+        b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = o.swapImages[o.frameImageIndex];
+        b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        b.subresourceRange.levelCount = 1;
+        b.subresourceRange.layerCount = 1;
+        b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        g_cmdBarrier(o.cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent.width = (uint32_t)o.extent.width;
+        region.imageExtent.height = (uint32_t)o.extent.height;
+        region.imageExtent.depth = 1;
+        g_cmdCopyImgToBuf(o.cmd, o.swapImages[o.frameImageIndex], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                          o.statBuf, 1, &region);
+
+        VkImageMemoryBarrier b2 = b;
+        b2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        b2.newLayout = curLayout;
+        b2.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        b2.dstAccessMask = 0;
+        g_cmdBarrier(o.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                     VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &b2);
+    }
     g_endCB(o.cmd);
 
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -1427,15 +2393,94 @@ void VkRenderer::EndFrame() {
     g_submit(o.queue, 1, &si, VK_NULL_HANDLE);
     g_waitIdle(o.queue);
 
+    if (doStat) {
+        const uint8_t* px = (const uint8_t*)o.statPtr;
+        double sum = 0;
+        size_t nb = 0, cnt = 0;
+        for (size_t yy = 0; yy < (size_t)o.extent.height; yy += 4) {
+            for (size_t xx = 0; xx < (size_t)o.extent.width; xx += 4) {
+                size_t idx = (yy * (size_t)o.extent.width + xx) * 4;
+                int v = ((int)px[idx] + (int)px[idx + 1] + (int)px[idx + 2]) / 3;
+                sum += v;
+                if (v > 24) nb++;
+                cnt++;
+            }
+        }
+        static uint64_t s_stat = 0;
+        s_stat++;
+        if (s_stat <= 20000) {
+            fprintf(stderr, "[vk] bbstat n=%llu f=%llu mean=%.2f nb=%.2f img=%u load=%d final=%d\n",
+                    (unsigned long long)s_stat, (unsigned long long)g_drawFrame,
+                    cnt ? sum / (double)cnt : 0.0, cnt ? 100.0 * (double)nb / (double)cnt : 0.0,
+                    o.frameImageIndex, o.bbLoad ? 1 : 0, finalPresent ? 1 : 0);
+        }
+        // 取证 VK_DUMP_PRESENTS=1（默认关）：落盘前 24 张交换链图 BMP，供与窗口截图比对
+        static int s_dump = -1;
+        if (s_dump < 0) {
+            const char* dv = getenv("VK_DUMP_PRESENTS");
+            s_dump = (dv && dv[0] == '1') ? 1 : 0;
+        }
+        if (s_dump) {
+            static uint64_t s_dumped = 0;
+            if (s_dumped < 24) {
+                char name[160];
+                snprintf(name, sizeof(name), "vk_pres_%02llu_f%llu_mean%.0f.bmp",
+                         (unsigned long long)s_dumped, (unsigned long long)g_drawFrame,
+                         cnt ? sum / (double)cnt : 0.0);
+                s_dumped++;
+                WriteBmpBGRA(name, px, o.extent.width, o.extent.height);
+                fprintf(stderr, "[vk] dump %s\n", name);
+            }
+        }
+    }
+
     if (o.currentTarget == 0) {
-        VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-        pi.swapchainCount = 1;
-        pi.pSwapchains = &o.swapchain;
-        pi.pImageIndices = &o.frameImageIndex;
-        g_present(o.queue, &pi);
+        // 实验 VK_SINGLE_PRESENT=1：中间合成只提交几何、保持 image 不归还；
+        // 只有真实 swap（gl_fbo 调 RequestPresent）才 present 一次。
+        if (!willPresent) {
+            static uint64_t s_nopres = 0;
+            s_nopres++;
+            if (s_nopres <= 20000) {
+                fprintf(stderr, "[vk] nopres n=%llu f=%llu tex=%u verts=%zu load=%d\n",
+                        (unsigned long long)s_nopres, (unsigned long long)g_drawFrame,
+                        g_bbLastTex, totalVerts, o.bbLoad ? 1 : 0);
+            }
+        } else {
+            // 取证：每次 present 一行（一个视觉帧通常 2 次，其中只有 ContextFlip 那次
+            // 会在 gl_fbo 里另打一条 [glvk] present），用于把黑帧对齐到交换链图。
+            static uint64_t s_pres = 0;
+            s_pres++;
+            if (s_pres <= 20000) {
+                fprintf(stderr, "[vk] pres n=%llu f=%llu img=%u tex=%u verts=%zu load=%d\n",
+                        (unsigned long long)s_pres, (unsigned long long)g_drawFrame,
+                        o.frameImageIndex, g_bbLastTex, totalVerts, o.bbLoad ? 1 : 0);
+            }
+            VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+            pi.swapchainCount = 1;
+            pi.pSwapchains = &o.swapchain;
+            pi.pImageIndices = &o.frameImageIndex;
+            VkResult pr = g_present(o.queue, &pi);
+            static uint64_t s_badPres = 0;
+            if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
+                // 交换链已过期：标记脏，下一帧开帧前重建（这是后缓冲冻结的唯一根因）
+                o.swapDirty = true;
+                fprintf(stderr, "[vk] swapchain dirty reason=present err=%d f=%llu img=%u\n",
+                        (int)pr, (unsigned long long)g_drawFrame, o.frameImageIndex);
+            }
+            if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR) {
+                s_badPres++;
+                if (s_badPres <= 2000) {
+                    fprintf(stderr, "[vk] present failed r=%d n=%llu\n", (int)pr,
+                            (unsigned long long)s_badPres);
+                }
+            }
+            o.bbHeld = false;
+            o.presentReq = false;
+        }
     }
 
     o.frameOpen = false;
+    g_bbLastTex = 0;
     for (auto& t : o.textures) t.verts.clear();
     for (auto& t : o.targets) t.verts.clear();
 }

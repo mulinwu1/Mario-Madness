@@ -233,14 +233,6 @@ void lime_gl_vertex_attribi4i (int index, int v0, int v1, int v2, int v3) {}
 void lime_gl_vertex_attribi4iv (int index, double v) {}
 void lime_gl_vertex_attribi4ui (int index, int v0, int v1, int v2, int v3) {}
 void lime_gl_vertex_attribi4uiv (int index, double v) {}
-void lime_gl_vertex_attrib1f (int index, float v0) {}
-void lime_gl_vertex_attrib1fv (int index, double v) {}
-void lime_gl_vertex_attrib2f (int index, float v0, float v1) {}
-void lime_gl_vertex_attrib2fv (int index, double v) {}
-void lime_gl_vertex_attrib3f (int index, float v0, float v1, float v2) {}
-void lime_gl_vertex_attrib3fv (int index, double v) {}
-void lime_gl_vertex_attrib4f (int index, float v0, float v1, float v2, float v3) {}
-void lime_gl_vertex_attrib4fv (int index, double v) {}
 void lime_gl_wait_sync (value sync, int flags, int timeoutA, int timeoutB) {}
 
 } // namespace lime

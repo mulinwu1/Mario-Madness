@@ -3,6 +3,26 @@ import re
 import sys
 
 LIME = os.environ.get("LIME_SRC", r"C:\lime-src")
+GLSLANG_ANDROID_DIR = os.environ.get("GLSLANG_ANDROID_DIR", "").strip().replace("\\", "/")
+
+
+def detect_platform():
+    # 平台必须显式或可推断，不能默认按 Windows 走：安卓若注入了 vk_renderer.cpp
+    # 这类含平台实现的源文件却没注入对应平台文件，会在编译期直接失败。
+    p = os.environ.get("LIME_PLATFORM", "").strip().lower()
+    if p in ("windows", "android"):
+        return p
+    if p:
+        print("ERROR: LIME_PLATFORM=%r (expected windows|android)" % p)
+        sys.exit(1)
+    if os.environ.get("ANDROID_NDK_ROOT") or os.environ.get("ANDROID_NDK_HOME"):
+        return "android"
+    return "windows" if sys.platform.startswith("win") else "android"
+
+
+PLATFORM = detect_platform()
+print("[patch_lime] platform=%s" % PLATFORM)
+
 
 CORE = [
     "lime_gl_clear", "lime_gl_clear_color", "lime_gl_viewport",
@@ -94,24 +114,48 @@ if '#include "../vulkan/gl_compat.h"' not in text:
 
 open(p, "w", encoding="utf-8").write(text)
 
-# 3) Build.xml: add vk sources, do NOT add gl_stubs.cpp (it would duplicate symbols)
+# 3) Build.xml: 按平台注入源文件；不要加 gl_stubs.cpp（会重复符号）
+COMMON_SOURCES = [
+    "vk_renderer.cpp",
+    "gl_core.cpp",
+    "gl_shader.cpp",
+    "gl_vk_contract.cpp",
+    "gl_fbo.cpp",
+    "gl_texture_params.cpp",
+    "gl_state.cpp",
+]
+PLATFORM_SOURCES = {
+    "windows": ["vk_platform_win32.cpp"],
+    "android": ["vk_platform_android.cpp"],
+}
+
+sources = COMMON_SOURCES + PLATFORM_SOURCES[PLATFORM]
+inject = "".join('\t\t<file name="src/graphics/vulkan/%s" />\n' % name for name in sources)
+
+if PLATFORM == "android":
+    # 安卓：glslang 静态链进 liblime.so（桌面的 lime_glslang.dll 分包做法不复制到这里）。
+    # GLSLANG_ANDROID_DIR 必须指向一份 arm64-v8a 的 glslang 构建（include/ + lib/）。
+    if not GLSLANG_ANDROID_DIR:
+        print("ERROR: GLSLANG_ANDROID_DIR not set (android needs static glslang include/ + lib/)")
+        sys.exit(1)
+    inject += '\t\t<compilerflag value="-I%s/include" />\n' % GLSLANG_ANDROID_DIR
+    inject += '\t\t<lib name="-L%s/lib" />\n' % GLSLANG_ANDROID_DIR
+    for lib in ("glslang", "glslang-default-resource-limits", "SPIRV-Tools", "SPIRV-Tools-opt"):
+        inject += '\t\t<lib name="-l%s" />\n' % lib
+
 b = os.path.join(LIME, "project", "Build.xml")
 xml = open(b, encoding="utf-8").read()
-inject = """		<file name="src/graphics/vulkan/vk_renderer.cpp" />
-		<file name="src/graphics/vulkan/gl_core.cpp" />
-		<file name="src/graphics/vulkan/gl_shader.cpp" />
-		<file name="src/graphics/vulkan/gl_vk_contract.cpp" />
-		<file name="src/graphics/vulkan/gl_fbo.cpp" />
-		<file name="src/graphics/vulkan/gl_texture_params.cpp" />
-		<file name="src/graphics/vulkan/gl_state.cpp" />
-"""
 anchor = '<file name="src/graphics/Image.cpp" />'
-if "vk_renderer.cpp" in xml:
-    print("build.xml already patched")
+platform_needle = PLATFORM_SOURCES[PLATFORM][0]
+if platform_needle in xml:
+    print("build.xml already patched (platform=%s)" % PLATFORM)
+elif "vk_renderer.cpp" in xml:
+    print("ERROR: build.xml already has vulkan sources but missing %s" % platform_needle)
+    sys.exit(1)
 elif anchor in xml:
     xml = xml.replace(anchor, anchor + "\n" + inject)
     open(b, "w", encoding="utf-8").write(xml)
-    print("patched Build.xml")
+    print("patched Build.xml (platform=%s, %d sources)" % (PLATFORM, len(sources)))
 else:
     print("ERROR: Build.xml anchor not found")
     sys.exit(1)
@@ -132,13 +176,19 @@ if os.path.exists(sdl):
             print("WARN: SDLWindow include anchor not found")
 
         create_anchor = "\t\tif (!sdlWindow) {"
+        # 窗口句柄获取按平台分支：Windows 取 info.win.window，安卓取 info.android.window，
+        # 统一转成 void* 交给 gl_vk_init；公共头里不出现任何平台类型。
         inject_init = (
-            "\t\t#ifdef HX_WINDOWS\n"
+            "\t\t#if defined(HX_WINDOWS) || defined(HX_ANDROID)\n"
             "\t\t{\n"
             "\t\t\tSDL_SysWMinfo wmInfo;\n"
             "\t\t\tSDL_VERSION (&wmInfo.version);\n"
             "\t\t\tif (sdlWindow && SDL_GetWindowWMInfo (sdlWindow, &wmInfo)) {\n"
-            "\t\t\t\tgl_vk_init ((void*)wmInfo.info.win.window, width, height);\n"
+            "\t\t\t\t#if defined(HX_WINDOWS)\n"
+            "\t\t\t\t\tgl_vk_init ((void*)wmInfo.info.win.window, width, height);\n"
+            "\t\t\t\t#elif defined(HX_ANDROID)\n"
+            "\t\t\t\t\tgl_vk_init ((void*)wmInfo.info.android.window, width, height);\n"
+            "\t\t\t\t#endif\n"
             "\t\t\t}\n"
             "\t\t}\n"
             "\t\t#endif\n\n"

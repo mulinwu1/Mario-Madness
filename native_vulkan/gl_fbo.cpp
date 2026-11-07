@@ -21,6 +21,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -161,10 +162,61 @@ void GetClearColor (float* c) {
     if (cs && cs->getClearColor) cs->getClearColor (c);
 }
 
+// ---------------------------------------------------------------- 实验开关
+// VK_SINGLE_COMP=1：后缓冲这一次只采样了 1001（场景层 1002 没进后缓冲）时，
+// 用 1002 全屏覆盖一次再 present。默认关闭；关闭时本文件路径与 logdiag 版一致。
+bool CompOverrideEnabled () {
+    static int s_enabled = -1;
+    if (s_enabled < 0) {
+        const char* v = getenv ("VK_SINGLE_COMP");
+        s_enabled = (v && v[0] == '1') ? 1 : 0;
+    }
+    return s_enabled != 0;
+}
+
+// 在后缓冲当前这批顶点里追加一张全屏 1002。只加几何、不 acquire、不额外 present，
+// 所以交换链 image 的“acquire -> 本帧 present 归还”周期不变。
+bool DrawSceneOverlay (VkRenderer* r) {
+    if (!r) return false;
+    if (r->BackbufferLastSample () != 1001) return false;
+
+    uint32_t src = 0;
+    int tw = 0, th = 0;
+    // 场景层在本工程里固定是 1002；不可用时退回本帧最后绑定的离屏目标
+    if (r->GetRenderTargetSize (1002, &tw, &th) && tw > 0 && th > 0) {
+        src = 1002;
+    } else if (g_lastTarget >= 1000 && g_lastTarget != 1001 &&
+               r->GetRenderTargetSize (g_lastTarget, &tw, &th) && tw > 0 && th > 0) {
+        src = g_lastTarget;
+    }
+    if (src == 0) return false;
+
+    float W = (float)r->ScreenWidth ();
+    float H = (float)r->ScreenHeight ();
+    float quad[24] = {
+        0.0f, 0.0f, 0.0f, 0.0f,
+        W,    0.0f, 1.0f, 0.0f,
+        0.0f, H,    0.0f, 1.0f,
+        0.0f, H,    0.0f, 1.0f,
+        W,    0.0f, 1.0f, 0.0f,
+        W,    H,    1.0f, 1.0f,
+    };
+    r->SetDrawColor (1.0f, nullptr, nullptr);
+    r->DrawRaw (src, quad, 6);
+    fprintf (stderr, "[glvk] comp-override f=%llu src=%u %dx%d -> %dx%d\n",
+             (unsigned long long)r->FrameIndex (), src, tw, th, (int)W, (int)H);
+    return true;
+}
+
 // 结束已经打开的帧（后缓冲会 present，离屏目标只提交）
 void CloseOpenFrame () {
     VkRenderer* r = gl_vk_get_renderer ();
     if (g_currentTarget != 0 || g_backbufferOpen) {
+        // 实验：这帧后缓冲只采样了 1001 就 present → 先补一张 1002 全屏。
+        // 开关关闭时 DrawSceneOverlay 不会被调用，行为与 logdiag 版完全一致。
+        if (r && CompOverrideEnabled () && g_currentTarget == 0) {
+            DrawSceneOverlay (r);
+        }
         if (r) r->PresentTarget ();
     }
     g_currentTarget = 0;
@@ -267,11 +319,30 @@ void BindDrawFbo (int framebuffer) {
         return;
     }
 
-    if (!FboTargetReady (framebuffer)) return;
+    if (!FboTargetReady (framebuffer)) {
+        // 取证：FBO 建不出目标时这里静默沿用上一个目标，所有绘制会画错地方
+        static int s_n = 0;
+        if (s_n < 20) {
+            int cw = 0, ch = 0;
+            AttachmentSize (g_fbos[(size_t)framebuffer].color, &cw, &ch);
+            fprintf(stderr, "[glfb] bind-fail fbo=%d color=%d %dx%d\n",
+                    framebuffer, g_fbos[(size_t)framebuffer].color.name, cw, ch);
+        }
+        s_n++;
+        return;
+    }
     float c[4];
     GetClearColor (c);
     Fbo& f = g_fbos[(size_t)framebuffer];
     if (r->BindRenderTarget (f.rtId, c[0], c[1], c[2], c[3])) {
+        {
+            static int s_n = 0;
+            if (s_n < 40 || f.width != 921 || f.height != 691) {
+                fprintf(stderr, "[glfb] bind fbo=%d -> rt=%u %dx%d\n",
+                        framebuffer, f.rtId, f.width, f.height);
+            }
+            s_n++;
+        }
         g_currentTarget = f.rtId;
         g_lastTarget = f.rtId;
     }
@@ -383,6 +454,18 @@ void lime_gl_framebuffer_texture2D (int target, int attachment, int textarget,
         default: return;
     }
     f.dirty = true;
+
+    // 诊断：谁被挂成了附件（前 30 条 + 任何大尺寸/疑似 3× 纹理）
+    if (texture != 0) {
+        int tw = 0, th = 0;
+        gl_vk_texture_size (texture, &tw, &th);
+        static int s_attach = 0;
+        if (s_attach < 30 || tw > 1200 || th > 1400) {
+            fprintf (stderr, "[glfb] attach fbo=%d att=0x%x tex=%d %dx%d lvl=%d\n",
+                     fboName, attachment, texture, tw, th, level);
+        }
+        s_attach++;
+    }
 }
 
 void lime_gl_framebuffer_renderbuffer (int target, int attachment,
@@ -615,6 +698,7 @@ void lime_gl_blit_framebuffer (int srcX0, int srcY0, int srcX1, int srcY1,
         (float)dstX1, (float)dstY0, (float)srcX1, (float)srcY0,
         (float)dstX1, (float)dstY1, (float)srcX1, (float)srcY1,
     };
+    r->SetDrawColor (1.0f, nullptr, nullptr);
     r->DrawRaw (srcTex, quad, 6);
 }
 
@@ -636,8 +720,19 @@ bool gl_vk_handle_clear () {
         return true;
     }
     if (!g_backbufferOpen) {
-        r->BindRenderTarget (0, c[0], c[1], c[2], c[3]);
-        g_backbufferOpen = true;
+        bool ok = r->BindRenderTarget (0, c[0], c[1], c[2], c[3]);
+        // 只有渲染器侧真的开帧成功才置真。原来无条件置 true，
+        // 交换链过期/acquire 失败会被这一行掩盖成"后缓冲是开着的"。
+        if (ok) {
+            g_backbufferOpen = true;
+        } else {
+            static uint64_t s_bad = 0;
+            s_bad++;
+            if (s_bad <= 2000) {
+                fprintf (stderr, "[glvk] bbopen ok=0 f=%llu\n",
+                         (unsigned long long)r->FrameIndex ());
+            }
+        }
     }
     // 后缓冲帧已经打开：清屏色在打开时已取，EndFrame 时才真正使用
     return true;
@@ -646,17 +741,24 @@ bool gl_vk_handle_clear () {
 void gl_vk_present_frame () {
     VkRenderer* r = gl_vk_get_renderer ();
     if (r) {
-        fprintf (stderr, "[glvk] present cur=%u last=%u pending=%d\n",
+        fprintf (stderr, "[glvk] present f=%llu cur=%u last=%u pending=%d\n",
+                 (unsigned long long)r->FrameIndex (),
                  g_currentTarget, g_lastTarget, (int)r->FrameHasGeometry ());
-        // 关键：OpenFL 的整帧常常停在最后一个离屏目标上，如果直接 EndFrame，
-        // 渲染结果只留在 FBO 里，后缓冲从来没被画过 → 屏幕只有清屏色（黑屏）。
-        // 所以提交前先把最后一张离屏图铺满后缓冲。
+        // 合成顺序日志：本视觉帧每次 present 实际铺了哪张离屏图（0 = 没合成，lime 已直接画后缓冲）
+        uint32_t composed = 0;
         if (g_currentTarget >= 1000) {
-            uint32_t src = g_currentTarget;
             float c[4];
             GetClearColor (c);
-            int tw = 0, th = 0;
+            // 先开后缓冲：这一步会把当前离屏目标里尚未提交的几何落地，
+            // EndFrame 里同时记下"本帧最后一个真正收到顶点的离屏目标"。
             bool bound = r->BindRenderTarget (0, c[0], c[1], c[2], c[3]);
+            // 源优先取真正写过几何的目标；只 clear 过、没写几何的目标会呈黑纹帧。
+            uint32_t src = r->LastGeometryTarget ();
+            if (src < 1000) {
+                src = g_currentTarget;
+                fprintf (stderr, "[glvk] blit fallback cur=%u -> src=%u\n", g_currentTarget, src);
+            }
+            int tw = 0, th = 0;
             if (bound && r->GetRenderTargetSize (src, &tw, &th) && tw > 0 && th > 0) {
                 float W = (float)r->ScreenWidth ();
                 float H = (float)r->ScreenHeight ();
@@ -668,15 +770,23 @@ void gl_vk_present_frame () {
                     W,    0.0f, (float)tw, 0.0f,
                     W,    H,    (float)tw, (float)th,
                 };
+                r->SetDrawColor (1.0f, nullptr, nullptr);
                 r->DrawRaw (src, quad, 6);
+                composed = src;
                 g_backbufferOpen = true;
-                fprintf (stderr, "[glvk] blit cur src=%u %dx%d -> %dx%d\n",
-                         src, tw, th, (int)W, (int)H);
+                fprintf (stderr, "[glvk] blit cur=%u src=%u %dx%d -> %dx%d\n",
+                         g_currentTarget, src, tw, th, (int)W, (int)H);
             }
         } else if (g_lastTarget >= 1000 && !r->FrameHasGeometry ()) {
             // 已经绑回后缓冲但这一帧没往它上面画任何东西：把最后一张离屏图补上，
             // 否则屏幕只剩清屏色（这就是长时间黑屏的直接原因）
-            uint32_t src = g_lastTarget;
+            // 同一缺陷在这一支同样存在：g_lastTarget 只表示"最后绑定过"，与几何无关。
+            uint32_t src = r->LastGeometryTarget ();
+            if (src < 1000) {
+                src = g_lastTarget;
+                fprintf (stderr, "[glvk] blit fallback cur=0 last=%u -> src=%u\n",
+                         g_lastTarget, src);
+            }
             float c[4];
             GetClearColor (c);
             int tw = 0, th = 0;
@@ -691,13 +801,30 @@ void gl_vk_present_frame () {
                     W,    0.0f, (float)tw, 0.0f,
                     W,    H,    (float)tw, (float)th,
                 };
+                r->SetDrawColor (1.0f, nullptr, nullptr);
                 r->DrawRaw (src, quad, 6);
+                composed = src;
                 g_backbufferOpen = true;
                 fprintf (stderr, "[glvk] blit last src=%u %dx%d -> %dx%d\n",
                          src, tw, th, (int)W, (int)H);
             }
         }
+        // 实验：本次 present 的后缓冲只采样了 1001（场景层 1002 没进后缓冲）→
+        // 先补一张 1002 全屏再提交。只追加几何，present 次数与顺序都不变。
+        // 开关关闭时不进入，行为与 logdiag 版完全一致。
+        if (CompOverrideEnabled () && g_currentTarget == 0) {
+            if (DrawSceneOverlay (r)) composed = 1002;
+        }
+        static uint64_t s_compLog = 0;
+        if (s_compLog < 20000) {
+            fprintf (stderr, "[glvk] comp f=%llu order=%u cur=%u\n",
+                     (unsigned long long)r->FrameIndex (), composed, g_currentTarget);
+            s_compLog++;
+        }
+        r->RequestPresent ();
         r->EndFrame ();
+        // 本帧结束即失效：下一帧必须由新的提交重新标记，避免取到上一帧的目标
+        r->ResetLastGeometryTarget ();
     }
     g_currentTarget = 0;
     g_lastTarget = 0;
