@@ -1484,6 +1484,32 @@ void VkRenderer::EndFrame() {
         if (o.targets[i].used) pushBatch(o.targets[i].verts, o.targets[i].set, (uint32_t)(1000 + i));
     }
 
+    // 取证：VK_TAG_PRESENT=1 时在屏幕角落画一块白色小方块，标记本次后缓冲合成
+    // 采样的是哪条链：左下 = 1001（A 周期），右下 = 1002（B 周期）。
+    // 默认关闭；只用白色贴图（GL name 8，60x15，首像素 ffffffff），不改渲染结果。
+    {
+        static int s_tag = -1;
+        if (s_tag < 0) {
+            const char* v = getenv("VK_TAG_PRESENT");
+            s_tag = (v && v[0] == '1') ? 1 : 0;
+        }
+        if (s_tag && o.currentTarget == 0 && totalVerts > 0 &&
+                (g_bbLastTex == 1001 || g_bbLastTex == 1002) &&
+                o.textures.size() >= 8 && o.textures[7].used && o.textures[7].w == 60) {
+            float W = (float)o.width, H = (float)o.height;
+            float x0 = (g_bbLastTex == 1001) ? 0.0f : (W - 30.0f);
+            float y0 = H - 15.0f;
+            std::vector<float> q;
+            PushLimeVertex(q, x0, y0, 0.0f, 0.0f);
+            PushLimeVertex(q, x0 + 30.0f, y0, 1.0f, 0.0f);
+            PushLimeVertex(q, x0 + 30.0f, H, 1.0f, 1.0f);
+            PushLimeVertex(q, x0, y0, 0.0f, 0.0f);
+            PushLimeVertex(q, x0 + 30.0f, H, 1.0f, 1.0f);
+            PushLimeVertex(q, x0, H, 0.0f, 1.0f);
+            pushBatch(q, o.textures[7].set, 8);
+        }
+    }
+
     // present 选源：记下最后一帧真正收到顶点（vertexCount>0）的离屏目标。
     // 只绑了 FBO、clear 过、没写几何的目标会呈现为黑纹帧，不能拿它当合成源。
     if (totalVerts > 0 && o.currentTarget >= 1000) {
@@ -1608,6 +1634,15 @@ void VkRenderer::EndFrame() {
     g_waitIdle(o.queue);
 
     if (o.currentTarget == 0) {
+        // 取证：每次 present 一行（一个视觉帧通常 2 次，其中只有 ContextFlip 那次
+        // 会在 gl_fbo 里另打一条 [glvk] present），用于把黑帧对齐到交换链图。
+        static uint64_t s_pres = 0;
+        s_pres++;
+        if (s_pres <= 20000) {
+            fprintf(stderr, "[vk] pres n=%llu f=%llu img=%u tex=%u verts=%zu\n",
+                    (unsigned long long)s_pres, (unsigned long long)g_drawFrame,
+                    o.frameImageIndex, g_bbLastTex, totalVerts);
+        }
         VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
         pi.swapchainCount = 1;
         pi.pSwapchains = &o.swapchain;
