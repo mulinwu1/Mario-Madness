@@ -318,11 +318,30 @@ void BindDrawFbo (int framebuffer) {
         return;
     }
 
-    if (!FboTargetReady (framebuffer)) return;
+    if (!FboTargetReady (framebuffer)) {
+        // 取证：FBO 建不出目标时这里静默沿用上一个目标，所有绘制会画错地方
+        static int s_n = 0;
+        if (s_n < 20) {
+            int cw = 0, ch = 0;
+            AttachmentSize (g_fbos[(size_t)framebuffer].color, &cw, &ch);
+            fprintf(stderr, "[glfb] bind-fail fbo=%d color=%d %dx%d\n",
+                    framebuffer, g_fbos[(size_t)framebuffer].color.name, cw, ch);
+        }
+        s_n++;
+        return;
+    }
     float c[4];
     GetClearColor (c);
     Fbo& f = g_fbos[(size_t)framebuffer];
     if (r->BindRenderTarget (f.rtId, c[0], c[1], c[2], c[3])) {
+        {
+            static int s_n = 0;
+            if (s_n < 40) {
+                fprintf(stderr, "[glfb] bind fbo=%d -> rt=%u %dx%d\n",
+                        framebuffer, f.rtId, f.width, f.height);
+            }
+            s_n++;
+        }
         g_currentTarget = f.rtId;
         g_lastTarget = f.rtId;
     }
