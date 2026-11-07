@@ -301,7 +301,19 @@ void lime_gl_tex_image_2d(int target, int level, int internalformat, int width, 
     }
 
     if (!g_renderer) return;
-    if (g_texVk[texName]) g_renderer->DestroyTexture(g_texVk[texName]);
+    if (g_texVk[texName]) {
+        // 取证：同名纹理被再次 texImage2D（等于销毁重建）。若大纹理每帧走这条路，
+        // 说明内容来自 CPU 上传，且可以据此判断它是不是黑帧的来源。
+        static int s_n = 0;
+        if (s_n < 8) {
+            fprintf(stderr, "[gltex] re-create n=%d name=%d %dx%d px=%02x%02x%02x%02x\n",
+                    s_n + 1, texName, width, height,
+                    rgba.empty() ? 0 : rgba[0], rgba.empty() ? 0 : rgba[1],
+                    rgba.empty() ? 0 : rgba[2], rgba.size() < 4 ? 0 : rgba[3]);
+        }
+        s_n++;
+        g_renderer->DestroyTexture(g_texVk[texName]);
+    }
     g_texVk[texName] = g_renderer->CreateTexture(width, height, rgba.data());
 }
 

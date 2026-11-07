@@ -1447,16 +1447,23 @@ void VkRenderer::EndFrame() {
     std::vector<DrawRange> ranges;
     size_t totalVerts = 0;
 
-    auto pushBatch = [&](std::vector<float>& v, VkDescriptorSet set) {
+    // 取证：按提交实际拼出的批次顺序记录源 id（贴图 1..N，离屏 1000+槽位）
+    std::vector<uint32_t> batchIds;
+    auto pushBatch = [&](std::vector<float>& v, VkDescriptorSet set, uint32_t id) {
         if (v.empty()) return;
         size_t vc = v.size() / 15;
         if (totalVerts + vc > (size_t)MAX_SPRITES * 6) return;
         memcpy(dst + totalVerts * 15, v.data(), v.size() * sizeof(float));
         ranges.push_back({set, totalVerts, vc});
         totalVerts += vc;
+        batchIds.push_back(id);
     };
-    for (auto& t : o.textures) if (t.used) pushBatch(t.verts, t.set);
-    for (auto& t : o.targets) if (t.used) pushBatch(t.verts, t.set);
+    for (size_t i = 0; i < o.textures.size(); i++) {
+        if (o.textures[i].used) pushBatch(o.textures[i].verts, o.textures[i].set, (uint32_t)(i + 1));
+    }
+    for (size_t i = 0; i < o.targets.size(); i++) {
+        if (o.targets[i].used) pushBatch(o.targets[i].verts, o.targets[i].set, (uint32_t)(1000 + i));
+    }
 
     // present 选源：记下最后一帧真正收到顶点（vertexCount>0）的离屏目标。
     // 只绑了 FBO、clear 过、没写几何的目标会呈现为黑纹帧，不能拿它当合成源。
@@ -1487,10 +1494,19 @@ void VkRenderer::EndFrame() {
                     if (totalVerts > 0) o.targets[ti].lastWriteFrame = s_frames;
                 }
             }
-            fprintf(stderr, "[vk] submit frame=%llu t=%lld tgt=%u verts=%zu ranges=%zu delsample=%lld created=%llu tex=%u\n",
+            char srcs[256] = {0};
+            {
+                size_t n = (batchIds.size() < 16) ? batchIds.size() : 16;
+                size_t pos = 0;
+                for (size_t i = 0; i < n && pos + 12 < sizeof(srcs); i++) {
+                    pos += (size_t)snprintf(srcs + pos, sizeof(srcs) - pos, "%s%u", i ? "," : "", batchIds[i]);
+                }
+                if (batchIds.size() > 16 && pos + 4 < sizeof(srcs)) snprintf(srcs + pos, sizeof(srcs) - pos, "+%zu", batchIds.size() - 16);
+            }
+            fprintf(stderr, "[vk] submit frame=%llu t=%lld tgt=%u verts=%zu ranges=%zu delsample=%lld created=%llu tex=%u srcs=%s\n",
                     (unsigned long long)s_frames, (long long)time(nullptr), o.currentTarget,
                     totalVerts, ranges.size(), delsample, (unsigned long long)created,
-                    (o.currentTarget == 0) ? g_bbLastTex : 0u);
+                    (o.currentTarget == 0) ? g_bbLastTex : 0u, srcs);
             s_submitLog++;
         }
         if (s_frames == 1 || s_frames % 30 == 0 || o.currentTarget == 0) {
