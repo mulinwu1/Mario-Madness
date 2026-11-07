@@ -48,6 +48,11 @@ public:
     // raw vertex submission (GL-style): verts are x,y,u,v float4 per vertex
     void DrawRaw(uint32_t texId, const float* verts, int vertexCount);
 
+    // 设置本次绘制的常量顶点属性（GL glVertexAttrib1f/4f 的语义）：
+    // alpha 对应 loc1 openfl_Alpha，mult 对应 loc2 colorMultiplier，offset 对应 loc3 colorOffset。
+    // 传 NULL 恢复默认（mult=1,1,1,1，offset=0）。
+    bool SetDrawColor(float alpha, const float* mult, const float* offset);
+
     // ---- GL 翻译层需要的能力（gl_vk_contract.h 里的 GlVkRendererExt）----
     // per-texture sampler：texParameteri 真正生效的必要条件
     bool SetTextureSampler(uint32_t texId, int minFilter, int magFilter,

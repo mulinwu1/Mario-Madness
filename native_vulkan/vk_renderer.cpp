@@ -177,14 +177,22 @@ static uint32_t FindMemType(const VkPhysicalDeviceMemoryProperties& mp, uint32_t
 
 // 内嵌着色器的顶点格式：loc0=Position(vec4) loc1=Alpha loc2=ColorMultiplier(vec4)
 // loc3=ColorOffset(vec4) loc4=TexCoord(vec2)，共 15 个 float
+// 每个绘制可带一组“常量顶点属性”（GL 的 glVertexAttrib1f/4f），对应 openfl 的
+// per-draw alpha / colorMultiplier / colorOffset；默认 (alpha=1, mult=1, off=0)。
+static float g_drawAlpha = 1.0f;
+static float g_drawMult[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+static float g_drawOff[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
 static void PushLimeVertex(std::vector<float>& out, float x, float y, float u, float v) {
     out.push_back(x);
     out.push_back(y);
     out.push_back(0.0f);
     out.push_back(1.0f);
-    out.push_back(1.0f);                                   // alpha
-    out.push_back(1.0f); out.push_back(1.0f); out.push_back(1.0f); out.push_back(1.0f); // colorMultiplier
-    out.push_back(0.0f); out.push_back(0.0f); out.push_back(0.0f); out.push_back(0.0f); // colorOffset
+    out.push_back(g_drawAlpha);                            // alpha
+    out.push_back(g_drawMult[0]); out.push_back(g_drawMult[1]);
+    out.push_back(g_drawMult[2]); out.push_back(g_drawMult[3]); // colorMultiplier
+    out.push_back(g_drawOff[0]); out.push_back(g_drawOff[1]);
+    out.push_back(g_drawOff[2]); out.push_back(g_drawOff[3]);   // colorOffset
     out.push_back(u);
     out.push_back(v);
 }
@@ -1028,6 +1036,15 @@ static VkSamplerAddressMode GlWrapToVk(int wrap) {
         case 0x8370: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;  // GL_MIRRORED_REPEAT
         default:     return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;    // CLAMP_TO_EDGE / 其余
     }
+}
+
+bool VkRenderer::SetDrawColor(float alpha, const float* mult, const float* offset) {
+    g_drawAlpha = alpha;
+    for (int i = 0; i < 4; i++) {
+        g_drawMult[i] = mult ? mult[i] : 1.0f;
+        g_drawOff[i] = offset ? offset[i] : 0.0f;
+    }
+    return true;
 }
 
 bool VkRenderer::SetTextureSampler(uint32_t texId, int minFilter, int magFilter,

@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 
 namespace lime {
 
@@ -341,6 +342,31 @@ struct AttribState {
 };
 static AttribState g_attrs[16];
 
+// 常量顶点属性：OpenFL/Flixel 把每个 sprite 的 alpha / colorMultiplier / colorOffset
+// 通过 glVertexAttrib1f/4f 写进 loc5/6/7（顶点缓冲里只有 loc0/4 的数组数据）。
+// 之前这里是空实现，per-draw alpha 全部丢失，导致本该 alpha=0.05 的黑幕被画成不透明全屏。
+static float g_attrConst[16][4] = {{0}};
+static int g_attrConstN[16] = {0};   // 已写入的分量数
+static bool g_attrConstSet[16] = {false};
+
+static void ApplyConstAttrs() {
+    static int s_en = -1;
+    if (s_en < 0) {
+        const char* e = getenv("VK_CONST_ATTR");
+        s_en = (e && e[0] == '0') ? 0 : 1; // 默认开；VK_CONST_ATTR=0 为对照
+    }
+    if (!s_en || g_renderer == nullptr) return;
+    // prog3: openfl_Alphav = openfl_Alpha(loc1) * alpha(loc5)
+    float a1 = g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f;
+    float a5 = g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f;
+    // loc6/7 是逐对象的 color transform；没设置时退回顶点常量 loc2/3
+    const float* mult = g_attrConstSet[6] ? g_attrConst[6]
+                        : (g_attrConstSet[2] ? g_attrConst[2] : nullptr);
+    const float* off = g_attrConstSet[7] ? g_attrConst[7]
+                       : (g_attrConstSet[3] ? g_attrConst[3] : nullptr);
+    g_renderer->SetDrawColor(a1 * a5, mult, off);
+}
+
 int lime_gl_create_buffer() {
     int name = g_nextBufferName++;
     if (g_buffers.size() < (size_t)name + 1) g_buffers.resize((size_t)name + 1);
@@ -432,6 +458,67 @@ void lime_gl_disable_vertex_attrib_array(int index) {
     if (index >= 0 && index < 16) g_attrs[index].enabled = false;
 }
 
+// ---------- 常量顶点属性（GL glVertexAttrib*f 的语义） ----------
+static void SetConstAttr(int index, int n, float v0, float v1, float v2, float v3) {
+    if (index < 0 || index >= 16) return;
+    g_attrConst[index][0] = v0;
+    g_attrConst[index][1] = v1;
+    g_attrConst[index][2] = v2;
+    g_attrConst[index][3] = v3;
+    g_attrConstN[index] = n;
+    g_attrConstSet[index] = true;
+}
+
+void lime_gl_vertex_attrib1f(int index, float v0) {
+    SetConstAttr(index, 1, v0, 0.0f, 0.0f, 1.0f);
+    if (index == 5 || index == 1) {
+        static int s_log = 0;
+        if (s_log < 40 || s_log % 1000 == 0) {
+            fprintf(stderr, "[attrc] idx=%d v=%.3f\n", index, v0);
+        }
+        s_log++;
+    }
+}
+
+void lime_gl_vertex_attrib1fv(int index, double v) {
+    const float* p = (const float*)(uintptr_t)v;
+    SetConstAttr(index, 1, p ? p[0] : 0.0f, 0.0f, 0.0f, 1.0f);
+}
+
+void lime_gl_vertex_attrib2f(int index, float v0, float v1) {
+    SetConstAttr(index, 2, v0, v1, 0.0f, 1.0f);
+}
+
+void lime_gl_vertex_attrib2fv(int index, double v) {
+    const float* p = (const float*)(uintptr_t)v;
+    SetConstAttr(index, 2, p ? p[0] : 0.0f, p ? p[1] : 0.0f, 0.0f, 1.0f);
+}
+
+void lime_gl_vertex_attrib3f(int index, float v0, float v1, float v2) {
+    SetConstAttr(index, 3, v0, v1, v2, 1.0f);
+}
+
+void lime_gl_vertex_attrib3fv(int index, double v) {
+    const float* p = (const float*)(uintptr_t)v;
+    SetConstAttr(index, 3, p ? p[0] : 0.0f, p ? p[1] : 0.0f, p ? p[2] : 0.0f, 1.0f);
+}
+
+void lime_gl_vertex_attrib4f(int index, float v0, float v1, float v2, float v3) {
+    SetConstAttr(index, 4, v0, v1, v2, v3);
+    if (index == 6 || index == 7) {
+        static int s_log = 0;
+        if (s_log < 30 || s_log % 1000 == 0) {
+            fprintf(stderr, "[attrc] idx=%d v=%.3f,%.3f,%.3f,%.3f\n", index, v0, v1, v2, v3);
+        }
+        s_log++;
+    }
+}
+
+void lime_gl_vertex_attrib4fv(int index, double v) {
+    const float* p = (const float*)(uintptr_t)v;
+    SetConstAttr(index, 4, p ? p[0] : 0.0f, p ? p[1] : 0.0f, p ? p[2] : 0.0f, p ? p[3] : 0.0f);
+}
+
 void lime_gl_draw_arrays(int mode, int first, int count) {
     if (!g_renderer || count <= 0) return;
     // lime/OpenFL 的属性槽位：loc0=Position，loc4=TexCoord（不是 loc1）。
@@ -519,6 +606,7 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
         }
         s_uvdbg++;
     }
+    ApplyConstAttrs();
     g_renderer->DrawRaw(vkTex, out.data(), count);
 }
 
@@ -606,12 +694,14 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
                 if (y < minY) minY = y; if (y > maxY) maxY = y;
             }
             int tw = 0, th = 0; gl_vk_texture_size (texName, &tw, &th);
-            fprintf (stderr, "[gldraw/ie] tex=%d size=%dx%d n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] pStride=%d pOff=%.0f uvBuf=%d uvStride=%d uvOff=%.0f pBufRaw=%d uBufRaw=%d posCli=%d uvCli=%d prog=%d blend=%d,%d,%d\n",
+            fprintf (stderr, "[gldraw/ie] tex=%d size=%dx%d n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] pStride=%d pOff=%.0f uvBuf=%d uvStride=%d uvOff=%.0f pBufRaw=%d uBufRaw=%d posCli=%d uvCli=%d prog=%d blend=%d,%d,%d a1=%.2f a5=%.2f\n",
                      texName, tw, th, count, minU, maxU, minV, maxV,
                      minX, maxX, minY, maxY, strideP, g_attrs[0].offset,
                      uvBuf, strideU, g_attrs[uvIdx].offset,
                      g_attrs[0].buffer, g_attrs[uvIdx].buffer, posClient ? 1 : 0, uvClient ? 1 : 0,
-                     gl_shader_current_program (), g_blendEnabled ? 1 : 0, g_blendSrc, g_blendDst);
+                     gl_shader_current_program (), g_blendEnabled ? 1 : 0, g_blendSrc, g_blendDst,
+                     g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f,
+                     g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f);
             static int s_raw2 = 0;
             if (s_raw2 < 6 && !posClient && pBytes >= pBase0 + 32) {
                 const float* f = (const float*)(pp + pBase0);
@@ -622,6 +712,7 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
         }
         s_uvdbg2++;
     }
+    ApplyConstAttrs();
     g_renderer->DrawRaw(vkTex, out.data(), count);
 }
 
