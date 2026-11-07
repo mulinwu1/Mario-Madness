@@ -17,6 +17,7 @@
 
 #include "gl_vk_bridge.h"   // 内含 gl_compat.h
 #include "gl_vk_contract.h"
+#include "gl_packet.h"
 #include "vk_renderer.h"
 
 #include <cstdint>
@@ -212,12 +213,18 @@ bool DrawSceneOverlay (VkRenderer* r) {
 void CloseOpenFrame () {
     VkRenderer* r = gl_vk_get_renderer ();
     if (g_currentTarget != 0 || g_backbufferOpen) {
-        // 实验：这帧后缓冲只采样了 1001 就 present → 先补一张 1002 全屏。
-        // 开关关闭时 DrawSceneOverlay 不会被调用，行为与 logdiag 版完全一致。
-        if (r && CompOverrideEnabled () && g_currentTarget == 0) {
-            DrawSceneOverlay (r);
+        if (r && pkt::ExecActive ()) {
+            // packet 执行路径：命令已经在 packet 侧按顺序立即录制，这里只把 pass 收尾
+            // （离屏只提交，后缓冲等真实 flip 时由 gl_vk_present_frame present）
+            r->PktEndTarget ();
+        } else {
+            // 实验：这帧后缓冲只采样了 1001 就 present → 先补一张 1002 全屏。
+            // 开关关闭时 DrawSceneOverlay 不会被调用，行为与 logdiag 版完全一致。
+            if (r && CompOverrideEnabled () && g_currentTarget == 0) {
+                DrawSceneOverlay (r);
+            }
+            if (r) r->PresentTarget ();
         }
-        if (r) r->PresentTarget ();
     }
     g_currentTarget = 0;
     g_backbufferOpen = false;
@@ -748,6 +755,30 @@ bool gl_vk_handle_clear () {
 void gl_vk_present_frame () {
     VkRenderer* r = gl_vk_get_renderer ();
     if (r) {
+        if (pkt::ExecActive ()) {
+            // packet 执行路径：命令已经按 packet 顺序立即录进命令缓冲，这里只做收尾：
+            // 如果停在离屏目标，先绑回后缓冲并补一张合成（走 packet 路径，不进批处理），
+            // 然后 MarkPresent + 关 pass 提交并 flip。
+            if (g_currentTarget >= 1000) {
+                float c[4];
+                GetClearColor (c);
+                if (r->BindRenderTarget (0, c[0], c[1], c[2], c[3])) {
+                    uint32_t src = r->LastGeometryTarget ();
+                    if (src < 1000) src = g_currentTarget;
+                    if (src >= 1000) r->PktComposite (src);
+                    g_backbufferOpen = true;
+                }
+            }
+            // 只有真的有 pass 开着才 mark-present，避免 presentReq 跨帧残留导致中途误 flip
+            if (r->PktTargetOpen ()) r->RequestPresent ();
+            r->PktEndTarget ();
+            r->ResetLastGeometryTarget ();
+            g_currentTarget = 0;
+            g_lastTarget = 0;
+            g_backbufferOpen = false;
+            g_boundDrawFbo = 0;
+            return;
+        }
         fprintf (stderr, "[glvk] present f=%llu cur=%u last=%u pending=%d\n",
                  (unsigned long long)r->FrameIndex (),
                  g_currentTarget, g_lastTarget, (int)r->FrameHasGeometry ());

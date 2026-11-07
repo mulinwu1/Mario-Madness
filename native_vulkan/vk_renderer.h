@@ -10,6 +10,31 @@
 // Capabilities proven: swapchain, DEVICE_LOCAL textures via staging,
 // N-sprite batching, per-texture descriptor sets, UBO, GLSL->SPIR-V shaders.
 
+// packet 执行路径（VK_PKT_EXEC=1）用的状态位。第一版这些位只记录、不选管线变体，
+// 但接口先留位：后续按状态选变体只需要在 PktDraw 里分支，不必改调用方。
+struct PktPipelineState {
+    uint8_t blendEnabled;
+    uint8_t depthTest;
+    uint8_t depthWrite;
+    uint8_t stencilTest;
+    uint8_t cullMode;      // 0=none 1=back 2=front 3=both
+    uint8_t frontFace;     // 0=CCW 1=CW
+    uint8_t scissorTest;
+    uint8_t colorMask;
+};
+
+// 一笔 draw 的完整描述。顶点布局与批处理路径完全相同（15 floats/顶点：
+// pos4, 逐顶点 alpha, colorMultiplier4, colorOffset4, uv2），所以能直接复用
+// 同一条管线与同一份 UBO 投影。
+struct PktDrawDesc {
+    uint32_t texId;          // VkRenderer 纹理 id（>=1000 为离屏目标）
+    const float* verts;      // vertexCount * 15 floats
+    int vertexCount;
+    const uint16_t* indices; // NULL = 非索引；否则 16 位索引（顶点相对本笔起点从 0 开始）
+    int indexCount;
+    PktPipelineState state;
+};
+
 class VkRenderer {
 public:
     VkRenderer();
@@ -79,6 +104,20 @@ public:
     // 标记"下一个后缓冲提交是真实 flip"：只在真正的 swap 路径调用
     void RequestPresent();
 
+    // ---- packet 执行路径（只给 VK_PKT_EXEC=1 用；与批处理路径互斥）----
+    // 进目标：开 render pass、绑 framebuffer、按当前 viewport/scissor 下发。
+    // 在 BindRenderTarget 的时机被调用（不是帧末）；同一目标重复调用只更新清屏色。
+    bool PktBeginTarget(uint32_t targetId, float r, float g, float b, float a);
+    // 一笔 draw：绑管线 -> 绑 descriptor（按纹理槽）-> 绑顶点/索引 -> vkCmdDraw*，
+    // 命令立刻写进当前命令缓冲（不是每笔一次 vkQueueSubmit）。
+    bool PktDraw(const PktDrawDesc& desc);
+    // 出目标：关 pass、结束命令缓冲并提交一次；target=0 且请求了真实 flip 时 present。
+    void PktEndTarget();
+    // 当前是否有一个 packet pass 打开
+    bool PktTargetOpen() const;
+    // 用 packet 路径把离屏目标整幅合成到当前（后缓冲）pass
+    bool PktComposite(uint32_t srcTargetId);
+
     const char* LastError() const;
 
 private:
@@ -88,4 +127,7 @@ private:
     bool RecreateSwapchain();
     // 真正上传的实现；CreateTexture 负责大图降级后再转调它
     uint32_t CreateTextureOnce(int w, int h, const unsigned char* rgba);
+    // packet 路径的动态顶点/索引缓冲（首次使用时懒创建）
+    bool PktEnsureBuffers();
 };
+

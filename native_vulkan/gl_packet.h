@@ -42,6 +42,9 @@ uint32_t SnapshotTexVk (int glName);
 // GL buffer 内容（只读）。name 无效或为空时返回 false。
 bool SnapshotBuffer (int name, const uint8_t** data, uint32_t* bytes);
 
+// 执行路径是否在工作（VK_PKT_EXEC=1）。GL 侧据此跳过对应绘制，避免同一笔画两遍。
+bool ExecActive ();
+
 } // namespace pkt
 } // namespace lime
 

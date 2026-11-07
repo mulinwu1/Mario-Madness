@@ -1,6 +1,7 @@
 ﻿#include "vk_renderer.h"
 #include "vk_shaders_spv.h"
 #include "vk_platform.h"
+#include "gl_packet.h"   // 仅为了 packet 执行路径的开关查询（ExecActive）
 #define VK_NO_PROTOTYPES
 #include "gl_shader.h"
 #include "gl_state.h"
@@ -173,6 +174,20 @@ struct VkRenderer::Impl {
     uint32_t lastGeomTarget = 0;
     uint32_t frameImageIndex = 0;
     bool frameOpen = false;
+    // ---- packet 执行路径（VK_PKT_EXEC=1）：独立命令流，不碰批处理的 verts 列表 ---- 
+    bool pktOpen = false;
+    uint32_t pktTarget = 0;
+    uint64_t pktDraws = 0;
+    VkBuffer pktVb = VK_NULL_HANDLE;
+    VkDeviceMemory pktVbMem = VK_NULL_HANDLE;
+    uint8_t* pktVbPtr = nullptr;
+    VkDeviceSize pktVbBytes = 0;
+    VkDeviceSize pktVbOff = 0;
+    VkBuffer pktIb = VK_NULL_HANDLE;
+    VkDeviceMemory pktIbMem = VK_NULL_HANDLE;
+    uint8_t* pktIbPtr = nullptr;
+    VkDeviceSize pktIbBytes = 0;
+    VkDeviceSize pktIbOff = 0;
     float clearR = 0, clearG = 0, clearB = 0, clearA = 1;
     const char* lastError = "";
 };
@@ -201,7 +216,9 @@ static PFN_vkCmdSetViewport g_setViewport;
 static PFN_vkCmdSetScissor g_setScissor;
 static PFN_vkCmdBindDescriptorSets g_bindDS;
 static PFN_vkCmdBindVertexBuffers g_bindVB;
+static PFN_vkCmdBindIndexBuffer g_bindIB;
 static PFN_vkCmdDraw g_cmdDraw;
+static PFN_vkCmdDrawIndexed g_cmdDrawIndexed;
 static PFN_vkCmdBeginRenderPass g_beginRP;
 static PFN_vkCmdEndRenderPass g_endRP;
 static PFN_vkBeginCommandBuffer g_beginCB;
@@ -313,6 +330,32 @@ static bool WriteBmpBGRA(const char* path, const uint8_t* px, int w, int h) {
     return true;
 }
 
+// 设备挑选只表达偏好，不做硬性排除：安卓平板往往只有集成 GPU，
+// 硬挑 DISCRETE 会让安卓直接起不来。分数只用于挑"更好的那块"，不是门槛。
+static int DeviceTypeScore (VkPhysicalDeviceType t) {
+
+    switch (t) {
+        case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return 3;
+        case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return 2;
+        case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return 1;
+        default: return 0;
+    }
+
+}
+
+// 日志里要能一眼看出跑在哪块卡上，所以用文字而不是数字枚举。
+static const char* DeviceTypeName (VkPhysicalDeviceType t) {
+
+    switch (t) {
+        case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return "discrete";
+        case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return "integrated";
+        case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return "virtual";
+        case VK_PHYSICAL_DEVICE_TYPE_CPU: return "cpu";
+        default: return "other";
+    }
+
+}
+
 VkRenderer::VkRenderer() : impl(new Impl()) {}
 
 VkRenderer::~VkRenderer() {
@@ -413,7 +456,9 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     g_setScissor = (PFN_vkCmdSetScissor)o.gipa(o.inst, "vkCmdSetScissor");
     g_bindDS = (PFN_vkCmdBindDescriptorSets)o.gipa(o.inst, "vkCmdBindDescriptorSets");
     g_bindVB = (PFN_vkCmdBindVertexBuffers)o.gipa(o.inst, "vkCmdBindVertexBuffers");
+    g_bindIB = (PFN_vkCmdBindIndexBuffer)o.gipa(o.inst, "vkCmdBindIndexBuffer");
     g_cmdDraw = (PFN_vkCmdDraw)o.gipa(o.inst, "vkCmdDraw");
+    g_cmdDrawIndexed = (PFN_vkCmdDrawIndexed)o.gipa(o.inst, "vkCmdDrawIndexed");
     g_beginRP = (PFN_vkCmdBeginRenderPass)o.gipa(o.inst, "vkCmdBeginRenderPass");
     g_endRP = (PFN_vkCmdEndRenderPass)o.gipa(o.inst, "vkCmdEndRenderPass");
     g_beginCB = (PFN_vkBeginCommandBuffer)o.gipa(o.inst, "vkBeginCommandBuffer");
@@ -433,27 +478,8 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
         return false;
     }
 
-    VkPhysicalDeviceMemoryProperties memProps{};
-    uint32_t n = 0;
-    enumDev(o.inst, &n, nullptr);
-    std::vector<VkPhysicalDevice> devs(n);
-    enumDev(o.inst, &n, devs.data());
-    if (n == 0) { o.lastError = "no devices"; return false; }
-
-    for (auto& d : devs) {
-        VkPhysicalDeviceProperties pp{};
-        getProps(d, &pp);
-        if (pp.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) o.phys = d;
-    }
-    if (!o.phys) o.phys = devs[0];
-    getMemProps(o.phys, &memProps);
-    {
-        VkPhysicalDeviceProperties sp{};
-        getProps(o.phys, &sp);
-        fprintf(stderr, "[vk] device=%s type=%d api=%u.%u.%u\n", sp.deviceName, (int)sp.deviceType,
-                VK_VERSION_MAJOR(sp.apiVersion), VK_VERSION_MINOR(sp.apiVersion), VK_VERSION_PATCH(sp.apiVersion));
-    }
-
+    // 先把 surface 建出来：判断一块设备"能不能用"的硬条件是"有 graphics 队列且能
+    // present 到这块 surface"。旧实现先选设备后建 surface，没有独显时只能盲退 devs[0]。
     uint64_t surf = 0;
     if (!vkplat::CreateSurface((uint64_t)o.inst, (void*)o.gipa, nativeWindow, &surf, err, (int)sizeof(err))) {
         fprintf(stderr, "[vkerr] surface %s\n", err);
@@ -462,18 +488,52 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     }
     o.surf = (VkSurfaceKHR)surf;
 
-    uint32_t qn = 0;
-    getQFP(o.phys, &qn, nullptr);
-    std::vector<VkQueueFamilyProperties> qs(qn);
-    getQFP(o.phys, &qn, qs.data());
-    int qi = -1;
-    for (uint32_t i = 0; i < qn; i++) {
-        VkBool32 ok = VK_FALSE;
-        getSurfSupport(o.phys, i, o.surf, &ok);
-        if ((qs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && ok) { qi = (int)i; break; }
+    VkPhysicalDeviceMemoryProperties memProps{};
+    uint32_t n = 0;
+    enumDev(o.inst, &n, nullptr);
+    std::vector<VkPhysicalDevice> devs(n);
+    if (n > 0) enumDev(o.inst, &n, devs.data());
+    if (n == 0) {
+        fprintf(stderr, "[vkerr] no physical device\n");
+        o.lastError = "no devices";
+        return false;
     }
-    if (qi < 0) { o.lastError = "no graphics+present queue"; return false; }
-    o.qidx = (uint32_t)qi;
+
+    // 独显优先，没有独显就退到集显/虚拟/其它；只要求它能 graphics+present。
+    VkPhysicalDevice best = nullptr;
+    int bestScore = -1;
+    int bestQueue = -1;
+    for (auto& d : devs) {
+        uint32_t qn = 0;
+        getQFP(d, &qn, nullptr);
+        std::vector<VkQueueFamilyProperties> qs(qn);
+        if (qn > 0) getQFP(d, &qn, qs.data());
+        int qi = -1;
+        for (uint32_t i = 0; i < qn; i++) {
+            VkBool32 ok = VK_FALSE;
+            getSurfSupport(d, i, o.surf, &ok);
+            if ((qs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && ok) { qi = (int)i; break; }
+        }
+        if (qi < 0) continue;
+        VkPhysicalDeviceProperties pp{};
+        getProps(d, &pp);
+        int score = DeviceTypeScore(pp.deviceType);
+        if (score > bestScore) { bestScore = score; best = d; bestQueue = qi; }
+    }
+    if (!best) {
+        fprintf(stderr, "[vkerr] no usable physical device (graphics+present unavailable)\n");
+        o.lastError = "no graphics+present device";
+        return false;
+    }
+    o.phys = best;
+    o.qidx = (uint32_t)bestQueue;
+    getMemProps(o.phys, &memProps);
+    {
+        VkPhysicalDeviceProperties sp{};
+        getProps(o.phys, &sp);
+        fprintf(stderr, "[vk] device=%s type=%s api=%u.%u.%u\n", sp.deviceName, DeviceTypeName(sp.deviceType),
+                VK_VERSION_MAJOR(sp.apiVersion), VK_VERSION_MINOR(sp.apiVersion), VK_VERSION_PATCH(sp.apiVersion));
+    }
 
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -1763,6 +1823,11 @@ bool VkRenderer::RecreateSwapchain() {
 
 bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float a) {
     Impl& o = *impl;
+    // packet 执行路径（VK_PKT_EXEC=1）独占渲染：这里不开批处理帧，改由 packet 侧
+    // 按"绑定即开 pass"的时机立即录制。开关关闭时走下面原有的逐字逻辑。
+    if (lime::pkt::ExecActive()) {
+        return PktBeginTarget(id, r, g, b, a);
+    }
     // 同一目标重复绑定（OpenFL 每个 pass 开头都会 glClear，gl_vk_handle_clear 又会 Bind 一次）
     // 不能清空已经累积的顶点，否则整条 filter 链最后合成时 verts=0，屏幕只剩清屏色。
     // 这里只更新清屏色，等 EndFrame 时真正清屏。
@@ -1875,6 +1940,284 @@ void VkRenderer::PresentTarget() {
 
 void VkRenderer::RequestPresent() {
     impl->presentReq = true;
+}
+
+// ---------------------------------------------------------------- packet 执行路径
+//
+// 与批处理完全独立：进目标时就开 render pass 并 begin 命令缓冲；每笔 draw 立刻把
+// bind + vkCmdDraw* 写进这块缓冲（不逐笔 vkQueueSubmit）；出目标时 end pass + 提交一次。
+// 批处理路径的 DrawRaw / PresentTarget / EndFrame 一行未改，靠 ExecActive 开关分流。
+
+bool VkRenderer::PktTargetOpen() const { return impl->pktOpen; }
+
+bool VkRenderer::PktEnsureBuffers() {
+    Impl& o = *impl;
+    if (o.pktVb != VK_NULL_HANDLE && o.pktIb != VK_NULL_HANDLE) return true;
+    auto getMemProps = (PFN_vkGetPhysicalDeviceMemoryProperties)g_gipa(o.inst, "vkGetPhysicalDeviceMemoryProperties");
+    VkPhysicalDeviceMemoryProperties mp{};
+    getMemProps(o.phys, &mp);
+    auto mk = [&](VkDeviceSize bytes, VkBufferUsageFlags usage,
+                  VkBuffer* buf, VkDeviceMemory* mem, uint8_t** ptr, VkDeviceSize* cap) -> bool {
+        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bci.size = bytes;
+        bci.usage = usage;
+        if (g_createBuf(o.dev, &bci, nullptr, buf) != VK_SUCCESS) return false;
+        VkMemoryRequirements mr{};
+        g_getBufReqs(o.dev, *buf, &mr);
+        VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        mai.allocationSize = mr.size;
+        mai.memoryTypeIndex = FindMemType(mp, mr.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (g_allocMem(o.dev, &mai, nullptr, mem) != VK_SUCCESS) return false;
+        g_bindBufMem(o.dev, *buf, *mem, 0);
+        void* p = nullptr;
+        g_mapMem(o.dev, *mem, 0, mr.size, 0, &p);
+        if (!p) return false;
+        *ptr = (uint8_t*)p;
+        *cap = bytes;
+        return true;
+    };
+    // 每 pass 重置偏移，一帧几何量按 4MB 顶点 / 1MB 索引估计
+    if (!mk((VkDeviceSize)4u << 20, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            &o.pktVb, &o.pktVbMem, &o.pktVbPtr, &o.pktVbBytes)) {
+        o.lastError = "pkt vb failed";
+        return false;
+    }
+    if (!mk((VkDeviceSize)1u << 20, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            &o.pktIb, &o.pktIbMem, &o.pktIbPtr, &o.pktIbBytes)) {
+        o.lastError = "pkt ib failed";
+        return false;
+    }
+    fprintf(stderr, "[pkt] buffers vb=%llu ib=%llu\n",
+            (unsigned long long)o.pktVbBytes, (unsigned long long)o.pktIbBytes);
+    return true;
+}
+
+bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a) {
+    Impl& o = *impl;
+    // 同一目标重复绑定（OpenFL 每次 glClear 都会再 Bind）：只更新清屏色
+    if (o.pktOpen && o.pktTarget == id) {
+        o.clearR = r; o.clearG = g; o.clearB = b; o.clearA = a;
+        return true;
+    }
+    if (o.pktOpen) PktEndTarget();
+    if (!PktEnsureBuffers()) return false;
+    o.pktVbOff = 0;
+    o.pktIbOff = 0;
+    o.pktDraws = 0;
+
+    VkFramebuffer fb = VK_NULL_HANDLE;
+    VkRenderPass rp = VK_NULL_HANDLE;
+    VkExtent2D ext = o.extent;
+    if (id >= 1000) {
+        uint32_t ti = id - 1000;
+        if (ti >= o.targets.size() || !o.targets[ti].used) return false;
+        fb = o.targets[ti].fb;
+        rp = o.targets[ti].rp;
+        ext = {(uint32_t)o.targets[ti].w, (uint32_t)o.targets[ti].h};
+    } else {
+        if (o.swapDirty) {
+            if (RecreateSwapchain()) o.swapDirty = false;
+            else return false;
+        }
+        VkResult ar = g_acquire(o.dev, o.swapchain, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE,
+                                &o.frameImageIndex);
+        if (ar == VK_SUBOPTIMAL_KHR) o.swapDirty = true;
+        if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
+            o.swapDirty = true;
+            fprintf(stderr, "[pkt] begin target=0 ok=0 acquire_err=%d\n", (int)ar);
+            return false;
+        }
+        o.bbHeld = true;
+        o.bbLoad = false;
+        fb = o.framebuffers[o.frameImageIndex];
+        rp = o.renderPass;
+    }
+    if (!fb || !rp) {
+        fprintf(stderr, "[pkt] begin target=%u ok=0 fb=%p rp=%p\n", id, (void*)fb, (void*)rp);
+        return false;
+    }
+
+    g_resetCB(o.cmd, 0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    VkResult br = g_beginCB(o.cmd, &bi);
+    if (br != VK_SUCCESS) {
+        fprintf(stderr, "[pkt] begin target=%u ok=0 beginCB=%d\n", id, (int)br);
+        return false;
+    }
+
+    // 投影矩阵按当前目标尺寸重算（与批处理同一个 UBO，着色器读的就是它）
+    if (o.uboPtr) {
+        memset(o.uboPtr, 0, 64);
+        o.uboPtr[0] = 2.0f / (float)ext.width;
+        o.uboPtr[5] = 2.0f / (float)ext.height;
+        o.uboPtr[10] = 1.0f;
+        o.uboPtr[12] = -1.0f;
+        o.uboPtr[13] = -1.0f;
+        o.uboPtr[15] = 1.0f;
+    }
+
+    VkClearValue cv{};
+    cv.color.float32[0] = r;
+    cv.color.float32[1] = g;
+    cv.color.float32[2] = b;
+    cv.color.float32[3] = a;
+    VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rbi.renderPass = rp;
+    rbi.framebuffer = fb;
+    rbi.renderArea.offset = {0, 0};
+    rbi.renderArea.extent = ext;
+    rbi.clearValueCount = 1;
+    rbi.pClearValues = &cv;
+    g_beginRP(o.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+
+    // viewport/scissor 取"绑定这一刻"的 GL 状态（不是帧末）
+    VkViewport vp = lime::glstate::GetVulkanViewport((int)ext.height);
+    if (vp.width <= 0.0f || vp.height <= 0.0f) vp = {0, 0, (float)ext.width, (float)ext.height, 0, 1};
+    VkRect2D sc = lime::glstate::GetVulkanScissor((int)ext.width, (int)ext.height);
+    if (sc.extent.width == 0 || sc.extent.height == 0) sc = {{0, 0}, ext};
+    g_setViewport(o.cmd, 0, 1, &vp);
+    g_setScissor(o.cmd, 0, 1, &sc);
+
+    o.pktOpen = true;
+    o.pktTarget = id;
+    fprintf(stderr, "[pkt] begin target=%u rp=%p fb=%p ext=%ux%u vp=%d,%d,%d,%d sc=%d,%d,%d,%d clear=%.2f,%.2f,%.2f,%.2f\n",
+            id, (void*)rp, (void*)fb, ext.width, ext.height,
+            (int)vp.x, (int)vp.y, (int)vp.width, (int)vp.height,
+            (int)sc.offset.x, (int)sc.offset.y, (int)sc.extent.width, (int)sc.extent.height,
+            r, g, b, a);
+    return true;
+}
+
+bool VkRenderer::PktDraw(const PktDrawDesc& d) {
+    Impl& o = *impl;
+    if (!o.pktOpen) return false;
+    if (!d.verts || d.vertexCount <= 0) return false;
+
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (d.texId >= 1000) {
+        uint32_t ti = d.texId - 1000;
+        if (ti >= o.targets.size() || !o.targets[ti].used) return false;
+        set = o.targets[ti].set;
+    } else if (d.texId > 0 && d.texId <= o.textures.size()) {
+        if (!o.textures[d.texId - 1].used) return false;
+        set = o.textures[d.texId - 1].set;
+    }
+    if (!set) return false;
+
+    VkDeviceSize vbytes = (VkDeviceSize)d.vertexCount * 15u * sizeof(float);
+    if (o.pktVbOff + vbytes > o.pktVbBytes) {
+        fprintf(stderr, "[pkt] err=vb_full need=%llu cap=%llu n=%d\n",
+                (unsigned long long)vbytes, (unsigned long long)o.pktVbBytes, d.vertexCount);
+        return false;
+    }
+    memcpy(o.pktVbPtr + o.pktVbOff, d.verts, (size_t)vbytes);
+    VkDeviceSize voff = o.pktVbOff;
+    o.pktVbOff += vbytes;
+
+    bool indexed = (d.indices != nullptr && d.indexCount > 0);
+    VkDeviceSize ioff = 0;
+    if (indexed) {
+        VkDeviceSize ibytes = (VkDeviceSize)d.indexCount * sizeof(uint16_t);
+        if (o.pktIbOff + ibytes > o.pktIbBytes) {
+            fprintf(stderr, "[pkt] err=ib_full need=%llu cap=%llu n=%d\n",
+                    (unsigned long long)ibytes, (unsigned long long)o.pktIbBytes, d.indexCount);
+            return false;
+        }
+        memcpy(o.pktIbPtr + o.pktIbOff, d.indices, (size_t)ibytes);
+        ioff = o.pktIbOff;
+        o.pktIbOff += ibytes;
+    }
+
+    // 状态变体入口：第一版固定用 o.pipeline（默认混合、无剔除、无深度）。
+    // d.state 目前只记录，后续按状态选变体时在这里按位分支。
+    g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeline);
+    g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeLayout, 0, 1, &set, 0, nullptr);
+    VkBuffer vbufs[2] = {o.pktVb, o.attrBuf};
+    VkDeviceSize voffs[2] = {voff, 0};
+    g_bindVB(o.cmd, 0, 2, vbufs, voffs);
+    if (indexed) {
+        g_bindIB(o.cmd, o.pktIb, ioff, VK_INDEX_TYPE_UINT16);
+        g_cmdDrawIndexed(o.cmd, (uint32_t)d.indexCount, 1, 0, 0, 0);
+    } else {
+        g_cmdDraw(o.cmd, (uint32_t)d.vertexCount, 1, 0, 0);
+    }
+    o.pktDraws++;
+    fprintf(stderr, "[pkt] draw tgt=%u i=%llu tex=%u set=%p cmd=%s n=%d vbOff=%llu ibOff=%llu state=blend%d depth%d cull%d\n",
+            o.pktTarget, (unsigned long long)o.pktDraws, d.texId, (void*)set,
+            indexed ? "vkCmdDrawIndexed" : "vkCmdDraw",
+            indexed ? d.indexCount : d.vertexCount,
+            (unsigned long long)voff, (unsigned long long)ioff,
+            (int)d.state.blendEnabled, (int)d.state.depthTest, (int)d.state.cullMode);
+    return true;
+}
+
+void VkRenderer::PktEndTarget() {
+    Impl& o = *impl;
+    if (!o.pktOpen) return;
+    uint32_t t = o.pktTarget;
+    uint64_t draws = o.pktDraws;
+    g_endRP(o.cmd);
+    g_endCB(o.cmd);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &o.cmd;
+    g_submit(o.queue, 1, &si, VK_NULL_HANDLE);
+    g_waitIdle(o.queue);
+
+    // 离屏目标按批处理同样的口径记录"最后一个真正写过几何的目标"（合成选源用）
+    if (t >= 1000 && draws > 0) o.lastGeomTarget = t;
+
+    bool present = (t == 0 && o.presentReq);
+    if (present) {
+        VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+        pi.swapchainCount = 1;
+        pi.pSwapchains = &o.swapchain;
+        pi.pImageIndices = &o.frameImageIndex;
+        VkResult pr = g_present(o.queue, &pi);
+        if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) o.swapDirty = true;
+        if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR) {
+            fprintf(stderr, "[pkt] present failed r=%d img=%u\n", (int)pr, o.frameImageIndex);
+        }
+        o.bbHeld = false;
+        o.presentReq = false;
+    }
+    fprintf(stderr, "[pkt] end target=%u draws=%llu present=%d img=%u\n",
+            t, (unsigned long long)draws, present ? 1 : 0, o.frameImageIndex);
+    o.pktOpen = false;
+}
+
+bool VkRenderer::PktComposite(uint32_t srcTargetId) {
+    Impl& o = *impl;
+    int tw = 0, th = 0;
+    if (!GetRenderTargetSize(srcTargetId, &tw, &th) || tw <= 0 || th <= 0) return false;
+    if (o.extent.width == 0 || o.extent.height == 0) return false;
+    float W = (float)o.extent.width, H = (float)o.extent.height;
+    static const float one[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    static const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    std::vector<float> q;
+    q.reserve(6 * 15);
+    PushLimeVertex(q, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, one, zero);
+    PushLimeVertex(q, W,    0.0f, 1.0f, 0.0f, 1.0f, one, zero);
+    PushLimeVertex(q, 0.0f, H,    0.0f, 1.0f, 1.0f, one, zero);
+    PushLimeVertex(q, 0.0f, H,    0.0f, 1.0f, 1.0f, one, zero);
+    PushLimeVertex(q, W,    0.0f, 1.0f, 0.0f, 1.0f, one, zero);
+    PushLimeVertex(q, W,    H,    1.0f, 1.0f, 1.0f, one, zero);
+    PktDrawDesc d{};
+    d.texId = srcTargetId;
+    d.verts = q.data();
+    d.vertexCount = 6;
+    d.indices = nullptr;
+    d.indexCount = 0;
+    d.state.blendEnabled = 1;
+    d.state.depthTest = 0;
+    d.state.depthWrite = 0;
+    d.state.stencilTest = 0;
+    d.state.cullMode = 0;
+    d.state.frontFace = 0;
+    d.state.scissorTest = 0;
+    d.state.colorMask = 0xF;
+    return PktDraw(d);
 }
 
 uint32_t VkRenderer::CreateRenderTarget(int w, int h) {

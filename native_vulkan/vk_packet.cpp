@@ -350,8 +350,10 @@ void FillFields (const DrawRecord& r, const char* uHex, LineFields& o) {
     snprintf(o.s, sizeof(o.s), "%u", (unsigned)r.seq);
     snprintf(o.prog, sizeof(o.prog), "%u", (unsigned)r.program);
     snprintf(o.rt, sizeof(o.rt), "%u", (unsigned)r.fbo);
-    o.prim = (r.kind == KIND_CLEAR) ? "none" : "tris";
-    snprintf(o.n, sizeof(o.n), "%d", (int)r.count);
+    // 与记录侧 VKDrawSink.buildLine 逐字一致：prim 恒为 tris（clear 行同样如此），
+    // clear 行 n 固定 0（packet 里 count 本就为 0，这里再强制一次防止越界值进摘要）。
+    o.prim = "tris";
+    snprintf(o.n, sizeof(o.n), "%d", (int)((r.kind == KIND_CLEAR) ? 0 : r.count));
     if (r.kind == KIND_DRAW_ARRAYS) {
         snprintf(o.v0, sizeof(o.v0), "%d", (int)r.first);
         snprintf(o.idx, sizeof(o.idx), "-");

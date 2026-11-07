@@ -8,11 +8,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <vector>
 
 // gl_vk_bridge.h 会拉入 gl_compat.h（hxcpp/CFFI），这里只需要两个函数，单decl。
 namespace lime {
 VkRenderer* gl_vk_get_renderer ();
 uint32_t gl_vk_fbo_target (int fboName);
+bool gl_vk_texture_size (int glName, int* w, int* h);
 }
 
 namespace lime {
@@ -67,6 +69,8 @@ struct Runtime {
     FrameGate gate;
     uint64_t decoded = 0;
     uint64_t rejected = 0;
+    uint64_t executed = 0;
+    int exec = -1;                 // -1 未探测，0/1 结果（VK_PKT_EXEC）
 };
 
 static Runtime g_rt;
@@ -415,6 +419,284 @@ static void CopyUniform (uint32_t program, uint32_t seq, vkpkt::DrawRecord* rec,
     rec->uniformSize = n;
 }
 
+// ---------------------------------------------------------------- 执行（最小链路）
+//
+// 本版把解码结果送到渲染器唯一一条已经验证过的绘制入口 VkRenderer::DrawRaw：
+// 它按"像素坐标 x,y + uv + 逐顶点 alpha"把顶点收进当前渲染目标的批次，在
+// PresentTarget 里由 vkCmdBindPipeline/BindDescriptorSets/BindVertexBuffers/CmdDraw 提交。
+//
+// 为什么不是本文件直接 vkCmd*：VkRenderer 目前只在 PresentTarget 里开 render pass
+// 并一次性吃完整个目标的顶点，录制期间没有打开的 pass、也没有暴露 pipeline/
+// descriptor/vertex buffer 绑定接口。要"每 draw 立即 vkCmdDraw*"必须先给渲染器
+// 加第二条命令路径（那是渲染器改动，不属于 packet 侧），见本轮回报。
+//
+// 默认关闭：记录侧与 GL 正常路径并行，两套都画会重复叠加。仅调试用 VK_PKT_EXEC=1 打开。
+static int ExecEnabled () {
+    if (g_rt.exec < 0) {
+        const char* v = getenv("VK_PKT_EXEC");
+        g_rt.exec = (v && v[0] == '1') ? 1 : 0;
+    }
+    return g_rt.exec;
+}
+
+// 供 GL 侧接线用：执行路径真的在工作时，lime_gl_draw_* 直接返回，避免画两遍。
+// 必须同时满足 VK_PKT=1：没有记录侧就没有 packet，只开 VK_PKT_EXEC 会跳过 GL 绘制
+// 却没有任何东西可画（全黑）。两个开关一起开才算执行路径生效。
+bool ExecActive () { return ExecEnabled() != 0 && lime_vk_pkt_mode() != 0; }
+
+struct AttrRead {
+    const uint8_t* base = nullptr;
+    uint32_t bytes = 0;     // 0xFFFFFFFF = 长度未知（client 数组）
+    uint32_t stride = 0;    // 0 时按 elem 紧凑排布
+    uint32_t off = 0;
+    uint32_t elem = 0;
+    uint32_t type = 0;      // ATYPE_*
+    uint32_t size = 0;
+};
+
+// 取属性的数据源。与物化阶段的规则一致：array 走 buffer，client 走指针。
+static bool ResolveAttrRead (int idx, const vkpkt::PktAttr& a, AttrRead* out) {
+    if (a.kind != vkpkt::ATTR_ARRAY && a.kind != vkpkt::ATTR_CLIENT) return false;
+    uint32_t elem = ElemBytes((uint8_t)a.type, (uint8_t)a.size);
+    if (!elem) return false;
+    out->elem = elem;
+    out->type = a.type;
+    out->size = a.size;
+    out->stride = a.stride ? a.stride : elem;
+    out->off = a.byteOffset;
+    if (a.kind == vkpkt::ATTR_CLIENT) {
+        AttrSnap snap;
+        if (!SnapshotAttr(idx, &snap) || !snap.clientPtr) return false;
+        out->base = (const uint8_t*)snap.clientPtr;
+        out->bytes = 0xFFFFFFFFu;
+    } else {
+        const uint8_t* p = nullptr;
+        uint32_t n = 0;
+        if (!SnapshotBuffer((int)a.bufferName, &p, &n) || !p) return false;
+        out->base = p;
+        out->bytes = n;
+    }
+    return true;
+}
+
+// 只解 FLOAT：位置/纹理坐标/alpha 在 lime 的顶点数据里都是 float32。
+// 其它类型不解（不猜归一化语义），由调用方打 err=pos_range 并跳过这笔。
+static bool ReadFloatComp (const AttrRead& ar, int64_t vidx, int comp, float* out) {
+    if (ar.type != vkpkt::ATYPE_FLOAT) return false;
+    if (comp < 0 || (uint32_t)comp >= ar.size) return false;
+    int64_t pos = (int64_t)ar.off + vidx * (int64_t)ar.stride + (int64_t)comp * 4;
+    if (pos < 0) return false;
+    if (ar.bytes != 0xFFFFFFFFu && (uint64_t)pos + 4u > ar.bytes) return false;
+    memcpy(out, ar.base + pos, 4);
+    return true;
+}
+
+static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& rec, uint32_t rtId) {
+    VkRenderer* r = gl_vk_get_renderer();
+    if (!r) return false;
+    // 清屏行（n=0）：pass 已在 BindRenderTarget 时打开，这里只做一次幂等对齐，
+    // 保证执行日志与 packet 一一对应（没有绘制命令要发）。
+    if (w.count <= 0) {
+        return r->PktBeginTarget(rtId, rec.clearColorF[0], rec.clearColorF[1],
+                                 rec.clearColorF[2], rec.clearColorF[3]);
+    }
+    if (w.kind != vkpkt::KIND_DRAW_ARRAYS && w.kind != vkpkt::KIND_DRAW_ELEMENTS) return false;
+
+    // 采样源：第一个 unit 有效且能解析到 Vk 纹理的槽。
+    uint32_t vkTex = 0;
+    for (int i = 0; i < (int)vkpkt::kMaxTexSlots; i++) {
+        if (rec.tex[i].unit == vkpkt::kTexSlotUnused) continue;
+        uint32_t id = rec.tex[i].imageId;
+        if (!id && rec.tex[i].texName) id = SnapshotTexVk((int)rec.tex[i].texName);
+        if (id) { vkTex = id; break; }
+    }
+    if (!vkTex) {
+        static int s_noTex = 0;
+        if (s_noTex < 6 || s_noTex % 500 == 0) {
+            fprintf(stderr, "[vkexec] err=no_tex prog=%u s=%u\n", (unsigned)w.program, (unsigned)w.seq);
+        }
+        s_noTex++;
+        return false;
+    }
+
+    // 槽位：loc0=Position，loc4=TexCoord（lime 的实际约定），loc5=逐顶点 alpha。
+    int posIdx = -1;
+    for (int i = 0; i < (int)vkpkt::kMaxAttrSlots; i++) {
+        if ((rec.attrs[i].kind == vkpkt::ATTR_ARRAY || rec.attrs[i].kind == vkpkt::ATTR_CLIENT) &&
+            rec.attrs[i].size >= 2) { posIdx = i; break; }
+    }
+    int uvIdx = -1;
+    for (int i = 4; i >= 1; i -= 3) {
+        if ((rec.attrs[i].kind == vkpkt::ATTR_ARRAY || rec.attrs[i].kind == vkpkt::ATTR_CLIENT) &&
+            rec.attrs[i].size >= 2) { uvIdx = i; break; }
+    }
+    int alphaIdx = -1;
+    if ((rec.attrs[5].kind == vkpkt::ATTR_ARRAY || rec.attrs[5].kind == vkpkt::ATTR_CLIENT) &&
+        rec.attrs[5].size >= 1) alphaIdx = 5;
+    if (posIdx < 0) {
+        fprintf(stderr, "[vkexec] err=no_pos prog=%u s=%u\n", (unsigned)w.program, (unsigned)w.seq);
+        return false;
+    }
+
+    AttrRead pos, uv, alpha;
+    if (!ResolveAttrRead(posIdx, rec.attrs[posIdx], &pos)) {
+        fprintf(stderr, "[vkexec] err=pos_src idx=%d buf=%u s=%u\n",
+                posIdx, (unsigned)rec.attrs[posIdx].bufferName, (unsigned)w.seq);
+        return false;
+    }
+    if (uvIdx >= 0 && !ResolveAttrRead(uvIdx, rec.attrs[uvIdx], &uv)) uvIdx = -1;
+    if (alphaIdx >= 0 && !ResolveAttrRead(alphaIdx, rec.attrs[alphaIdx], &alpha)) alphaIdx = -1;
+
+    // 索引：spec 约定 16 位（CopyIndexRange 同样按 2 字节取用）。
+    const uint8_t* idx = nullptr;
+    uint32_t idxBytes = 0;
+    if (w.kind == vkpkt::KIND_DRAW_ELEMENTS) {
+        if (!SnapshotBuffer((int)w.ibo, &idx, &idxBytes) || !idx) {
+            fprintf(stderr, "[vkexec] err=idx_src ibo=%u s=%u\n", (unsigned)w.ibo, (unsigned)w.seq);
+            return false;
+        }
+    }
+
+    std::vector<float> verts((size_t)w.count * 4, 0.0f);
+    std::vector<float> alphas;
+    if (alphaIdx >= 0) alphas.assign((size_t)w.count, 1.0f);
+    float uMin = 0, uMax = 0, vMin = 0, vMax = 0;
+    bool firstUv = true;
+
+    for (int i = 0; i < w.count; i++) {
+        int64_t vidx = 0;
+        if (idx) {
+            uint64_t at = ((uint64_t)w.first + (uint64_t)i) * 2u;
+            if (at + 2u > idxBytes) return false;
+            uint16_t v = 0;
+            memcpy(&v, idx + at, 2);
+            vidx = (int64_t)v;
+        } else {
+            vidx = (int64_t)w.first + i;
+        }
+        float x = 0.0f, y = 0.0f, u = 0.0f, vv = 0.0f;
+        if (!ReadFloatComp(pos, vidx, 0, &x) || !ReadFloatComp(pos, vidx, 1, &y)) {
+            static int s_bad = 0;
+            if (s_bad < 6) {
+                fprintf(stderr, "[vkexec] err=pos_range idx=%d vidx=%lld s=%u\n",
+                        posIdx, (long long)vidx, (unsigned)w.seq);
+            }
+            s_bad++;
+            return false;
+        }
+        if (uvIdx >= 0) {
+            ReadFloatComp(uv, vidx, 0, &u);
+            ReadFloatComp(uv, vidx, 1, &vv);
+        }
+        if (alphaIdx >= 0) {
+            float a = 1.0f;
+            ReadFloatComp(alpha, vidx, 0, &a);
+            alphas[(size_t)i] = a;
+        }
+        verts[(size_t)i * 4 + 0] = x;
+        verts[(size_t)i * 4 + 1] = y;
+        verts[(size_t)i * 4 + 2] = u;
+        verts[(size_t)i * 4 + 3] = vv;
+        if (firstUv) { uMin = uMax = u; vMin = vMax = vv; firstUv = false; }
+        if (u < uMin) uMin = u;
+        if (u > uMax) uMax = u;
+        if (vv < vMin) vMin = vv;
+        if (vv > vMax) vMax = vv;
+    }
+
+    int texName = 0;
+    for (int i = 0; i < (int)vkpkt::kMaxTexSlots; i++) {
+        if (rec.tex[i].unit == vkpkt::kTexSlotUnused) continue;
+        texName = (int)rec.tex[i].texName;
+        break;
+    }
+
+    // uv 口径与批处理完全一致：像素坐标要半像素内缩再按采样源尺寸归一化。
+    int tw = 0, th = 0;
+    if (vkTex >= 1000) r->GetRenderTargetSize(vkTex, &tw, &th);
+    else if (texName > 0) gl_vk_texture_size(texName, &tw, &th);
+    bool pixelUv = (uMax > 1.001f || uMin < -1.001f || vMax > 1.001f || vMin < -1.001f);
+
+    // 常量属性：loc2=colorMultiplier，loc3=colorOffset；loc1/loc5 是 alpha 的两个乘数。
+    float mult[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float off[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (rec.attrs[2].kind == vkpkt::ATTR_CONSTANT && rec.attrs[2].size >= 4) {
+        for (int k = 0; k < 4; k++) mult[k] = rec.attrs[2].constValue[k];
+    }
+    if (rec.attrs[3].kind == vkpkt::ATTR_CONSTANT && rec.attrs[3].size >= 4) {
+        for (int k = 0; k < 4; k++) off[k] = rec.attrs[3].constValue[k];
+    }
+    float alphaConst = 1.0f;
+    if (rec.attrs[1].kind == vkpkt::ATTR_CONSTANT) alphaConst *= rec.attrs[1].constValue[0];
+    if (rec.attrs[5].kind == vkpkt::ATTR_CONSTANT) alphaConst *= rec.attrs[5].constValue[0];
+
+    std::vector<float> packed((size_t)w.count * 15);
+    for (int i = 0; i < w.count; i++) {
+        float u = verts[(size_t)i * 4 + 2];
+        float v = verts[(size_t)i * 4 + 3];
+        if (pixelUv) {
+            float eu = u, ev = v;
+            if (u <= uMin + 1e-3f && u < uMax) eu = u + 0.5f;
+            else if (u >= uMax - 1e-3f) eu = u - 0.5f;
+            if (v <= vMin + 1e-3f && v < vMax) ev = v + 0.5f;
+            else if (v >= vMax - 1e-3f) ev = v - 0.5f;
+            u = tw > 0 ? eu / tw : 1.0f;
+            v = th > 0 ? ev / th : 1.0f;
+        } else {
+            if (u > 1.001f || u < -1.001f) u = tw > 0 ? u / tw : 1.0f;
+            if (v > 1.001f || v < -1.001f) v = th > 0 ? v / th : 1.0f;
+        }
+        float* o15 = packed.data() + (size_t)i * 15;
+        o15[0] = verts[(size_t)i * 4 + 0];
+        o15[1] = verts[(size_t)i * 4 + 1];
+        o15[2] = 0.0f;
+        o15[3] = 1.0f;
+        o15[4] = alphas.empty() ? alphaConst : alphas[(size_t)i] * alphaConst;
+        for (int k = 0; k < 4; k++) o15[5 + k] = mult[k];
+        for (int k = 0; k < 4; k++) o15[9 + k] = off[k];
+        o15[13] = u;
+        o15[14] = v;
+    }
+
+    // 索引按展开后的顺序给 0..n-1：顶点已经按原索引顺序展开，视觉结果与原索引一致。
+    // 16 位索引装不下时退化为非索引绘制（顶点顺序完全等价）。
+    std::vector<uint16_t> seq;
+    bool indexed = (w.kind == vkpkt::KIND_DRAW_ELEMENTS && w.count <= 65535);
+    if (indexed) {
+        seq.resize((size_t)w.count);
+        for (int i = 0; i < w.count; i++) seq[(size_t)i] = (uint16_t)i;
+    }
+
+    // 状态位按 record 的快照填；第一版只记录，不选管线变体。
+    PktDrawDesc d{};
+    d.texId = vkTex;
+    d.verts = packed.data();
+    d.vertexCount = w.count;
+    d.indices = seq.empty() ? nullptr : seq.data();
+    d.indexCount = (int)seq.size();
+    d.state.blendEnabled = rec.blendEnabled;
+    d.state.depthTest = rec.depthTestEnabled;
+    d.state.depthWrite = rec.depthMask;
+    d.state.stencilTest = 0;
+    d.state.cullMode = rec.cullMode;
+    d.state.frontFace = rec.frontFace;
+    d.state.scissorTest = rec.scissorEnabled;
+    d.state.colorMask = rec.colorMaskBits;
+    // 兜底：正常流程里 pass 在 BindRenderTarget 时就开了；这里按 packet 里的目标
+    // 再对齐一次（同目标幂等不重清，换目标会先把上一笔 pass 收尾再开新的）。
+    if (!r->PktBeginTarget(rtId, rec.clearColorF[0], rec.clearColorF[1],
+                           rec.clearColorF[2], rec.clearColorF[3])) return false;
+    if (!r->PktDraw(d)) return false;
+
+    g_rt.executed++;
+    if (g_rt.executed <= 4 || g_rt.executed % 500 == 0) {
+        fprintf(stderr, "[vkexec] exec=1 tex=%d vk=%u n=%d prog=%u s=%u idx=%d\n",
+                texName, (unsigned)vkTex, (int)w.count, (unsigned)w.program, (unsigned)w.seq,
+                (int)seq.size());
+    }
+    return true;
+}
+
 } // namespace pkt
 } // namespace lime
 
@@ -501,7 +783,9 @@ int lime_vk_pkt_emit (double pointer, int bytes) {
     memset(&in, 0, sizeof(in));
     in.wire = w;
     in.stateVersion = (uint32_t)glstate::Version();
-    if (w.stateVersion != (uint8_t)(in.stateVersion & 0xFF)) {
+    // 记录侧固定写 0（Haxe 取不到 g_version，见 VKDrawSink.writePacket:139）。
+    // 0 = "未提供"，不做对账；非 0 时才按旧规则校验低 8 位。
+    if (w.stateVersion != 0 && w.stateVersion != (uint8_t)(in.stateVersion & 0xFF)) {
         fprintf(stderr, "[vkexec] err=state_version got=%u want=%u s=%u\n",
                 (unsigned)w.stateVersion, (unsigned)(in.stateVersion & 0xFF), (unsigned)w.seq);
     }
@@ -547,6 +831,10 @@ int lime_vk_pkt_emit (double pointer, int bytes) {
         g_rt.decoded++;
     }
 
+    // ---- 执行：packet 独立路径，一笔一笔立即发 vkCmd（默认关，VK_PKT_EXEC=1 才执行）
+    bool executed = false;
+    if (ExecEnabled()) executed = ExecuteDraw(w, rec, in.rtImage);
+
     // ---- u：原样回填（lime_vk_pkt_utag 的缓存值）
     uint32_t u = 0;
     if (g_rt.utagValid) {
@@ -563,11 +851,11 @@ int lime_vk_pkt_emit (double pointer, int bytes) {
     vkpkt::Hex8(u, uHex);
 
     // ---- [vkexec]
-    // 说明：本版只做"解码 + 物化"，尚未把 vkCmdDraw* 编进命令缓冲（见 STATUS）。
-    // pending=1 是对账工具忽略的附加字段，明确表示这条不是已提交的 GPU 命令。
+    // pending=0：这笔已经立即发进当前命令缓冲（或清屏行已在 pass 里落定）；
+    // pending=1：只解码，没有发命令。
     if (GateOpen(w.frameGen)) {
         char line[1024];
-        vkpkt::BuildLogLine("[vkexec]", rec, uHex, "pending=1", line, sizeof(line));
+        vkpkt::BuildLogLine("[vkexec]", rec, uHex, executed ? "pending=0" : "pending=1", line, sizeof(line));
         fputs(line, stderr);
         fputc('\n', stderr);
     }

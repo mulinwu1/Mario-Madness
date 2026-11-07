@@ -587,6 +587,8 @@ void lime_gl_vertex_attrib4fv(int index, double v) {
 }
 
 void lime_gl_draw_arrays(int mode, int first, int count) {
+    // VK_PKT_EXEC=1：packet 路径已经在 emit 时立即发出 vkCmd，这里跳过，避免画两遍
+    if (pkt::ExecActive()) return;
     if (count <= 0) return;
     if (!g_renderer) vk_fatal ("renderer_null fn=draw_arrays");
     // lime/OpenFL 的属性槽位：loc0=Position，loc4=TexCoord（不是 loc1）。
@@ -693,6 +695,8 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
 }
 
 void lime_gl_draw_elements(int mode, int count, int type, double offset) {
+    // VK_PKT_EXEC=1：packet 路径已经在 emit 时立即发出 vkCmd，这里跳过，避免画两遍
+    if (pkt::ExecActive()) return;
     if (count <= 0) return;
     if (!g_renderer) vk_fatal ("renderer_null fn=draw_elements");
     // lime/OpenFL 的 texcoord 在 loc4（loc1 从未被设置）：读 loc1 会拿到位置数据

@@ -25,9 +25,10 @@ const char* const* InstanceExtensions (uint32_t* count);
 bool CreateSurface (uint64_t instance, void* gipa, void* nativeWindow,
                     uint64_t* outSurface, char* err, int errCap);
 
-// 可执行文件所在目录（含末尾分隔符，例如 "C:\app\" 或 "/data/app/"）。
+// 可执行文件所在目录（含末尾分隔符，例如 "C:\app\"）。
 // 只用 char 缓冲、不返回字符串，保持本头无平台类型。
 // 取不到时写空串（调用方应视作"没有外部资源目录"）。
+// 安卓实现恒返回空串：那里没有"可执行文件旁边的资源目录"这个概念。
 void ExeDir (char* out, int outCap);
 
 }
