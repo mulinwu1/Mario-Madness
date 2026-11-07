@@ -9,6 +9,9 @@
 #include <cstdlib>
 #include <ctime>
 
+// gl_fbo 侧的当前目标（只读探针用，定义在 gl_fbo.cpp:706）
+extern uint32_t gl_vk_current_target ();
+
 // 接线探针（本轮只接不选）：gl_shader 自己建的管线。它不参与任何 draw，
 // 只在 render pass 开头绑一次、紧接着换回固定管线（两次绑定之间没有 draw）。
 static VkPipeline g_probePipeline = VK_NULL_HANDLE;
@@ -1338,7 +1341,12 @@ void VkRenderer::DrawSprite(uint32_t texId, float x, float y, float w, float h,
     if (texId >= 1000) {
         uint32_t ti = texId - 1000;
         if (ti >= o.targets.size() || !o.targets[ti].used) return;
-        if (o.currentTarget == texId) return; // no self sampling
+        if (o.currentTarget == texId) {
+            // 探针：目标是当前渲染目标时顶点被静默丢弃（缺口 B 的唯一证据点）
+            fprintf(stderr, "[vk] draw-selfdrop tex=%u cur=%u f=%llu n=%d\n",
+                    texId, o.currentTarget, (unsigned long long) g_drawFrame, vertexCount);
+            return;
+        } // no self sampling
         vertsPtr = &o.targets[ti].verts;
     } else {
         if (texId == 0 || texId > o.textures.size()) return;
@@ -1362,7 +1370,12 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
     if (texId >= 1000) {
         uint32_t ti = texId - 1000;
         if (ti >= o.targets.size() || !o.targets[ti].used) return;
-        if (o.currentTarget == texId) return;
+        if (o.currentTarget == texId) {
+            // 探针：目标是当前渲染目标时顶点被静默丢弃（缺口 B 的唯一证据点）
+            fprintf(stderr, "[vk] draw-selfdrop tex=%u cur=%u f=%llu n=%d\n",
+                    texId, o.currentTarget, (unsigned long long) g_drawFrame, vertexCount);
+            return;
+        }
         vertsPtr = &o.targets[ti].verts;
     } else {
         if (texId == 0 || texId > o.textures.size()) return;
@@ -1853,11 +1866,16 @@ void VkRenderer::DestroyRenderTarget(uint32_t id) {
 
 void VkRenderer::EndFrame() {
     Impl& o = *impl;
+    // 探针（审计口径）：每个视觉帧只出一次的两份状态快照——渲染器 currentTarget 与 gl_fbo g_currentTarget
+    if (o.presentReq) {
+        fprintf(stderr, "[vk] efstate f=%llu req=1 open=%d cur=%u gcur=%u bbHeld=%d bbOpen=%d\n",
+                (unsigned long long) g_drawFrame, o.frameOpen ? 1 : 0, o.currentTarget,
+                gl_vk_current_target (), o.bbHeld ? 1 : 0, g_bbOpen);
+    }
     if (!o.frameOpen) {
-        if (g_bbOpen) {
-            fprintf(stderr, "[vk] bbframe close f=%llu target=%u noop=1 BBOPEN=1\n",
-                    (unsigned long long) g_drawFrame, o.currentTarget);
-        }
+        // 审计要求：不再用 g_bbOpen 门控，每次空 EndFrame 都打，否则"零 noop"无法区分原因
+        fprintf(stderr, "[vk] bbframe close f=%llu target=%u noop=1 BBOPEN=%d req=%d\n",
+                (unsigned long long) g_drawFrame, o.currentTarget, g_bbOpen, o.presentReq ? 1 : 0);
         return;
     }
     // 探针（只记状态）：后缓冲 close 与 open 是否配对；离屏 close 时后缓冲还开着 = 顶点被并走
