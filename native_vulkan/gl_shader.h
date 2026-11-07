@@ -90,6 +90,11 @@ int gl_shader_sampler_binding (int program, const char* name);
 int gl_shader_uniform_texture_unit (int program, int location);
 // 当前 useProgram 绑定的 program（0 表示无）
 int gl_shader_current_program ();
+
+// 观测用（纯读）：program 的顶点属性数量（未知 program 返回 -1）；
+// 该 program 是否声明了给定的顶点属性 location。
+int gl_shader_attribute_count (int program);
+bool gl_shader_program_has_attribute (int program, int location);
 // 最近一次链接的 GLSL 源码（调试用，可能为 NULL）
 const char* gl_shader_program_glsl (int program, int stage);
 // 程序 / 着色器对象的错误日志（调试用，可能为空串）
