@@ -9,6 +9,11 @@
 #include <cstdlib>
 #include <ctime>
 
+// 接线探针（本轮只接不选）：gl_shader 自己建的管线。它不参与任何 draw，
+// 只在 render pass 开头绑一次、紧接着换回固定管线（两次绑定之间没有 draw）。
+static VkPipeline g_probePipeline = VK_NULL_HANDLE;
+static int g_probeProgram = 0;
+
 #define MAX_SPRITES 4096
 #define MAX_TEXTURES 512
 
@@ -820,6 +825,28 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
             o.attrPtr ? o.attrPtr[8] : -1.0f);
 
     o.textures.resize(MAX_TEXTURES);
+
+    // 接线（本轮只接不选）：把设备上下文交给 gl_shader，让它能自己建管线。
+    // 注册本身不进入任何 draw 路径；离屏 render pass 本轮不注册（不做离屏管线）。
+    {
+        lime::GLShaderVkContext ctx{};
+        ctx.device = o.dev;
+        ctx.backbufferRenderPass = o.renderPass;
+        ctx.offscreenRenderPass = VK_NULL_HANDLE;
+        ctx.backbufferFormat = o.colorFormat;
+        ctx.offscreenFormat = VK_FORMAT_R8G8B8A8_UNORM;
+        ctx.viewportWidth = o.extent.width;
+        ctx.viewportHeight = o.extent.height;
+        ctx.uniformMemoryTypeIndex = FindMemType(memProps, 0xFFFFFFFFu,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        ctx.maxSamplers = 16;
+        ctx.getDeviceProcAddr = (PFN_vkGetDeviceProcAddr) o.gipa(o.inst, "vkGetDeviceProcAddr");
+        lime::gl_shader_vk_register(&ctx);
+        fprintf(stderr, "[progpipe] register ok avail=%d device=%p rp=%p fmt=%d vp=%ux%u memtype=%u\n",
+                lime::gl_shader_vk_available() ? 1 : 0, (void*) o.dev, (void*) o.renderPass,
+                (int) o.colorFormat, o.extent.width, o.extent.height,
+                (unsigned) ctx.uniformMemoryTypeIndex);
+    }
     fprintf(stderr, "[vk] init ok swapchain=%ux%u images=%zu format=%d\n",
             o.extent.width, o.extent.height, o.swapImages.size(), (int)o.colorFormat);
     return true;
@@ -1416,6 +1443,36 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
                     (unsigned) lime::gl_shader_uniform_buffer_size(vkProg));
         }
     }
+
+    // 接线探针（本轮不选管线）：对"没有 loc5"的 program 用渲染器自己的 60B 交错布局
+    // 建一条 gl_shader 管线，只为证明接线可用。该管线不进入任何 draw。
+    if (vkProg > 0 && vkProg < 256) {
+        static signed char s_built[256] = {0};
+        if (s_built[vkProg] == 0) {
+            if (lime::gl_shader_program_has_attribute (vkProg, 5)) {
+                s_built[vkProg] = -2;
+                fprintf(stderr, "[progpipe] build prog=%d skipped reason=hasLoc5\n", vkProg);
+            } else {
+                static const lime::GLShaderVertexAttribute s_vattrs[5] = {
+                    {0, 0, 103 /* R32G32_SFLOAT */, 0},
+                    {1, 0, 100 /* R32_SFLOAT */, 16},
+                    {2, 0, 109 /* R32G32B32A32_SFLOAT */, 20},
+                    {3, 0, 109, 36},
+                    {4, 0, 103, 52},
+                };
+                lime::GLShaderVertexLayout layout{0, 60, s_vattrs, 5};
+                bool ok = lime::gl_shader_build_pipeline (vkProg, &layout, false);
+                VkPipeline pipe = ok ? lime::gl_shader_pipeline (vkProg, false) : VK_NULL_HANDLE;
+                s_built[vkProg] = ok ? 1 : -1;
+                if (ok && pipe) {
+                    g_probePipeline = pipe;
+                    g_probeProgram = vkProg;
+                }
+                fprintf(stderr, "[progpipe] build prog=%d attrs=%d ok=%d pipeline=%p\n",
+                        vkProg, lime::gl_shader_attribute_count (vkProg), ok ? 1 : 0, (void*) pipe);
+            }
+        }
+    }
     // 取证：每次绘制一条紧凑记录（纹理 id/尺寸、uv 范围、顶点包围盒、是否触发
     // 归一化分支、uv 是否覆盖整张贴图）。前 12 帧全量，之后只打"覆盖整图"的嫌疑绘制
     {
@@ -1958,6 +2015,21 @@ void VkRenderer::EndFrame() {
 
     g_beginRP(o.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
     if (totalVerts > 0) {
+        // 接线探针（本轮只接不选，一次）：只在 backbuffer pass、且探针管线已建成时，
+        // 先绑探针管线再立刻换回固定管线；两次绑定之间没有任何 draw，故不改变像素。
+        static int s_probeEnabled = -1;
+        static int s_probeDone = 0;
+        if (s_probeEnabled < 0) {
+            const char* e = getenv("VK_PROGPIPE_PROBE");
+            s_probeEnabled = (e && e[0] == '0') ? 0 : 1;
+        }
+        if (s_probeEnabled && !s_probeDone && rp == o.renderPass
+                && g_probePipeline != VK_NULL_HANDLE) {
+            g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_probePipeline);
+            s_probeDone = 1;
+            fprintf(stderr, "[progpipe] bind ok prog=%d pipeline=%p rp=%p\n",
+                    g_probeProgram, (void*) g_probePipeline, (void*) rp);
+        }
         g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeline);
         VkBuffer vbufs[2] = {o.vb, o.attrBuf};
         VkDeviceSize voffs[2] = {0, 0};
