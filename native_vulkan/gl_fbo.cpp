@@ -336,7 +336,7 @@ void BindDrawFbo (int framebuffer) {
     if (r->BindRenderTarget (f.rtId, c[0], c[1], c[2], c[3])) {
         {
             static int s_n = 0;
-            if (s_n < 40) {
+            if (s_n < 40 || f.width != 921 || f.height != 691) {
                 fprintf(stderr, "[glfb] bind fbo=%d -> rt=%u %dx%d\n",
                         framebuffer, f.rtId, f.width, f.height);
             }
@@ -453,6 +453,18 @@ void lime_gl_framebuffer_texture2D (int target, int attachment, int textarget,
         default: return;
     }
     f.dirty = true;
+
+    // 诊断：谁被挂成了附件（前 30 条 + 任何大尺寸/疑似 3× 纹理）
+    if (texture != 0) {
+        int tw = 0, th = 0;
+        gl_vk_texture_size (texture, &tw, &th);
+        static int s_attach = 0;
+        if (s_attach < 30 || tw > 1200 || th > 1400) {
+            fprintf (stderr, "[glfb] attach fbo=%d att=0x%x tex=%d %dx%d lvl=%d\n",
+                     fboName, attachment, texture, tw, th, level);
+        }
+        s_attach++;
+    }
 }
 
 void lime_gl_framebuffer_renderbuffer (int target, int attachment,

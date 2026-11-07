@@ -11,6 +11,9 @@
 
 namespace lime {
 
+// 诊断用：当前 GL program（gl_shader.cpp 实现）
+int gl_shader_current_program ();
+
 static VkRenderer* g_renderer = nullptr;
 static uint64_t g_draws = 0;
 static uint64_t g_presents = 0;
@@ -603,11 +606,12 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
                 if (y < minY) minY = y; if (y > maxY) maxY = y;
             }
             int tw = 0, th = 0; gl_vk_texture_size (texName, &tw, &th);
-            fprintf (stderr, "[gldraw/ie] tex=%d size=%dx%d n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] pStride=%d pOff=%.0f uvBuf=%d uvStride=%d uvOff=%.0f pBufRaw=%d uBufRaw=%d posCli=%d uvCli=%d\n",
+            fprintf (stderr, "[gldraw/ie] tex=%d size=%dx%d n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] pStride=%d pOff=%.0f uvBuf=%d uvStride=%d uvOff=%.0f pBufRaw=%d uBufRaw=%d posCli=%d uvCli=%d prog=%d blend=%d,%d,%d\n",
                      texName, tw, th, count, minU, maxU, minV, maxV,
                      minX, maxX, minY, maxY, strideP, g_attrs[0].offset,
                      uvBuf, strideU, g_attrs[uvIdx].offset,
-                     g_attrs[0].buffer, g_attrs[uvIdx].buffer, posClient ? 1 : 0, uvClient ? 1 : 0);
+                     g_attrs[0].buffer, g_attrs[uvIdx].buffer, posClient ? 1 : 0, uvClient ? 1 : 0,
+                     gl_shader_current_program (), g_blendEnabled ? 1 : 0, g_blendSrc, g_blendDst);
             static int s_raw2 = 0;
             if (s_raw2 < 6 && !posClient && pBytes >= pBase0 + 32) {
                 const float* f = (const float*)(pp + pBase0);
