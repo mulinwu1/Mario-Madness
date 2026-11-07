@@ -349,6 +349,42 @@ static float g_attrConst[16][4] = {{0}};
 static int g_attrConstN[16] = {0};   // 已写入的分量数
 static bool g_attrConstSet[16] = {false};
 
+// 关键层逐笔取证：tex 5/6/7 是 B 链（HUD/标题）三条，黑帧时它们是否被画、
+// 画的时候 alpha 是多少、alpha 数组来自哪条 buffer —— 用日志区分
+// “alpha=0 变透明”与“根本没发绘制”。
+static void LogAlpha567(int texName, int count, const std::vector<float>& alphas, bool fromArray) {
+    if (texName != 5 && texName != 6 && texName != 7) return;
+    static int s_log = 0;
+    if (s_log >= 2400) return;
+    s_log++;
+    float aMin = alphas[0], aMax = alphas[0];
+    for (int i = 1; i < count; i++) {
+        if (alphas[(size_t)i] < aMin) aMin = alphas[(size_t)i];
+        if (alphas[(size_t)i] > aMax) aMax = alphas[(size_t)i];
+    }
+    const AttribState& a5 = g_attrs[5];
+    int a5buf = a5.buffer > 0 ? a5.buffer : g_boundArrayBuffer;
+    const unsigned char* ab = nullptr;
+    size_t abytes = 0;
+    if (a5.enabled && a5.size >= 1 && a5buf > 0 && a5buf < (int)g_buffers.size()
+        && !g_buffers[(size_t)a5buf].data.empty()) {
+        ab = g_buffers[(size_t)a5buf].data.data();
+        abytes = g_buffers[(size_t)a5buf].data.size();
+    }
+    int astr = a5.stride > 0 ? a5.stride : 4;
+    float raw[6] = {0, 0, 0, 0, 0, 0};
+    int rn = count < 6 ? count : 6;
+    for (int k = 0; k < rn; k++) {
+        size_t o = (size_t)a5.offset + (size_t)k * (size_t)astr;
+        if (ab && (abytes == 0 || o + 4 <= abytes)) raw[k] = *(const float*)(ab + o);
+    }
+    fprintf(stderr, "[alpha567] #%d tex=%d n=%d arr=%d en5=%d buf5=%d off5=%.0f str5=%d amin=%.3f amax=%.3f prog=%d blend=%d,%d,%d raw=[%.3f %.3f %.3f %.3f %.3f %.3f]\n",
+            s_log, texName, count, fromArray ? 1 : 0, a5.enabled ? 1 : 0, a5buf, a5.offset, astr,
+            aMin, aMax, gl_shader_current_program (), g_blendEnabled ? 1 : 0, g_blendSrc, g_blendDst,
+            raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]);
+}
+
+
 // per-vertex alpha：lime 为 openfl 的 alpha 单独开了 loc5 顶点数组
 // （实测 idx=5 size=1 stride=4 off=8，独立 VBO），黑幕的 0.05 就在这条数组里。
 // 数组未启用/越界时退回常量属性（glVertexAttrib1f 的值），再退回 1。
@@ -607,6 +643,7 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
     // 逐顶点 alpha（loc5 数组）；这是黑幕"几乎不可见"的唯一通道
     bool alphaFromArray = false;
     std::vector<float> alphas = BuildVertexAlpha(count, first, nullptr, &alphaFromArray);
+    LogAlpha567(texName, count, alphas, alphaFromArray);
     if (!alphaFromArray) {
         g_renderer->SetDrawColor ((g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f) *
                                   (g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f),
@@ -717,6 +754,7 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
     g_draws++;
     bool alphaFromArray = false;
     std::vector<float> alphas = BuildVertexAlpha(count, 0, idxs.data(), &alphaFromArray);
+    LogAlpha567(texName, count, alphas, alphaFromArray);
     if (!alphaFromArray) {
         g_renderer->SetDrawColor ((g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f) *
                                   (g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f),
