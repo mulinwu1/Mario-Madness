@@ -1401,7 +1401,7 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
 }
 
 void VkRenderer::PresentTarget() {
-    impl->presentReq = true;
+    // FBO 切换触发的收尾：只提交几何，不当作真实 flip（真实 flip 由 gl_fbo 显式 RequestPresent）
     EndFrame();
 }
 
