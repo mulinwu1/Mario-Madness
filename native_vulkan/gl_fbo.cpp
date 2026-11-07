@@ -649,9 +649,8 @@ void gl_vk_present_frame () {
         fprintf (stderr, "[glvk] present f=%llu cur=%u last=%u pending=%d\n",
                  (unsigned long long)r->FrameIndex (),
                  g_currentTarget, g_lastTarget, (int)r->FrameHasGeometry ());
-        // 关键：OpenFL 的整帧常常停在最后一个离屏目标上，如果直接 EndFrame，
-        // 渲染结果只留在 FBO 里，后缓冲从来没被画过 → 屏幕只有清屏色（黑屏）。
-        // 所以提交前先把最后一张离屏图铺满后缓冲。
+        // 合成顺序日志：本视觉帧每次 present 实际铺了哪张离屏图（0 = 没合成，lime 已直接画后缓冲）
+        uint32_t composed = 0;
         if (g_currentTarget >= 1000) {
             float c[4];
             GetClearColor (c);
@@ -677,6 +676,7 @@ void gl_vk_present_frame () {
                     W,    H,    (float)tw, (float)th,
                 };
                 r->DrawRaw (src, quad, 6);
+                composed = src;
                 g_backbufferOpen = true;
                 fprintf (stderr, "[glvk] blit cur=%u src=%u %dx%d -> %dx%d\n",
                          g_currentTarget, src, tw, th, (int)W, (int)H);
@@ -706,10 +706,17 @@ void gl_vk_present_frame () {
                     W,    H,    (float)tw, (float)th,
                 };
                 r->DrawRaw (src, quad, 6);
+                composed = src;
                 g_backbufferOpen = true;
                 fprintf (stderr, "[glvk] blit last src=%u %dx%d -> %dx%d\n",
                          src, tw, th, (int)W, (int)H);
             }
+        }
+        static uint64_t s_compLog = 0;
+        if (s_compLog < 20000) {
+            fprintf (stderr, "[glvk] comp f=%llu order=%u cur=%u\n",
+                     (unsigned long long)r->FrameIndex (), composed, g_currentTarget);
+            s_compLog++;
         }
         r->EndFrame ();
         // 本帧结束即失效：下一帧必须由新的提交重新标记，避免取到上一帧的目标

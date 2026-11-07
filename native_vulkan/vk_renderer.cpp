@@ -5,6 +5,7 @@
 #include <vulkan/vulkan.h>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 
 #define MAX_SPRITES 4096
@@ -145,6 +146,8 @@ static PFN_vkGetInstanceProcAddr g_gipa = nullptr;
 
 // 提交计数：DrawRaw 的取证日志按它分组，判断“同一帧内”的绘制
 static uint64_t g_drawFrame = 0;
+// 上一帧后缓冲最后一次采样到的纹理 id，用于区分两次后缓冲合成各自画的是哪一层
+static uint32_t g_bbLastTex = 0;
 
 static uint32_t FindMemType(const VkPhysicalDeviceMemoryProperties& mp, uint32_t bits, VkMemoryPropertyFlags flags) {
     for (uint32_t i = 0; i < 32; i++) {
@@ -1119,6 +1122,7 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount) {
 
     // 采样源尺寸：uv 归一化要用（有的路径传进来的 uv 是像素值而不是 0..1）
     float tw = 0.0f, th = 0.0f;
+    if (o.currentTarget == 0) g_bbLastTex = texId;
     if (texId >= 1000) {
         uint32_t ti = texId - 1000;
         tw = (float)o.targets[ti].w;
@@ -1479,9 +1483,10 @@ void VkRenderer::EndFrame() {
                     if (totalVerts > 0) o.targets[ti].lastWriteFrame = s_frames;
                 }
             }
-            fprintf(stderr, "[vk] submit frame=%llu t=%lld tgt=%u verts=%zu ranges=%zu delsample=%lld created=%llu\n",
+            fprintf(stderr, "[vk] submit frame=%llu t=%lld tgt=%u verts=%zu ranges=%zu delsample=%lld created=%llu tex=%u\n",
                     (unsigned long long)s_frames, (long long)time(nullptr), o.currentTarget,
-                    totalVerts, ranges.size(), delsample, (unsigned long long)created);
+                    totalVerts, ranges.size(), delsample, (unsigned long long)created,
+                    (o.currentTarget == 0) ? g_bbLastTex : 0u);
             s_submitLog++;
         }
         if (s_frames == 1 || s_frames % 30 == 0 || o.currentTarget == 0) {
@@ -1564,14 +1569,27 @@ void VkRenderer::EndFrame() {
     g_waitIdle(o.queue);
 
     if (o.currentTarget == 0) {
-        VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-        pi.swapchainCount = 1;
-        pi.pSwapchains = &o.swapchain;
-        pi.pImageIndices = &o.frameImageIndex;
-        g_present(o.queue, &pi);
+        // 对照实验（默认关闭）：VK_SINGLE_COMP=1 时跳过每视觉帧第一次后缓冲上屏，
+        // 只让第二次（phase%9==6）真正 present。用于验证"中间态被上屏/被抓"假设。
+        static int s_singleComp = -1;
+        if (s_singleComp < 0) {
+            const char* e = getenv("VK_SINGLE_COMP");
+            s_singleComp = (e && e[0] == '1') ? 1 : 0;
+        }
+        bool skipPresent = s_singleComp && (g_drawFrame % 9u) == 2u;
+        if (skipPresent) {
+            fprintf(stderr, "[vk] present-skip f=%llu phase=2\n", (unsigned long long)g_drawFrame);
+        } else {
+            VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+            pi.swapchainCount = 1;
+            pi.pSwapchains = &o.swapchain;
+            pi.pImageIndices = &o.frameImageIndex;
+            g_present(o.queue, &pi);
+        }
     }
 
     o.frameOpen = false;
+    g_bbLastTex = 0;
     for (auto& t : o.textures) t.verts.clear();
     for (auto& t : o.targets) t.verts.clear();
 }
