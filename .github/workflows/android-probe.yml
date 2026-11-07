@@ -46,6 +46,7 @@ jobs:
       - name: Install NDK ${{ env.NDK_VERSION }} via sdkmanager
         run: |
           set -uo pipefail
+          set +e
           t0=$(date +%s)
           SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
           SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
@@ -109,6 +110,7 @@ jobs:
       - name: Install hxcpp ${{ env.HXCPP_VERSION }}
         run: |
           set -uo pipefail
+          set +e
           t0=$(date +%s)
           O="$RUNNER_TEMP/probe-out"
           yes | haxelib install hxcpp "${HXCPP_VERSION}" 2>&1 | tee "$O/install-hxcpp.log" | tail -n 12
@@ -124,6 +126,7 @@ jobs:
       - name: Clone lime ${{ env.LIME_VERSION }} + haxelib dev
         run: |
           set -uo pipefail
+          set +e
           t0=$(date +%s)
           O="$RUNNER_TEMP/probe-out"
           git clone --depth 1 --branch "${LIME_VERSION}" --recursive --shallow-submodules \
@@ -137,6 +140,7 @@ jobs:
       - name: lime rebuild android
         run: |
           set -uo pipefail
+          set +e
           t0=$(date +%s)
           O="$RUNNER_TEMP/probe-out"
           cd "$HOME/lime-src" || exit 1
