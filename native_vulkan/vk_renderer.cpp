@@ -97,6 +97,13 @@ struct VkRenderer::Impl {
     float* uboPtr = nullptr;
 
     std::vector<TexSlot> textures;
+    // 实验 VK_SINGLE_PRESENT=1（默认关）：一视觉帧只 acquire/present 一次；
+    // 中途绑定后缓冲只提交几何（LOAD pass 叠加），不 flip。
+    VkRenderPass renderPassLoad = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> framebuffersLoad;
+    bool bbHeld = false;
+    bool bbLoad = false;
+    bool presentReq = false;
     // 取证：present 前把交换链图拷到主机可见缓冲，算亮度统计（VK_BBSTAT=1，默认关）
     VkBuffer statBuf = VK_NULL_HANDLE;
     VkDeviceMemory statMem = VK_NULL_HANDLE;
@@ -433,6 +440,35 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
         fci.height = o.extent.height;
         fci.layers = 1;
         createFB(o.dev, &fci, nullptr, &o.framebuffers[i]);
+    }
+
+    // 实验 VK_SINGLE_PRESENT=1（默认关）：同一张交换链图在一个视觉帧内多次合成，
+    // 第二次起用 LOAD pass 叠加上一层内容，最后只在真实 swap 时 present 一次。
+    {
+        const char* v = getenv("VK_SINGLE_PRESENT");
+        if (v && v[0] == '1') {
+            VkAttachmentDescription att2 = att;
+            att2.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            att2.initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            VkRenderPassCreateInfo rpci2{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+            rpci2.attachmentCount = 1;
+            rpci2.pAttachments = &att2;
+            rpci2.subpassCount = 1;
+            rpci2.pSubpasses = &sub;
+            if (createRP(o.dev, &rpci2, nullptr, &o.renderPassLoad) == VK_SUCCESS) {
+                o.framebuffersLoad.resize(ic);
+                for (uint32_t i = 0; i < ic; i++) {
+                    VkFramebufferCreateInfo fci2{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+                    fci2.renderPass = o.renderPassLoad;
+                    fci2.attachmentCount = 1;
+                    fci2.pAttachments = &o.swapViews[i];
+                    fci2.width = o.extent.width;
+                    fci2.height = o.extent.height;
+                    fci2.layers = 1;
+                    createFB(o.dev, &fci2, nullptr, &o.framebuffersLoad[i]);
+                }
+            }
+        }
     }
 
     // 取证开关 VK_BBSTAT=1（默认关）：分配主机可见缓冲，用来在 present 前拷出后缓冲像素
@@ -1306,6 +1342,14 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
     // 不能清空已经累积的顶点，否则整条 filter 链最后合成时 verts=0，屏幕只剩清屏色。
     // 这里只更新清屏色，等 EndFrame 时真正清屏。
     if (o.frameOpen && o.currentTarget == id) {
+        // 实验 VK_SINGLE_PRESENT=1：同一张交换链图本帧已被占用，直接复用，不 acquire 也不提交
+        if (id == 0 && o.bbHeld && o.renderPassLoad != VK_NULL_HANDLE) {
+            o.clearR = r;
+            o.clearG = g;
+            o.clearB = b;
+            o.clearA = a;
+            return true;
+        }
         // 取证开关 VK_FRESH_IMG=1（默认关）：第二次绑定后缓冲时，若已累积几何，
         // 先 EndFrame 做一次 present 归还当前 image，再 acquire 新图。
         // 目的：保持 acquire↔present 一一对应（不重走 §17 的 skip-present），
@@ -1339,8 +1383,15 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
     // “先绑后缓冲、再画一张全屏 quad”，一清就把这批顶点吃掉 → 屏幕只剩清屏色。
     // 顶点在 EndFrame 提交后由 EndFrame 自己清。
     if (id == 0) {
-        VkResult ar = g_acquire(o.dev, o.swapchain, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE, &o.frameImageIndex);
-        if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) return false;
+        if (o.bbHeld && o.renderPassLoad != VK_NULL_HANDLE) {
+            // 实验 VK_SINGLE_PRESENT=1：本帧已持有同一张图，后续合成用 LOAD pass 叠加
+            o.bbLoad = true;
+        } else {
+            VkResult ar = g_acquire(o.dev, o.swapchain, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE, &o.frameImageIndex);
+            if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) return false;
+            o.bbHeld = true;
+            o.bbLoad = false;
+        }
     } else {
         uint32_t ti = id - 1000;
         if (ti >= o.targets.size() || !o.targets[ti].used) return false;
@@ -1350,7 +1401,12 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
 }
 
 void VkRenderer::PresentTarget() {
+    impl->presentReq = true;
     EndFrame();
+}
+
+void VkRenderer::RequestPresent() {
+    impl->presentReq = true;
 }
 
 uint32_t VkRenderer::CreateRenderTarget(int w, int h) {
@@ -1562,6 +1618,11 @@ void VkRenderer::EndFrame() {
     VkFramebuffer fb = o.framebuffers[o.frameImageIndex];
     VkRenderPass rp = o.renderPass;
     VkExtent2D ext = o.extent;
+    // 实验 VK_SINGLE_PRESENT=1：本帧该图已有内容 → 用 LOAD pass 叠加，不清屏
+    if (o.currentTarget == 0 && o.bbLoad && o.renderPassLoad != VK_NULL_HANDLE) {
+        fb = o.framebuffersLoad[o.frameImageIndex];
+        rp = o.renderPassLoad;
+    }
     {
         static uint64_t s_frames = 0;
         s_frames++;
@@ -1736,20 +1797,35 @@ void VkRenderer::EndFrame() {
     }
 
     if (o.currentTarget == 0) {
-        // 取证：每次 present 一行（一个视觉帧通常 2 次，其中只有 ContextFlip 那次
-        // 会在 gl_fbo 里另打一条 [glvk] present），用于把黑帧对齐到交换链图。
-        static uint64_t s_pres = 0;
-        s_pres++;
-        if (s_pres <= 20000) {
-            fprintf(stderr, "[vk] pres n=%llu f=%llu img=%u tex=%u verts=%zu\n",
-                    (unsigned long long)s_pres, (unsigned long long)g_drawFrame,
-                    o.frameImageIndex, g_bbLastTex, totalVerts);
+        // 实验 VK_SINGLE_PRESENT=1：中间合成只提交几何、保持 image 不归还；
+        // 只有真实 swap（gl_fbo 调 RequestPresent）才 present 一次。
+        bool skipPresent = (o.renderPassLoad != VK_NULL_HANDLE && o.bbHeld && !o.presentReq);
+        if (skipPresent) {
+            static uint64_t s_nopres = 0;
+            s_nopres++;
+            if (s_nopres <= 20000) {
+                fprintf(stderr, "[vk] nopres n=%llu f=%llu tex=%u verts=%zu load=%d\n",
+                        (unsigned long long)s_nopres, (unsigned long long)g_drawFrame,
+                        g_bbLastTex, totalVerts, o.bbLoad ? 1 : 0);
+            }
+        } else {
+            // 取证：每次 present 一行（一个视觉帧通常 2 次，其中只有 ContextFlip 那次
+            // 会在 gl_fbo 里另打一条 [glvk] present），用于把黑帧对齐到交换链图。
+            static uint64_t s_pres = 0;
+            s_pres++;
+            if (s_pres <= 20000) {
+                fprintf(stderr, "[vk] pres n=%llu f=%llu img=%u tex=%u verts=%zu\n",
+                        (unsigned long long)s_pres, (unsigned long long)g_drawFrame,
+                        o.frameImageIndex, g_bbLastTex, totalVerts);
+            }
+            VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+            pi.swapchainCount = 1;
+            pi.pSwapchains = &o.swapchain;
+            pi.pImageIndices = &o.frameImageIndex;
+            g_present(o.queue, &pi);
+            o.bbHeld = false;
+            o.presentReq = false;
         }
-        VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-        pi.swapchainCount = 1;
-        pi.pSwapchains = &o.swapchain;
-        pi.pImageIndices = &o.frameImageIndex;
-        g_present(o.queue, &pi);
     }
 
     o.frameOpen = false;

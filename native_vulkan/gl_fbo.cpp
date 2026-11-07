@@ -794,6 +794,7 @@ void gl_vk_present_frame () {
                      (unsigned long long)r->FrameIndex (), composed, g_currentTarget);
             s_compLog++;
         }
+        r->RequestPresent ();
         r->EndFrame ();
         // 本帧结束即失效：下一帧必须由新的提交重新标记，避免取到上一帧的目标
         r->ResetLastGeometryTarget ();

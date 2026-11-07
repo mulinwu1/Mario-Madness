@@ -68,6 +68,8 @@ public:
     bool BindRenderTarget(uint32_t id, float r, float g, float b, float a);
     // finish drawing into the current target and present it if it is the backbuffer
     void PresentTarget();
+    // 标记"下一个后缓冲提交是真实 flip"：只在真正的 swap 路径调用
+    void RequestPresent();
 
     const char* LastError() const;
 
