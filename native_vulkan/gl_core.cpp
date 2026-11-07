@@ -352,8 +352,9 @@ static bool g_attrConstSet[16] = {false};
 // per-vertex alpha：lime 为 openfl 的 alpha 单独开了 loc5 顶点数组
 // （实测 idx=5 size=1 stride=4 off=8，独立 VBO），黑幕的 0.05 就在这条数组里。
 // 数组未启用/越界时退回常量属性（glVertexAttrib1f 的值），再退回 1。
-static std::vector<float> BuildVertexAlpha(int count, int baseVertex, const unsigned int* indices) {
+static std::vector<float> BuildVertexAlpha(int count, int baseVertex, const unsigned int* indices, bool* usedArray) {
     std::vector<float> alphas((size_t)count, 1.0f);
+    *usedArray = false;
     float a1 = g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f;
     float a5c = g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f;
     const AttribState& a = g_attrs[5];
@@ -383,6 +384,7 @@ static std::vector<float> BuildVertexAlpha(int count, int baseVertex, const unsi
         }
         alphas[(size_t)i] = v * a1;
     }
+    *usedArray = (p != nullptr);
     return alphas;
 }
 
@@ -603,7 +605,13 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
     }
     g_draws++;
     // 逐顶点 alpha（loc5 数组）；这是黑幕"几乎不可见"的唯一通道
-    std::vector<float> alphas = BuildVertexAlpha(count, first, nullptr);
+    bool alphaFromArray = false;
+    std::vector<float> alphas = BuildVertexAlpha(count, first, nullptr, &alphaFromArray);
+    if (!alphaFromArray) {
+        g_renderer->SetDrawColor ((g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f) *
+                                  (g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f),
+                                  nullptr, nullptr);
+    }
     // 诊断：确认 lime 传进来的 uv 是“帧子矩形归一化”还是“整图 0..1”/像素值
     {
         static int s_uvdbg = 0;
@@ -633,7 +641,7 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
         }
         s_uvdbg++;
     }
-    g_renderer->DrawRaw(vkTex, out.data(), count, alphas.data());
+    g_renderer->DrawRaw(vkTex, out.data(), count, alphaFromArray ? alphas.data() : nullptr);
 }
 
 void lime_gl_draw_elements(int mode, int count, int type, double offset) {
@@ -707,7 +715,13 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
         return;
     }
     g_draws++;
-    std::vector<float> alphas = BuildVertexAlpha(count, 0, idxs.data());
+    bool alphaFromArray = false;
+    std::vector<float> alphas = BuildVertexAlpha(count, 0, idxs.data(), &alphaFromArray);
+    if (!alphaFromArray) {
+        g_renderer->SetDrawColor ((g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f) *
+                                  (g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f),
+                                  nullptr, nullptr);
+    }
     // 诊断：与 draw_arrays 同款，确认 indexed 路径的 uv 语义
     {
         static int s_uvdbg2 = 0;
@@ -742,10 +756,39 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
                         texName, pBase0, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
                 s_raw2++;
             }
+            if (tw >= 2000 && th >= 2000) {
+                static int s_big = 0;
+                if (s_big < 60) {
+                    const AttribState& a5 = g_attrs[5];
+                    int a5buf = a5.buffer > 0 ? a5.buffer : g_boundArrayBuffer;
+                    const unsigned char* ab = nullptr;
+                    size_t abytes = 0;
+                    if (a5.enabled && a5.size >= 1 && a5buf > 0 && a5buf < (int)g_buffers.size()
+                        && !g_buffers[(size_t)a5buf].data.empty()) {
+                        ab = g_buffers[(size_t)a5buf].data.data();
+                        abytes = g_buffers[(size_t)a5buf].data.size();
+                    }
+                    size_t abase = (size_t)a5.offset;
+                    int astr = a5.stride > 0 ? a5.stride : 4;
+                    float raw[6] = {0, 0, 0, 0, 0, 0};
+                    int rn = count < 6 ? count : 6;
+                    for (int k = 0; k < rn; k++) {
+                        unsigned vi = idxs[(size_t)k];
+                        size_t o = abase + (size_t)vi * (size_t)astr;
+                        if (ab && (abytes == 0 || o + 4 <= abytes)) raw[k] = *(const float*)(ab + o);
+                    }
+                    fprintf(stderr, "[bigalpha] tex=%d en5=%d en6=%d en7=%d buf5=%d off5=%.0f str5=%d a5c=%.3f raw=[%.3f %.3f %.3f %.3f %.3f %.3f]\n",
+                            texName, a5.enabled ? 1 : 0, g_attrs[6].enabled ? 1 : 0, g_attrs[7].enabled ? 1 : 0,
+                            a5buf, a5.offset, astr,
+                            g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f,
+                            raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]);
+                    s_big++;
+                }
+            }
         }
         s_uvdbg2++;
     }
-    g_renderer->DrawRaw(vkTex, out.data(), count, alphas.data());
+    g_renderer->DrawRaw(vkTex, out.data(), count, alphaFromArray ? alphas.data() : nullptr);
 }
 
 int lime_gl_get_error() {

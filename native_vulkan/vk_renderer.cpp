@@ -1367,12 +1367,20 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
         bool spansWhole = false;
         if (!pixelUv) spansWhole = (uMax - uMin) >= 0.9f && (vMax - vMin) >= 0.9f;
         else if (tw > 0 && th > 0) spansWhole = (uMax - uMin) >= tw * 0.9f && (vMax - vMin) >= th * 0.9f;
+        float aMin = g_drawAlpha, aMax = g_drawAlpha;
+        if (vertexAlpha) {
+            aMin = vertexAlpha[0]; aMax = vertexAlpha[0];
+            for (int i = 1; i < vertexCount; i++) {
+                if (vertexAlpha[i] < aMin) aMin = vertexAlpha[i];
+                if (vertexAlpha[i] > aMax) aMax = vertexAlpha[i];
+            }
+        }
         static uint64_t s_logged = 0;
         if (s_logged < 6000 && (g_drawFrame <= 12 || spansWhole)) {
-            fprintf(stderr, "[vkdraw] f=%llu cur=%u tex=%u tsz=%.0fx%.0f n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] norm=%d whole=%d\n",
+            fprintf(stderr, "[vkdraw] f=%llu cur=%u tex=%u tsz=%.0fx%.0f n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] norm=%d whole=%d asrc=%s amin=%.3f amax=%.3f\n",
                     (unsigned long long)g_drawFrame, o.currentTarget, texId, tw, th, vertexCount,
                     uMin, uMax, vMin, vMax, xMin, xMax, yMin, yMax,
-                    pixelUv ? 1 : 0, spansWhole ? 1 : 0);
+                    pixelUv ? 1 : 0, spansWhole ? 1 : 0, vertexAlpha ? "arr" : "const", aMin, aMax);
             s_logged++;
         }
     }
