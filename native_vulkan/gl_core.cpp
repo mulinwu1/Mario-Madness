@@ -392,7 +392,11 @@ static std::vector<float> BuildVertexAlpha(int count, int baseVertex, const unsi
     std::vector<float> alphas((size_t)count, 1.0f);
     *usedArray = false;
     float a1 = g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f;
+    // lime 常把 loc5 的常量属性留在 0（glVertexAttrib1f(5, 0.000) 是残留状态）。
+    // 数组未启用时若照搬 0，整笔绘制会变全透明；GL 里这些笔（全屏 blit/合成）
+    // 实际按 alpha=1 画，所以把 0 视作“未设置”，回退 1。
     float a5c = g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f;
+    if (a5c == 0.0f) a5c = 1.0f;
     const AttribState& a = g_attrs[5];
     const unsigned char* p = nullptr;
     size_t bytes = 0, base = 0;
@@ -644,11 +648,6 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
     bool alphaFromArray = false;
     std::vector<float> alphas = BuildVertexAlpha(count, first, nullptr, &alphaFromArray);
     LogAlpha567(texName, count, alphas, alphaFromArray);
-    if (!alphaFromArray) {
-        g_renderer->SetDrawColor ((g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f) *
-                                  (g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f),
-                                  nullptr, nullptr);
-    }
     // 诊断：确认 lime 传进来的 uv 是“帧子矩形归一化”还是“整图 0..1”/像素值
     {
         static int s_uvdbg = 0;
@@ -678,7 +677,7 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
         }
         s_uvdbg++;
     }
-    g_renderer->DrawRaw(vkTex, out.data(), count, alphaFromArray ? alphas.data() : nullptr);
+    g_renderer->DrawRaw(vkTex, out.data(), count, alphas.data());
 }
 
 void lime_gl_draw_elements(int mode, int count, int type, double offset) {
@@ -755,11 +754,6 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
     bool alphaFromArray = false;
     std::vector<float> alphas = BuildVertexAlpha(count, 0, idxs.data(), &alphaFromArray);
     LogAlpha567(texName, count, alphas, alphaFromArray);
-    if (!alphaFromArray) {
-        g_renderer->SetDrawColor ((g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f) *
-                                  (g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f),
-                                  nullptr, nullptr);
-    }
     // 诊断：与 draw_arrays 同款，确认 indexed 路径的 uv 语义
     {
         static int s_uvdbg2 = 0;
@@ -826,7 +820,7 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
         }
         s_uvdbg2++;
     }
-    g_renderer->DrawRaw(vkTex, out.data(), count, alphaFromArray ? alphas.data() : nullptr);
+    g_renderer->DrawRaw(vkTex, out.data(), count, alphas.data());
 }
 
 int lime_gl_get_error() {
