@@ -2418,6 +2418,26 @@ int gl_shader_current_program () {
 
 }
 
+// 观测用（纯读，不改变行为）：某个 program 的顶点属性数量 / 是否声明某个 location。
+int gl_shader_attribute_count (int program) {
+
+	Program* p = FindProgram (program);
+	if (!p) return -1;
+	return (int) p->attribs.size ();
+
+}
+
+bool gl_shader_program_has_attribute (int program, int location) {
+
+	Program* p = FindProgram (program);
+	if (!p) return false;
+	for (size_t i = 0; i < p->attribs.size (); i++) {
+		if ((int) p->attribs[i].location == location) return true;
+	}
+	return false;
+
+}
+
 const char* gl_shader_program_glsl (int program, int stage) {
 
 	Program* p = FindProgram (program);
