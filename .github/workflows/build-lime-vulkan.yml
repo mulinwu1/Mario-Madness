@@ -20,6 +20,20 @@ jobs:
             native_vulkan
           sparse-checkout-cone-mode: false
 
+      # key 必须跟着源码走：只用常量 key + 整目录缓存，会把上一轮的 obj/ndll 一直带过来
+      - name: Compute source hash
+        id: srchash
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = Get-ChildItem native_vulkan -File -Recurse |
+            Where-Object { $_.Extension -in '.cpp', '.h', '.py', '.yml' } | Sort-Object FullName
+          $lines = foreach ($f in $files) { "$($f.FullName)|$((Get-FileHash $f.FullName -Algorithm SHA256).Hash)" }
+          $ms = [IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes(($lines -join "`n")))
+          $hash = (Get-FileHash -InputStream $ms -Algorithm SHA256).Hash.Substring(0, 16)
+          Write-Host "source hash: $hash ($($files.Count) files)"
+          "hash=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
       # 缓存三块最耗时的东西：haxelib 库、Vulkan 头、lime 源码(含 SDL 子模块)+编译中间产物
       # 命中后 clone / 下载 / SDL 重编都能跳过
       - name: Restore build caches
@@ -30,8 +44,10 @@ jobs:
             vkh
             C:\lime-src
             C:\glslang
-          key: lime-vk-v2-${{ runner.os }}
+          key: lime-vk-v3-${{ runner.os }}-${{ steps.srchash.outputs.hash }}
           restore-keys: |
+            lime-vk-v3-${{ runner.os }}-
+            lime-vk-v3-
             lime-vk-v2-
 
       - name: Install Haxe 4.2.5 and Neko
@@ -150,16 +166,34 @@ jobs:
       - name: Build lime native
         shell: pwsh
         run: |
+          $ndll = "C:\lime-src\ndll\Windows64\lime.ndll"
+          $log = Join-Path $env:GITHUB_WORKSPACE 'build-lime.log'
+          $started = Get-Date
+          "build_started: $($started.ToString('o'))" | Out-File $log
+          # 缓存树里可能躺上一轮的 ndll；先删，避免"文件在 = 产物已更新"的误判
+          if (Test-Path $ndll) {
+            Remove-Item $ndll -Force
+            "removed stale ndll: $ndll" | Out-File $log -Append
+          }
           Push-Location C:\lime-src
           # 只出 x64：glslang 官方包只有 x86_64 库，32 位 ndll 链接会 LNK4272；
           # 游戏本身跑 Windows64，不需要 Windows/lime.ndll
-          haxelib run lime rebuild windows -64
+          haxelib run lime rebuild windows -64 2>&1 | Tee-Object -FilePath $log -Append
           $code = $LASTEXITCODE
           Pop-Location
           Write-Host "lime rebuild exit=$code"
-          $ndll = "C:\lime-src\ndll\Windows64\lime.ndll"
+          "lime rebuild exit=$code" | Out-File $log -Append
+          if ($code -ne 0) { Write-Host "build failed"; exit 1 }
           if (Test-Path $ndll) {
-            Get-Item $ndll | Select-Object FullName, Length
+            $info = Get-Item $ndll
+            $info | Select-Object FullName, Length
+            $info | ForEach-Object { "ndll: $($_.FullName) $($_.Length) B  LastWriteTime=$($_.LastWriteTime.ToString('o'))" } | Out-File $log -Append
+            # 必须是本轮生成的：比构建开始时间新，否则就是缓存里的旧文件
+            if ($info.LastWriteTime -le $started) {
+              Write-Host "ndll is stale (older than build start): $($info.LastWriteTime)"
+              "ASSERT FAIL: ndll stale" | Out-File $log -Append
+              exit 1
+            }
             $bytes = [IO.File]::ReadAllBytes($ndll)
             $txt = [Text.Encoding]::ASCII.GetString($bytes)
             $vkCount = ([regex]::Matches($txt,'vkCreateInstance')).Count
@@ -167,16 +201,29 @@ jobs:
             $shimCount = ([regex]::Matches($txt,'lime_glslang.dll')).Count
             Write-Host "lime_glslang.dll imports: $shimCount"
             Write-Host "sha256: $((Get-FileHash $ndll -Algorithm SHA256).Hash)"
+            "size=$($info.Length) sha256=$((Get-FileHash $ndll -Algorithm SHA256).Hash)" | Out-File $log -Append
             # 供 build-game.yml 侧核对 artifact 确实是 Vulkan 版
             if ($vkCount -lt 1) { Write-Host "not a vulkan ndll"; exit 1 }
             # 没有这条 import 说明 gl_shader.cpp 没进链接，shader 还是 lime 的 no-op
             if ($shimCount -lt 1) { Write-Host "gl_shader not linked (no lime_glslang.dll import)"; exit 1 }
           } else {
             Write-Host "lime.ndll NOT produced"
+            "ASSERT FAIL: ndll not produced" | Out-File $log -Append
             exit 1
           }
 
+      # 失败时也要有日志可查：与产物上传分开，always()
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lime-vulkan-build-log
+          path: build-lime.log
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Upload
+        if: success()
         uses: actions/upload-artifact@v7
         with:
           name: lime-vulkan-ndll
