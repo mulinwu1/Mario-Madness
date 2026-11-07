@@ -203,14 +203,11 @@ jobs:
           Remove-Item build.log, build.err, empty.stdin -ErrorAction SilentlyContinue
           New-Item -ItemType File -Path empty.stdin | Out-Null
           Write-Host "openfl fork: $env:OPENFL_VKPKT_FORK"
-          # 降内存：单核私有 runner 上 hxcpp 默认并发会把 cl.exe 峰值叠成数倍
-          # HXCPP_COMPILE_THREADS 是 hxcpp 自己读的 define/env（BuildTool.hx: thread_var）
-          $env:HXCPP_COMPILE_THREADS = '1'
           $cs = Get-CimInstance Win32_ComputerSystem
           Write-Host ("host memory: {0:N1} GB physical, {1} logical cores" -f ($cs.TotalPhysicalMemory/1GB), $env:NUMBER_OF_PROCESSORS)
-          Write-Host 'hxcpp: -D HXCPP_COMPILE_THREADS=1 -D HXCPP_FAST_LINK (no -debug => 无 -Zi/无 vc.pdb/无 -debug 链接)'
+          Write-Host 'hxcpp: 默认并行(=逻辑核数) + -D HXCPP_FAST_LINK (no -debug => 无 -Zi/无 vc.pdb/无 -debug 链接)'
           haxelib list
-          $p = Start-Process -FilePath $hx -ArgumentList "run","lime","build","windows","-D","HXCPP_COMPILE_THREADS=1","-D","HXCPP_FAST_LINK" `
+          $p = Start-Process -FilePath $hx -ArgumentList "run","lime","build","windows","-D","HXCPP_FAST_LINK" `
                -NoNewWindow -RedirectStandardOutput build.log -RedirectStandardError build.err `
                -RedirectStandardInput empty.stdin -PassThru
           $deadline = (Get-Date).AddMinutes(75)
