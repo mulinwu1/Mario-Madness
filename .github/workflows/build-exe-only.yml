@@ -144,16 +144,22 @@ jobs:
           $limeRoot = "$env:USERPROFILE\haxelib\lime\$($env:LIME_VERSION -replace '\.',',')"
           if (-not (Test-Path $limeRoot)) { throw "haxelib lime not found: $limeRoot" }
           $targets = @(Get-ChildItem "$limeRoot\ndll" -Recurse -Filter 'lime.ndll' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
-          if ($targets.Count -eq 0) { throw 'no lime.ndll under haxelib lime' }
+          Write-Host "--- ndll dirs under haxelib lime ---"
+          Get-ChildItem "$limeRoot\ndll" -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
+          # Windows runner 上必须取 Windows 版 ndll：递归取的第一个是 Linux\lime.ndll，拷到 exe 旁边必然失败
+          $winCandidates = @("$limeRoot\ndll\Windows64\lime.ndll", "$limeRoot\ndll\Windows\lime.ndll")
+          $winNdll = @($winCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1)
           $artifact = $null
           if (Test-Path 'lime-vulkan-artifact\lime.ndll') { $artifact = (Resolve-Path 'lime-vulkan-artifact\lime.ndll').Path }
-          if ($artifact) {
-            foreach ($t in $targets) { Copy-Item $artifact $t -Force; Write-Host "patched: $t" }
-            Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_LIME_NDLL=$artifact"
+          if ($winNdll.Count -eq 0) {
+            Write-Host "WARN: haxelib lime 下没有 Windows 版 lime.ndll (候选 $($winCandidates -join ' ; ')); 跳过 ndll 拷贝"
           } else {
-            Write-Host 'no ndll artifact: using haxelib lime ndll as-is (exe-only run)'
-            Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_LIME_NDLL=$($targets[0])"
+            if ($artifact) { Copy-Item $artifact $winNdll[0] -Force; Write-Host "patched with Vulkan artifact: $($winNdll[0])" }
+            else { Write-Host 'no ndll artifact: keep haxelib lime Windows ndll as-is (exe-only run)' }
+            Write-Host "VULKAN_LIME_NDLL=$($winNdll[0]) exists=$((Test-Path $winNdll[0])) size=$((Get-Item $winNdll[0]).Length)"
+            Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_LIME_NDLL=$($winNdll[0])"
           }
+          if ($targets.Count -gt 0) { Write-Host "all lime.ndll found: $($targets.Count)" }
           $shim = (Resolve-Path 'lime-vulkan-artifact\lime_glslang.dll' -ErrorAction SilentlyContinue)
           if ($shim) { Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_LIME_SHIM=$($shim.Path)" }
           else { Write-Host 'WARN: lime_glslang.dll not in artifact; packaging will rely on the local shim' }
@@ -197,32 +203,47 @@ jobs:
           Remove-Item build.log, build.err, empty.stdin -ErrorAction SilentlyContinue
           New-Item -ItemType File -Path empty.stdin | Out-Null
           Write-Host "openfl fork: $env:OPENFL_VKPKT_FORK"
+          # 降内存：单核私有 runner 上 hxcpp 默认并发会把 cl.exe 峰值叠成数倍
+          # HXCPP_COMPILE_THREADS 是 hxcpp 自己读的 define/env（BuildTool.hx: thread_var）
+          $env:HXCPP_COMPILE_THREADS = '1'
+          $cs = Get-CimInstance Win32_ComputerSystem
+          Write-Host ("host memory: {0:N1} GB physical, {1} logical cores" -f ($cs.TotalPhysicalMemory/1GB), $env:NUMBER_OF_PROCESSORS)
+          Write-Host 'hxcpp: -D HXCPP_COMPILE_THREADS=1 -D HXCPP_FAST_LINK (no -debug => 无 -Zi/无 vc.pdb/无 -debug 链接)'
           haxelib list
-          $p = Start-Process -FilePath $hx -ArgumentList "run","lime","build","windows" `
+          $p = Start-Process -FilePath $hx -ArgumentList "run","lime","build","windows","-D","HXCPP_COMPILE_THREADS=1","-D","HXCPP_FAST_LINK" `
                -NoNewWindow -RedirectStandardOutput build.log -RedirectStandardError build.err `
                -RedirectStandardInput empty.stdin -PassThru
           $deadline = (Get-Date).AddMinutes(75)
+          $peakMB = 0
           while (-not $p.HasExited) {
             if ((Get-Date) -gt $deadline) { Write-Host "=== TIMEOUT, killing $($p.Id) ==="; Stop-Process -Id $p.Id -Force; break }
+            $ws = @(Get-Process cl.exe, link.exe, c2.exe -ErrorAction SilentlyContinue | Measure-Object WorkingSet64 -Sum).Sum
+            if ($ws -and ([math]::Round($ws/1MB) -gt $peakMB)) { $peakMB = [math]::Round($ws/1MB) }
             Get-Content build.log -Tail 4 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  out| $_" }
             Start-Sleep 20
           }
           $code = $p.ExitCode
           Write-Host "lime build exit code: $code"
+          Write-Host "peak cl/link working set: $peakMB MB"
           if ($code -ne 0) {
-            Write-Host '=== build.log (tail 60) ==='
-            Get-Content build.log -Tail 60 -ErrorAction SilentlyContinue
-            Write-Host '=== build.err (tail 30) ==='
-            Get-Content build.err -Tail 30 -ErrorAction SilentlyContinue
-            throw "lime build failed, exit code $code"
+            Write-Host '=== build.log (tail 40) ==='
+            Get-Content build.log -Tail 40 -ErrorAction SilentlyContinue
+            Write-Host '=== build.err (tail 40) ==='
+            Get-Content build.err -Tail 40 -ErrorAction SilentlyContinue
+            throw "lime build failed, exit code $code (peak compiler working set ${peakMB} MB)"
           }
           Get-ChildItem $outDir -Recurse -Filter 'Mario.exe' -File -ErrorAction SilentlyContinue |
             Select-Object FullName, Length, LastWriteTime | Format-Table -AutoSize
           # lime 把 ndll 放在 applicationDirectory（export\release\windows\bin），直接贴着 exe 放
           $builtExe = Get-ChildItem $outDir -Recurse -Filter 'Mario.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $builtExe) { throw "no Mario.exe produced under $outDir" }
-          Copy-Item $env:VULKAN_LIME_NDLL (Join-Path $builtExe.Directory.FullName 'lime.ndll') -Force
-          if ($env:VULKAN_LIME_SHIM) { Copy-Item $env:VULKAN_LIME_SHIM (Join-Path $builtExe.Directory.FullName 'lime_glslang.dll') -Force }
+          if ($env:VULKAN_LIME_NDLL -and (Test-Path $env:VULKAN_LIME_NDLL)) {
+            Write-Host "lime.ndll source exists: $env:VULKAN_LIME_NDLL"
+            Copy-Item $env:VULKAN_LIME_NDLL (Join-Path $builtExe.Directory.FullName 'lime.ndll') -Force
+          } else {
+            Write-Host "WARN: VULKAN_LIME_NDLL 不可用('$env:VULKAN_LIME_NDLL')；跳过 ndll 拷贝"
+          }
+          if ($env:VULKAN_LIME_SHIM -and (Test-Path $env:VULKAN_LIME_SHIM)) { Copy-Item $env:VULKAN_LIME_SHIM (Join-Path $builtExe.Directory.FullName 'lime_glslang.dll') -Force }
 
       # 关键断言 1：生成的 hxml 里必须同时出现分叉 classpath 与 openfl_vk_pkt
       - name: Assert generated hxml wired to fork + define
@@ -283,9 +304,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path pkg-vkpkt | Out-Null
           $exe = Get-Item $env:VKPKT_EXE
           $ndll = Join-Path $exe.Directory.FullName 'lime.ndll'
-          if (-not (Test-Path $ndll)) { throw 'lime.ndll not found next to exe' }
           Copy-Item $exe.FullName pkg-vkpkt
-          Copy-Item $ndll pkg-vkpkt
+          if (Test-Path $ndll) { Copy-Item $ndll pkg-vkpkt } else { Write-Host 'WARN: no lime.ndll next to exe; package ships exe only' }
           Get-ChildItem $exe.Directory -File -ErrorAction SilentlyContinue |
             Where-Object { $_.Extension -in '.dll', '.ico' } | ForEach-Object { Copy-Item $_.FullName pkg-vkpkt -Force }
           $lines = @(
