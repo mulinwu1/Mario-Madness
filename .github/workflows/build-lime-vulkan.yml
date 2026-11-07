@@ -1,4 +1,4 @@
-name: Build Lime Vulkan Native
+﻿name: Build Lime Vulkan Native
 
 # workflow_call：由 build-game.yml 作为前置 job 复用，产出的 artifact 在同一次 run 内
 # 直接给游戏构建 job 下载，不需要跨 run / release 传文件
@@ -191,6 +191,19 @@ jobs:
             Remove-Item $ndll -Force
             "removed stale ndll: $ndll" | Out-File $log -Append
           }
+          # 链接契约：gl_shader.cpp:22 用 #pragma comment 硬编码了
+          #   C:\glslang\lib\lime_glslang.lib
+          # 而 shim 产物落 C:\glslang\out（刻意不进缓存）。rebuild 前补一份到 pragma 路径，
+          # 末尾 Drop build artifacts 会再删掉，避免被 post-job cache save 收进去。
+          $implib = 'C:\glslang\out\lime_glslang.lib'
+          if (-not (Test-Path $implib)) {
+            Write-Host "ASSERT FAIL: missing $implib"
+            Get-ChildItem C:\glslang\out -ErrorAction SilentlyContinue | Select-Object Name, Length
+            "ASSERT FAIL: missing $implib" | Out-File $log -Append
+            exit 1
+          }
+          Copy-Item $implib 'C:\glslang\lib\lime_glslang.lib' -Force
+          "copied implib -> C:\glslang\lib\lime_glslang.lib ($((Get-Item $implib).Length) B)" | Out-File $log -Append
           Push-Location C:\lime-src
           # 只出 x64：glslang 官方包只有 x86_64 库，32 位 ndll 链接会 LNK4272；
           # 游戏本身跑 Windows64，不需要 Windows/lime.ndll
@@ -257,6 +270,6 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          foreach ($p in @('C:\lime-src\ndll\Windows64\lime.ndll', 'C:\glslang\out\lime_glslang.dll', 'C:\glslang\out\lime_glslang.lib', 'C:\glslang\out\glslang_shim.obj')) {
+          foreach ($p in @('C:\lime-src\ndll\Windows64\lime.ndll', 'C:\glslang\lib\lime_glslang.lib', 'C:\glslang\out\lime_glslang.dll', 'C:\glslang\out\lime_glslang.lib', 'C:\glslang\out\glslang_shim.obj')) {
             if (Test-Path $p) { Remove-Item $p -Force; Write-Host "removed $p" }
           }
