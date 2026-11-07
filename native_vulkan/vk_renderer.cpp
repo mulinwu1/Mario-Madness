@@ -2,6 +2,7 @@
 #include "vk_shaders_spv.h"
 #include "vk_platform.h"
 #include "gl_packet.h"   // 仅为了 packet 执行路径的开关查询（ExecActive）
+#include "vk_tuning.h"   // 运行时调参（vk_tuning.ini），默认值 === 加模块前的写死值
 #define VK_NO_PROTOTYPES
 #include "gl_shader.h"
 #include "gl_state.h"
@@ -31,6 +32,8 @@ static uint64_t g_progDrawTotal = 0;
 
 #define MAX_SPRITES 4096
 #define MAX_TEXTURES 512
+// packet 路径采样器变体 descriptor set 的上限（纹理 × 采样器组合的缓存容量）
+#define PKT_SET_MAX 512
 
 // 交换链 extent：安卓常见 ROTATE_90/270，此时 imageExtent 是旋转前的尺寸，
 // 宽高必须和窗口尺寸交换，否则整幅被拉伸。桌面 currentTransform 恒为 IDENTITY，行为不变。
@@ -188,6 +191,33 @@ struct VkRenderer::Impl {
     uint8_t* pktIbPtr = nullptr;
     VkDeviceSize pktIbBytes = 0;
     VkDeviceSize pktIbOff = 0;
+    // ---- P2：按 packet 状态选管线变体 / 按 (纹理,采样器组合) 选 descriptor set ----
+    // 变体缓存：键是压缩后的状态位，值是该状态下建好的管线；默认状态走 o.pipeline
+    struct PktPipeEntry {
+        uint32_t key;
+        VkPipeline pipe;
+    };
+    std::vector<PktPipeEntry> pktPipes;
+    // 采样器缓存：键是 (min|mag|wrapU|wrapV) 压缩值
+    struct PktSamplerEntry {
+        uint16_t key;
+        VkSampler smp;
+    };
+    std::vector<PktSamplerEntry> pktSamplers;
+    // descriptor set 缓存：同一纹理在不同采样器组合下各有一份
+    struct PktSetEntry {
+        uint32_t texId;
+        uint16_t key;
+        VkDescriptorSet set;
+    };
+    std::vector<PktSetEntry> pktSets;
+    // 变体专用 descriptor pool：不与批处理共用，避免挤掉原有 2*MAX_TEXTURES 配额
+    VkDescriptorPool pktSetPool = VK_NULL_HANDLE;
+    uint32_t pktPipeCount = 0;
+    uint32_t pktSamplerCount = 0;
+    uint32_t pktSetCount = 0;
+    // 当前打开的 packet target 尺寸：逐笔 viewport/scissor 的 y 翻转要用
+    VkExtent2D pktTargetExt = {0, 0};
     float clearR = 0, clearG = 0, clearB = 0, clearA = 1;
     const char* lastError = "";
 };
@@ -207,6 +237,7 @@ static PFN_vkCreateSampler g_createSampler;
 static PFN_vkCreateDescriptorSetLayout g_createDSL;
 static PFN_vkCreateDescriptorPool g_createDP;
 static PFN_vkAllocateDescriptorSets g_allocDS;
+static PFN_vkFreeDescriptorSets g_freeDS;
 static PFN_vkUpdateDescriptorSets g_updateDS;
 static PFN_vkCmdPipelineBarrier g_cmdBarrier;
 static PFN_vkCmdCopyBufferToImage g_cmdCopyImg;
@@ -371,6 +402,11 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     o.width = width;
     o.height = height;
 
+    // 调参文件在设备/纹理初始化之前读进来，并立刻打一行生效值：
+    // 之后所有 [sampler] / [pkt] 行都能和这一行对照，排除“以为改了但没生效”。
+    vktuning::Load();
+    vktuning::LogEffective();
+
     char err[160] = {0};
     o.vkLib = vkplat::LoadVulkan(err, (int)sizeof(err));
     if (!o.vkLib) {
@@ -447,6 +483,7 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     g_createDSL = (PFN_vkCreateDescriptorSetLayout)o.gipa(o.inst, "vkCreateDescriptorSetLayout");
     g_createDP = (PFN_vkCreateDescriptorPool)o.gipa(o.inst, "vkCreateDescriptorPool");
     g_allocDS = (PFN_vkAllocateDescriptorSets)o.gipa(o.inst, "vkAllocateDescriptorSets");
+    g_freeDS = (PFN_vkFreeDescriptorSets)o.gipa(o.inst, "vkFreeDescriptorSets");
     g_updateDS = (PFN_vkUpdateDescriptorSets)o.gipa(o.inst, "vkUpdateDescriptorSets");
     g_cmdBarrier = (PFN_vkCmdPipelineBarrier)o.gipa(o.inst, "vkCmdPipelineBarrier");
     g_cmdCopyImg = (PFN_vkCmdCopyBufferToImage)o.gipa(o.inst, "vkCmdCopyBufferToImage");
@@ -742,6 +779,25 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     dpci.pPoolSizes = dps;
     g_createDP(o.dev, &dpci, nullptr, &o.descPool);
 
+    // packet 路径的采样器变体专用池：独立配额，不挤占批处理的 2*MAX_TEXTURES。
+    // 带 FREE 位是为了纹理/目标销毁时能把手里的变体 set 还回来（避免悬空引用）。
+    {
+        VkDescriptorPoolSize vps[2]{};
+        vps[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        vps[0].descriptorCount = PKT_SET_MAX;
+        vps[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        vps[1].descriptorCount = PKT_SET_MAX;
+        VkDescriptorPoolCreateInfo vpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        vpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        vpci.maxSets = PKT_SET_MAX;
+        vpci.poolSizeCount = 2;
+        vpci.pPoolSizes = vps;
+        if (g_createDP(o.dev, &vpci, nullptr, &o.pktSetPool) != VK_SUCCESS) {
+            o.pktSetPool = VK_NULL_HANDLE;
+            fprintf(stderr, "[sampler] warn=pkt_set_pool_failed\n");
+        }
+    }
+
     VkSamplerCreateInfo smpci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     smpci.magFilter = VK_FILTER_NEAREST;
     smpci.minFilter = VK_FILTER_NEAREST;
@@ -869,12 +925,40 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
     VkPipelineColorBlendAttachmentState cba{};
     cba.colorWriteMask = 0xF;
-    cba.blendEnable = VK_TRUE;
-    cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-    cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    // 混合变体由 vk_tuning.ini 的 blend= 选择；默认 srcalpha 与加调参前写死的完全一致。
+    // 说明：混合因子烘在管线里，切换变体需要重启（不是热更），见 docs/vk_tuning.md。
+    switch (vktuning::Get().blendVariant) {
+        case vktuning::BLEND_OFF:
+            cba.blendEnable = VK_FALSE;
+            cba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+            cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            break;
+        case vktuning::BLEND_PREMUL:
+            // 预乘 alpha：源已经是 (r*a, g*a, b*a, a)，再加 SRC_ALPHA 会二次乘
+            cba.blendEnable = VK_TRUE;
+            cba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            break;
+        case vktuning::BLEND_ADDITIVE:
+            cba.blendEnable = VK_TRUE;
+            cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            break;
+        default:
+            cba.blendEnable = VK_TRUE;
+            cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            break;
+    }
     cba.colorBlendOp = VK_BLEND_OP_ADD;
-    cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-    cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
     cba.alphaBlendOp = VK_BLEND_OP_ADD;
     VkPipelineColorBlendStateCreateInfo cbs{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
     cbs.attachmentCount = 1;
@@ -989,6 +1073,22 @@ void VkRenderer::Shutdown() {
     if (o.destroyDP) o.destroyDP(o.dev, o.descPool, nullptr);
     if (o.destroyDSL) o.destroyDSL(o.dev, o.dsl, nullptr);
     if (o.destroySampler) o.destroySampler(o.dev, o.sampler, nullptr);
+    // P2 变体资源：状态变体管线 / 采样器缓存 / 变体描述符池（首条管线与 o.sampler 归原有路径）
+    if (o.destroyPipeline) {
+        for (auto& e : o.pktPipes) {
+            if (e.pipe && e.pipe != o.pipeline) o.destroyPipeline(o.dev, e.pipe, nullptr);
+        }
+    }
+    o.pktPipes.clear();
+    if (o.destroySampler) {
+        for (auto& e : o.pktSamplers) {
+            if (e.smp) o.destroySampler(o.dev, e.smp, nullptr);
+        }
+    }
+    o.pktSamplers.clear();
+    o.pktSets.clear();
+    if (o.destroyDP && o.pktSetPool) o.destroyDP(o.dev, o.pktSetPool, nullptr);
+    o.pktSetPool = VK_NULL_HANDLE;
     if (o.destroyPipeline) o.destroyPipeline(o.dev, o.pipeline, nullptr);
     if (o.destroyPipelineLayout) o.destroyPipelineLayout(o.dev, o.pipeLayout, nullptr);
     if (o.destroyShader) {
@@ -1221,6 +1321,7 @@ void VkRenderer::DestroyTexture(uint32_t id) {
     if (id == 0 || id > o.textures.size()) return;
     TexSlot& t = o.textures[id - 1];
     if (!t.used) return;
+    PktDropSets(id);   // 变体 descriptor set 指向这张图，先还回池里
     if (t.view) o.destroyImageView(o.dev, t.view, nullptr);
     if (t.sampler) o.destroySampler(o.dev, t.sampler, nullptr);
     if (t.image) o.destroyImage(o.dev, t.image, nullptr);
@@ -1268,8 +1369,14 @@ bool VkRenderer::SetTextureSampler(uint32_t texId, int minFilter, int magFilter,
     (void)minLod;
 
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    sci.magFilter = GlFilterToVk(magFilter);
-    sci.minFilter = GlFilterToVk(minFilter);
+    // 调参入口：ini 的 by_glname / by_size / 全局默认依次覆盖 GL 记录值；
+    // 全部为默认时这里原样返回 GL 传进来的枚举，行为与加调参前一致。
+    const int effMin = vktuning::ResolveFilter(minFilter, t.w, t.h, texId);
+    const int effMag = vktuning::ResolveFilter(magFilter, t.w, t.h, texId);
+    const int effWrapS = vktuning::ResolveWrap(wrapS, t.w, t.h);
+    const int effWrapT = vktuning::ResolveWrap(wrapT, t.w, t.h);
+    sci.magFilter = GlFilterToVk(effMag);
+    sci.minFilter = GlFilterToVk(effMin);
     // 诊断：实测游戏的采样方式（每个纹理 id 首次设置或参数变化时打印一次）
     if (texId < 1024) {
         static uint64_t s_sig[1024] = {0};
@@ -1279,17 +1386,18 @@ bool VkRenderer::SetTextureSampler(uint32_t texId, int minFilter, int magFilter,
         if (!s_seen[texId] || s_sig[texId] != sig) {
             s_seen[texId] = true;
             s_sig[texId] = sig;
-            fprintf(stderr, "[sampler] tex=%u min=0x%x(%s) mag=0x%x(%s) wrapS=0x%x wrapT=0x%x\n",
-                    texId, minFilter, GlFilterToVk(minFilter) == VK_FILTER_NEAREST ? "NEAREST" : "LINEAR",
-                    magFilter, GlFilterToVk(magFilter) == VK_FILTER_NEAREST ? "NEAREST" : "LINEAR",
-                    wrapS, wrapT);
+            // gl= 记录原值，eff= 调参后的实际值：两者不同才说明 ini 生效了
+            fprintf(stderr, "[sampler] tex=%u %dx%d gl(min=0x%x mag=0x%x wrap=0x%x/0x%x) "
+                    "eff(min=0x%x mag=0x%x wrap=0x%x/0x%x ts=%s)\n",
+                    texId, t.w, t.h, minFilter, magFilter, wrapS, wrapT,
+                    effMin, effMag, effWrapS, effWrapT, vktuning::Source());
         }
     }
     // 目前纹理只有 1 级 mip，mip 模式保持 NEAREST 并把 maxLod 钳到 0，
     // 否则采样器会去取不存在的 level 导致黑边/全黑
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    sci.addressModeU = GlWrapToVk(wrapS);
-    sci.addressModeV = GlWrapToVk(wrapT);
+    sci.addressModeU = GlWrapToVk(effWrapS);
+    sci.addressModeV = GlWrapToVk(effWrapT);
     sci.addressModeW = sci.addressModeV;
     sci.minLod = 0;
     sci.maxLod = 0;
@@ -1993,6 +2101,378 @@ bool VkRenderer::PktEnsureBuffers() {
     return true;
 }
 
+// ===================== P2：采样器 / descriptor set / 管线变体 =====================
+
+// 采样器组合键：4 个 4 bit 字段（已解析过的值，合法范围 0..5）
+static uint16_t PktSamplerKey (const PktSamplerState& ss) {
+    return (uint16_t)((ss.minFilter & 0x0Fu) | ((ss.magFilter & 0x0Fu) << 4) |
+                      ((ss.wrapU & 0x0Fu) << 8) | ((ss.wrapV & 0x0Fu) << 12));
+}
+
+// 全 0xFF = 记录里没带采样器信息 → 沿用该纹理现有的 descriptor set（旧行为，不动画面）
+static bool PktSamplerUnset (const PktSamplerState& ss) {
+    return ss.minFilter == 0xFF && ss.magFilter == 0xFF &&
+           ss.wrapU == 0xFF && ss.wrapV == 0xFF;
+}
+
+// 逐字段解析：未指定（0xFF）按"加调参前写死的那套"补齐 —— NEAREST + CLAMP_TO_EDGE。
+// 这与纹理从未被 texParameteri 过时的实际采样方式一致（那时走 o.sampler）。
+static void PktResolveSampler (const PktSamplerState& in, PktSamplerState& out) {
+    out = in;
+    if (out.minFilter == 0xFF) out.minFilter = 0;
+    if (out.magFilter == 0xFF) out.magFilter = 0;
+    if (out.wrapU == 0xFF) out.wrapU = 0;
+    if (out.wrapV == 0xFF) out.wrapV = 0;
+}
+
+static VkSamplerAddressMode PktWrapToVk (uint8_t wrap) {
+    switch (wrap) {
+        case 1: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        case 2: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+        default: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    }
+}
+
+static const char* PktFilterName (uint8_t f) {
+    switch (f) {
+        case 1: return "linear";
+        case 2: return "nearest_mipmap_nearest";
+        case 3: return "linear_mipmap_nearest";
+        case 4: return "nearest_mipmap_linear";
+        case 5: return "linear_mipmap_linear";
+        default: return "nearest";
+    }
+}
+
+static const char* PktWrapName (uint8_t w) {
+    switch (w) {
+        case 1: return "repeat";
+        case 2: return "mirror";
+        default: return "clamp";
+    }
+}
+
+// 归一化混合因子 -> VkBlendFactor
+static VkBlendFactor PktBlendToVk (uint8_t f) {
+    switch (f) {
+        case PKT_BLEND_ONE: return VK_BLEND_FACTOR_ONE;
+        case PKT_BLEND_ZERO: return VK_BLEND_FACTOR_ZERO;
+        case PKT_BLEND_ONE_MINUS_SRC_ALPHA: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        case PKT_BLEND_DST_ALPHA: return VK_BLEND_FACTOR_DST_ALPHA;
+        case PKT_BLEND_ONE_MINUS_DST_ALPHA: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+        case PKT_BLEND_SRC_COLOR: return VK_BLEND_FACTOR_SRC_COLOR;
+        case PKT_BLEND_ONE_MINUS_SRC_COLOR: return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+        case PKT_BLEND_DST_COLOR: return VK_BLEND_FACTOR_DST_COLOR;
+        case PKT_BLEND_ONE_MINUS_DST_COLOR: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+        case PKT_BLEND_CONST_ALPHA: return VK_BLEND_FACTOR_CONSTANT_ALPHA;
+        case PKT_BLEND_ONE_MINUS_CONST_ALPHA: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
+        default: return VK_BLEND_FACTOR_SRC_ALPHA;
+    }
+}
+
+static VkCullModeFlags PktCullToVk (uint8_t c) {
+    switch (c) {
+        case 1: return VK_CULL_MODE_BACK_BIT;
+        case 2: return VK_CULL_MODE_FRONT_BIT;
+        case 3: return VK_CULL_MODE_FRONT_AND_BACK;
+        default: return VK_CULL_MODE_NONE;
+    }
+}
+
+// "默认状态"的混合取自 vk_tuning 的 blend 变体 —— 它与 Init 建首条管线时用的是同一份配置，
+// 所以只要 packet 状态等于它，就能安全地复用 o.pipeline（画面与现在完全一致）。
+static void PktDefaultBlend (uint8_t& en, uint8_t& src, uint8_t& dst) {
+    switch (vktuning::Get().blendVariant) {
+        case vktuning::BLEND_OFF:
+            en = 0; src = PKT_BLEND_ONE; dst = PKT_BLEND_ZERO; break;
+        case vktuning::BLEND_PREMUL:
+            en = 1; src = PKT_BLEND_ONE; dst = PKT_BLEND_ONE_MINUS_SRC_ALPHA; break;
+        case vktuning::BLEND_ADDITIVE:
+            en = 1; src = PKT_BLEND_SRC_ALPHA; dst = PKT_BLEND_ONE; break;
+        default:
+            en = 1; src = PKT_BLEND_SRC_ALPHA; dst = PKT_BLEND_ONE_MINUS_SRC_ALPHA; break;
+    }
+}
+
+// 管线变体键：混合(9 bit) + 剔除(2) + 绕序(1) + 颜色掩码(4)
+static uint32_t PktPipeKey (uint8_t en, uint8_t src, uint8_t dst,
+                            uint8_t cull, uint8_t ff, uint8_t cm) {
+    return (uint32_t)(en & 0x1) |
+           ((uint32_t)(src & 0x0F) << 1) |
+           ((uint32_t)(dst & 0x0F) << 5) |
+           ((uint32_t)(cull & 0x3) << 9) |
+           ((uint32_t)(ff & 0x1) << 11) |
+           ((uint32_t)(cm & 0x0F) << 12);
+}
+
+void* VkRenderer::PktPipelineFor(const PktPipelineState& st) {
+    Impl& o = *impl;
+    uint8_t defEn = 1, defSrc = PKT_BLEND_SRC_ALPHA, defDst = PKT_BLEND_ONE_MINUS_SRC_ALPHA;
+    PktDefaultBlend(defEn, defSrc, defDst);
+
+    uint8_t en = st.blendEnabled ? 1 : 0;
+    uint8_t src = defSrc, dst = defDst;
+    if (en) {
+        if (st.blendSrc != PKT_BLEND_UNSET) src = st.blendSrc;
+        if (st.blendDst != PKT_BLEND_UNSET) dst = st.blendDst;
+    }
+    uint8_t cull = (st.cullMode > 3) ? 0 : st.cullMode;
+    uint8_t ff = st.frontFace ? 1 : 0;
+    uint8_t cm = (uint8_t)(st.colorMask & 0x0F);
+
+    // 兜底：与 Init 建的那条管线状态一致时直接复用，不新建任何东西
+    if (en == defEn && cull == 0 && ff == 0 && cm == 0x0F &&
+        (!en || (src == defSrc && dst == defDst))) {
+        return (void*)(uintptr_t)o.pipeline;
+    }
+
+    uint32_t key = PktPipeKey(en, src, dst, cull, ff, cm);
+    for (auto& e : o.pktPipes) if (e.key == key) return (void*)(uintptr_t)e.pipe;
+
+    // ---- 以下与 Init 里建首条管线的字段逐项一致（改那边要同步这里）----
+    VkVertexInputBindingDescription vbind[2]{};
+    vbind[0].binding = 0;
+    vbind[0].stride = sizeof(float) * 15;
+    vbind[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    vbind[1].binding = 1;
+    vbind[1].stride = 0;
+    vbind[1].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription vattr[8]{};
+    vattr[0].location = 0; vattr[0].binding = 0;
+    vattr[0].format = VK_FORMAT_R32G32B32A32_SFLOAT; vattr[0].offset = 0;
+    vattr[1].location = 1; vattr[1].binding = 0;
+    vattr[1].format = VK_FORMAT_R32_SFLOAT; vattr[1].offset = sizeof(float) * 4;
+    vattr[2].location = 2; vattr[2].binding = 0;
+    vattr[2].format = VK_FORMAT_R32G32B32A32_SFLOAT; vattr[2].offset = sizeof(float) * 5;
+    vattr[3].location = 3; vattr[3].binding = 0;
+    vattr[3].format = VK_FORMAT_R32G32B32A32_SFLOAT; vattr[3].offset = sizeof(float) * 9;
+    vattr[4].location = 4; vattr[4].binding = 0;
+    vattr[4].format = VK_FORMAT_R32G32_SFLOAT; vattr[4].offset = sizeof(float) * 13;
+    vattr[5].location = 5; vattr[5].binding = 1;
+    vattr[5].format = VK_FORMAT_R32_SFLOAT; vattr[5].offset = 0;
+    vattr[6].location = 6; vattr[6].binding = 1;
+    vattr[6].format = VK_FORMAT_R32G32B32A32_SFLOAT; vattr[6].offset = sizeof(float) * 1;
+    vattr[7].location = 7; vattr[7].binding = 1;
+    vattr[7].format = VK_FORMAT_R32G32B32A32_SFLOAT; vattr[7].offset = sizeof(float) * 5;
+
+    VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    vi.vertexBindingDescriptionCount = 2;
+    vi.pVertexBindingDescriptions = vbind;
+    vi.vertexAttributeDescriptionCount = 8;
+    vi.pVertexAttributeDescriptions = vattr;
+
+    VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo vps{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    vps.viewportCount = 1;
+    vps.pViewports = nullptr;
+    vps.scissorCount = 1;
+    vps.pScissors = nullptr;
+    VkDynamicState dynStates[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo pds{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    pds.dynamicStateCount = 2;
+    pds.pDynamicStates = dynStates;
+
+    VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode = PktCullToVk(cull);
+    rs.frontFace = ff ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState cba{};
+    cba.blendEnable = en ? VK_TRUE : VK_FALSE;
+    cba.srcColorBlendFactor = PktBlendToVk(src);
+    cba.dstColorBlendFactor = PktBlendToVk(dst);
+    // GL 的 glBlendFunc 同一对因子同时作用于 RGB 与 A，这里按同样的语义填
+    cba.srcAlphaBlendFactor = PktBlendToVk(src);
+    cba.dstAlphaBlendFactor = PktBlendToVk(dst);
+    cba.colorBlendOp = VK_BLEND_OP_ADD;
+    cba.alphaBlendOp = VK_BLEND_OP_ADD;
+    cba.colorWriteMask = (VkColorComponentFlags)(
+        ((cm & 1) ? VK_COLOR_COMPONENT_R_BIT : 0) |
+        ((cm & 2) ? VK_COLOR_COMPONENT_G_BIT : 0) |
+        ((cm & 4) ? VK_COLOR_COMPONENT_B_BIT : 0) |
+        ((cm & 8) ? VK_COLOR_COMPONENT_A_BIT : 0));
+    VkPipelineColorBlendStateCreateInfo cbs{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    cbs.attachmentCount = 1;
+    cbs.pAttachments = &cba;
+
+    VkGraphicsPipelineCreateInfo gp{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = o.vsMod;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = o.fsMod;
+    stages[1].pName = "main";
+    gp.stageCount = 2;
+    gp.pStages = stages;
+    gp.pVertexInputState = &vi;
+    gp.pInputAssemblyState = &ia;
+    gp.pViewportState = &vps;
+    gp.pDynamicState = &pds;
+    gp.pRasterizationState = &rs;
+    gp.pMultisampleState = &ms;
+    gp.pColorBlendState = &cbs;
+    gp.layout = o.pipeLayout;
+    gp.renderPass = o.renderPass;
+    gp.subpass = 0;
+
+    VkPipeline pipe = VK_NULL_HANDLE;
+    if (g_createPipe(o.dev, VK_NULL_HANDLE, 1, &gp, nullptr, &pipe) != VK_SUCCESS || !pipe) {
+        // 建不出来就退回默认管线（宁可状态不准也不黑屏）
+        fprintf(stderr, "[pkt] warn=pipe_variant_failed key=0x%x fallback=default\n", key);
+        return (void*)(uintptr_t)o.pipeline;
+    }
+    o.pktPipes.push_back({key, pipe});
+    o.pktPipeCount++;
+    fprintf(stderr, "[pkt] pipe variant n=%u key=0x%x blend=%d(%s,%s) cull=%d ff=%d cm=0x%x\n",
+            o.pktPipeCount, key, (int)en, PktBlendToVk(src) == VK_BLEND_FACTOR_SRC_ALPHA ? "srcalpha" : "other",
+            PktBlendToVk(dst) == VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA ? "1-srcalpha" : "other",
+            (int)cull, (int)ff, (unsigned)cm);
+    return (void*)(uintptr_t)pipe;
+}
+
+void* VkRenderer::PktSamplerFor(const PktSamplerState& ss) {
+    Impl& o = *impl;
+    PktSamplerState r;
+    PktResolveSampler(ss, r);
+    uint16_t key = PktSamplerKey(r);
+    for (auto& e : o.pktSamplers) if (e.key == key) return (void*)(uintptr_t)e.smp;
+
+    VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    // min 带 mip 的几种（2..5）在只有 1 级 mip 的情况下等价于最近/线性过滤
+    sci.minFilter = (r.minFilter == 1 || r.minFilter == 3 || r.minFilter == 5)
+                    ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    sci.magFilter = (r.magFilter == 1) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sci.addressModeU = PktWrapToVk(r.wrapU);
+    sci.addressModeV = PktWrapToVk(r.wrapV);
+    sci.addressModeW = sci.addressModeV;
+    sci.minLod = 0;
+    // 纹理只分配 1 级 mip，maxLod 必须钳 0，否则取到不存在的 level 会黑边/全黑
+    //（与 SetTextureSampler 的口径一致）
+    sci.maxLod = 0;
+    sci.maxAnisotropy = 1;
+    VkSampler smp = VK_NULL_HANDLE;
+    if (g_createSampler(o.dev, &sci, nullptr, &smp) != VK_SUCCESS || !smp) {
+        fprintf(stderr, "[sampler] err=create key=0x%x\n", key);
+        return (void*)(uintptr_t)VK_NULL_HANDLE;
+    }
+    o.pktSamplers.push_back({key, smp});
+    o.pktSamplerCount++;
+    fprintf(stderr, "[sampler] filter=%s/%s wrapU=%s wrapV=%s mip=%s(maxLod=0) key=0x%x n=%u\n",
+            PktFilterName(r.minFilter), PktFilterName(r.magFilter),
+            PktWrapName(r.wrapU), PktWrapName(r.wrapV),
+            (r.minFilter >= 2) ? "nearest" : "none", key, o.pktSamplerCount);
+    return (void*)(uintptr_t)smp;
+}
+
+void* VkRenderer::PktSetFor(uint32_t texId, const PktSamplerState& ss) {
+    Impl& o = *impl;
+    VkImageView view = VK_NULL_HANDLE;
+    VkDescriptorSet base = VK_NULL_HANDLE;
+    if (texId >= 1000) {
+        uint32_t ti = texId - 1000;
+        if (ti < o.targets.size() && o.targets[ti].used) {
+            view = o.targets[ti].view;
+            base = o.targets[ti].set;
+        }
+        // 离屏目标在当前路径统一用 o.sampler（ApplySampler 也跳过 id>=1000），
+        // 这里返回现有 set，保证合成画面与调参前一致。
+        return (void*)(uintptr_t)base;
+    }
+    if (texId == 0 || texId > o.textures.size()) return (void*)(uintptr_t)VK_NULL_HANDLE;
+    TexSlot& t = o.textures[texId - 1];
+    if (!t.used) return (void*)(uintptr_t)VK_NULL_HANDLE;
+    view = t.view;
+    base = t.set;
+
+    if (PktSamplerUnset(ss)) return (void*)(uintptr_t)base;   // 记录里没带采样器 → 旧行为
+    if (o.pktSetPool == VK_NULL_HANDLE) return (void*)(uintptr_t)base;
+    // 若 vk_tuning 里配了过滤/wrap 覆盖，就沿用 SetTextureSampler 已合成好的采样器：
+    // 那条路径把 ini 规则算进去了，逐笔再建一套会让两条路径的采样规则打架。
+    {
+        const vktuning::Values& tv = vktuning::Get();
+        bool tuned = (tv.filterDefault != vktuning::FILTER_GL || tv.filterRuleCount > 0 ||
+                      tv.filterByNameCount > 0 || tv.wrapDefault != vktuning::WRAP_GL ||
+                      tv.wrapRuleCount > 0);
+        if (tuned) {
+            static bool s_logged = false;
+            if (!s_logged) { s_logged = true; fprintf(stderr, "[sampler] skip=pkt_variant_use_vk_tuning\n"); }
+            return (void*)(uintptr_t)base;
+        }
+    }
+
+    PktSamplerState r;
+    PktResolveSampler(ss, r);
+    uint16_t key = PktSamplerKey(r);
+    for (auto& e : o.pktSets)
+        if (e.texId == texId && e.key == key) return (void*)(uintptr_t)e.set;
+
+    VkSampler smp = (VkSampler)(uintptr_t)PktSamplerFor(ss);
+    if (!smp) return (void*)(uintptr_t)base;
+
+    VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    dsai.descriptorPool = o.pktSetPool;
+    dsai.descriptorSetCount = 1;
+    dsai.pSetLayouts = &o.dsl;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (g_allocDS(o.dev, &dsai, &set) != VK_SUCCESS || !set) {
+        fprintf(stderr, "[sampler] err=ds_full tex=%u key=0x%x fallback=base\n", texId, key);
+        return (void*)(uintptr_t)base;
+    }
+
+    VkDescriptorImageInfo dii{};
+    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dii.imageView = view;
+    dii.sampler = smp;
+    VkDescriptorBufferInfo dbi{};
+    dbi.buffer = o.ubo;
+    dbi.offset = 0;
+    dbi.range = 256;
+    VkWriteDescriptorSet wds[2]{};
+    wds[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wds[0].dstSet = set;
+    wds[0].dstBinding = 0;
+    wds[0].descriptorCount = 1;
+    wds[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    wds[0].pBufferInfo = &dbi;
+    wds[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wds[1].dstSet = set;
+    wds[1].dstBinding = 1;
+    wds[1].descriptorCount = 1;
+    wds[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wds[1].pImageInfo = &dii;
+    g_updateDS(o.dev, 2, wds, 0, nullptr);
+
+    o.pktSets.push_back({texId, key, set});
+    o.pktSetCount++;
+    fprintf(stderr, "[sampler] set tex=%u key=0x%x n=%u\n", texId, key, o.pktSetCount);
+    return (void*)(uintptr_t)set;
+}
+
+void VkRenderer::PktDropSets(uint32_t texId) {
+    Impl& o = *impl;
+    for (size_t i = 0; i < o.pktSets.size(); ) {
+        if (o.pktSets[i].texId == texId) {
+            if (g_freeDS && o.pktSetPool != VK_NULL_HANDLE)
+                g_freeDS(o.dev, o.pktSetPool, 1, &o.pktSets[i].set);
+            o.pktSets[i] = o.pktSets.back();
+            o.pktSets.pop_back();
+        } else {
+            i++;
+        }
+    }
+}
+
 bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a) {
     Impl& o = *impl;
     // 同一目标重复绑定（OpenFL 每次 glClear 都会再 Bind）：只更新清屏色
@@ -2072,20 +2552,34 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a)
     g_beginRP(o.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
 
     // viewport/scissor 取"绑定这一刻"的 GL 状态（不是帧末）
-    VkViewport vp = lime::glstate::GetVulkanViewport((int)ext.height);
-    if (vp.width <= 0.0f || vp.height <= 0.0f) vp = {0, 0, (float)ext.width, (float)ext.height, 0, 1};
-    VkRect2D sc = lime::glstate::GetVulkanScissor((int)ext.width, (int)ext.height);
-    if (sc.extent.width == 0 || sc.extent.height == 0) sc = {{0, 0}, ext};
+    const vktuning::Values& tv = vktuning::Get();
+    VkViewport vp;
+    VkRect2D sc;
+    if (tv.viewportPolicy == vktuning::POLICY_FULL_TARGET) {
+        vp = {0, 0, (float)ext.width, (float)ext.height, 0, 1};
+    } else {
+        vp = lime::glstate::GetVulkanViewport((int)ext.height);
+        if (vp.width <= 0.0f || vp.height <= 0.0f) vp = {0, 0, (float)ext.width, (float)ext.height, 0, 1};
+    }
+    if (tv.scissorPolicy == vktuning::POLICY_FULL_TARGET) {
+        sc = {{0, 0}, ext};
+    } else {
+        sc = lime::glstate::GetVulkanScissor((int)ext.width, (int)ext.height);
+        if (sc.extent.width == 0 || sc.extent.height == 0) sc = {{0, 0}, ext};
+    }
     g_setViewport(o.cmd, 0, 1, &vp);
     g_setScissor(o.cmd, 0, 1, &sc);
 
     o.pktOpen = true;
     o.pktTarget = id;
-    fprintf(stderr, "[pkt] begin target=%u rp=%p fb=%p ext=%ux%u vp=%d,%d,%d,%d sc=%d,%d,%d,%d clear=%.2f,%.2f,%.2f,%.2f\n",
+    o.pktTargetExt = ext;
+    fprintf(stderr, "[pkt] begin target=%u rp=%p fb=%p ext=%ux%u vp=%d,%d,%d,%d sc=%d,%d,%d,%d clear=%.2f,%.2f,%.2f,%.2f policy=vp:%s,sc:%s\n",
             id, (void*)rp, (void*)fb, ext.width, ext.height,
             (int)vp.x, (int)vp.y, (int)vp.width, (int)vp.height,
             (int)sc.offset.x, (int)sc.offset.y, (int)sc.extent.width, (int)sc.extent.height,
-            r, g, b, a);
+            r, g, b, a,
+            tv.viewportPolicy == vktuning::POLICY_FULL_TARGET ? "full" : "keep",
+            tv.scissorPolicy == vktuning::POLICY_FULL_TARGET ? "full" : "keep");
     return true;
 }
 
@@ -2094,15 +2588,7 @@ bool VkRenderer::PktDraw(const PktDrawDesc& d) {
     if (!o.pktOpen) return false;
     if (!d.verts || d.vertexCount <= 0) return false;
 
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    if (d.texId >= 1000) {
-        uint32_t ti = d.texId - 1000;
-        if (ti >= o.targets.size() || !o.targets[ti].used) return false;
-        set = o.targets[ti].set;
-    } else if (d.texId > 0 && d.texId <= o.textures.size()) {
-        if (!o.textures[d.texId - 1].used) return false;
-        set = o.textures[d.texId - 1].set;
-    }
+    VkDescriptorSet set = (VkDescriptorSet)(uintptr_t)PktSetFor(d.texId, d.sampler);
     if (!set) return false;
 
     VkDeviceSize vbytes = (VkDeviceSize)d.vertexCount * 15u * sizeof(float);
@@ -2115,40 +2601,92 @@ bool VkRenderer::PktDraw(const PktDrawDesc& d) {
     VkDeviceSize voff = o.pktVbOff;
     o.pktVbOff += vbytes;
 
-    bool indexed = (d.indices != nullptr && d.indexCount > 0);
+    bool indexed = ((d.indices != nullptr || d.indices32 != nullptr) && d.indexCount > 0);
+    bool use32 = (d.index32 != 0 && d.indices32 != nullptr);
     VkDeviceSize ioff = 0;
     if (indexed) {
-        VkDeviceSize ibytes = (VkDeviceSize)d.indexCount * sizeof(uint16_t);
+        VkDeviceSize isz = use32 ? sizeof(uint32_t) : sizeof(uint16_t);
+        VkDeviceSize ibytes = (VkDeviceSize)d.indexCount * isz;
         if (o.pktIbOff + ibytes > o.pktIbBytes) {
-            fprintf(stderr, "[pkt] err=ib_full need=%llu cap=%llu n=%d\n",
-                    (unsigned long long)ibytes, (unsigned long long)o.pktIbBytes, d.indexCount);
-            return false;
+            // 32 位索引装不下时退回 16 位（顶点已按展开顺序排列，<=65535 时等价）
+            if (use32 && d.indexCount <= 65535) {
+                fprintf(stderr, "[pkt] warn=ib_full_32 fallback16 n=%d\n", d.indexCount);
+                use32 = false;
+                ibytes = (VkDeviceSize)d.indexCount * sizeof(uint16_t);
+            }
+            if (o.pktIbOff + ibytes > o.pktIbBytes) {
+                fprintf(stderr, "[pkt] err=ib_full need=%llu cap=%llu n=%d\n",
+                        (unsigned long long)ibytes, (unsigned long long)o.pktIbBytes, d.indexCount);
+                return false;
+            }
         }
-        memcpy(o.pktIbPtr + o.pktIbOff, d.indices, (size_t)ibytes);
+        if (use32) {
+            memcpy(o.pktIbPtr + o.pktIbOff, d.indices32, (size_t)((VkDeviceSize)d.indexCount * sizeof(uint32_t)));
+        } else if (d.indices) {
+            memcpy(o.pktIbPtr + o.pktIbOff, d.indices, (size_t)((VkDeviceSize)d.indexCount * sizeof(uint16_t)));
+        } else {
+            // 只有 32 位表却退回了 16 位：现场压一份 16 位
+            uint16_t* dst = (uint16_t*)(o.pktIbPtr + o.pktIbOff);
+            for (int i = 0; i < d.indexCount; i++) dst[i] = (uint16_t)d.indices32[i];
+        }
         ioff = o.pktIbOff;
         o.pktIbOff += ibytes;
     }
 
-    // 状态变体入口：第一版固定用 o.pipeline（默认混合、无剔除、无深度）。
-    // d.state 目前只记录，后续按状态选变体时在这里按位分支。
-    g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeline);
+    // viewport / scissor 逐笔：记录里带了有效矩形就按笔下发，否则沿用 pass 打开时的值。
+    // GL 视口原点在左下，Vulkan 视口原点在左上：y 需要按 target 高度翻一次。
+    if (d.viewport.valid && o.pktTargetExt.height > 0) {
+        int th = (int)o.pktTargetExt.height;
+        VkViewport dvp;
+        dvp.x = (float)d.viewport.x;
+        dvp.y = (float)(th - d.viewport.y - d.viewport.h);
+        dvp.width = (float)d.viewport.w;
+        dvp.height = (float)d.viewport.h;
+        dvp.minDepth = 0.0f;
+        dvp.maxDepth = 1.0f;
+        g_setViewport(o.cmd, 0, 1, &dvp);
+    }
+    if (d.scissor.valid && o.pktTargetExt.height > 0) {
+        int th = (int)o.pktTargetExt.height;
+        VkRect2D dsc;
+        dsc.offset.x = d.scissor.x;
+        dsc.offset.y = th - d.scissor.y - d.scissor.h;
+        if (dsc.offset.x < 0) dsc.offset.x = 0;
+        if (dsc.offset.y < 0) dsc.offset.y = 0;
+        dsc.extent.width = (uint32_t)d.scissor.w;
+        dsc.extent.height = (uint32_t)d.scissor.h;
+        g_setScissor(o.cmd, 0, 1, &dsc);
+    }
+
+    // 管线变体按状态选：默认状态复用 Init 建的那条（兜底），缺的变体才新建并缓存。
+    VkPipeline pipe = (VkPipeline)(uintptr_t)PktPipelineFor(d.state);
+    if (!pipe) return false;
+
+    const vktuning::Values& tv = vktuning::Get();
+    int effDepthTest = (tv.depthTest == vktuning::KEEP) ? d.state.depthTest : (tv.depthTest == vktuning::ON);
+    int effDepthWrite = (tv.depthWrite == vktuning::KEEP) ? d.state.depthWrite : (tv.depthWrite == vktuning::ON);
+    int effStencil = (tv.stencilTest == vktuning::KEEP) ? d.state.stencilTest : (tv.stencilTest == vktuning::ON);
+    g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeLayout, 0, 1, &set, 0, nullptr);
     VkBuffer vbufs[2] = {o.pktVb, o.attrBuf};
     VkDeviceSize voffs[2] = {voff, 0};
     g_bindVB(o.cmd, 0, 2, vbufs, voffs);
     if (indexed) {
-        g_bindIB(o.cmd, o.pktIb, ioff, VK_INDEX_TYPE_UINT16);
+        g_bindIB(o.cmd, o.pktIb, ioff, use32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
         g_cmdDrawIndexed(o.cmd, (uint32_t)d.indexCount, 1, 0, 0, 0);
     } else {
         g_cmdDraw(o.cmd, (uint32_t)d.vertexCount, 1, 0, 0);
     }
     o.pktDraws++;
-    fprintf(stderr, "[pkt] draw tgt=%u i=%llu tex=%u set=%p cmd=%s n=%d vbOff=%llu ibOff=%llu state=blend%d depth%d cull%d\n",
-            o.pktTarget, (unsigned long long)o.pktDraws, d.texId, (void*)set,
-            indexed ? "vkCmdDrawIndexed" : "vkCmdDraw",
+    fprintf(stderr, "[pkt] draw tgt=%u i=%llu tex=%u set=%p pipe=%p cmd=%s n=%d vbOff=%llu ibOff=%llu "
+            "state=blend%d(%u,%u) depth%d/%d stencil%d cull%d vp=%d sc=%d\n",
+            o.pktTarget, (unsigned long long)o.pktDraws, d.texId, (void*)set, (void*)pipe,
+            indexed ? (use32 ? "vkCmdDrawIndexed(u32)" : "vkCmdDrawIndexed(u16)") : "vkCmdDraw",
             indexed ? d.indexCount : d.vertexCount,
             (unsigned long long)voff, (unsigned long long)ioff,
-            (int)d.state.blendEnabled, (int)d.state.depthTest, (int)d.state.cullMode);
+            (int)d.state.blendEnabled, (unsigned)d.state.blendSrc, (unsigned)d.state.blendDst,
+            effDepthTest, effDepthWrite, effStencil, (int)d.state.cullMode,
+            d.viewport.valid ? 1 : 0, d.scissor.valid ? 1 : 0);
     return true;
 }
 
@@ -2210,6 +2748,9 @@ bool VkRenderer::PktComposite(uint32_t srcTargetId) {
     d.indices = nullptr;
     d.indexCount = 0;
     d.state.blendEnabled = 1;
+    // 合成沿用"默认混合"（与 Init 管线一致）；0 在新枚举里是 ONE，必须显式标未指定
+    d.state.blendSrc = PKT_BLEND_UNSET;
+    d.state.blendDst = PKT_BLEND_UNSET;
     d.state.depthTest = 0;
     d.state.depthWrite = 0;
     d.state.stencilTest = 0;
@@ -2217,6 +2758,13 @@ bool VkRenderer::PktComposite(uint32_t srcTargetId) {
     d.state.frontFace = 0;
     d.state.scissorTest = 0;
     d.state.colorMask = 0xF;
+    // 采样器/视口不逐笔覆盖：离屏目标是全程用 o.sampler，视口沿用 pass 打开时的整幅
+    d.sampler.minFilter = 0xFF;
+    d.sampler.magFilter = 0xFF;
+    d.sampler.wrapU = 0xFF;
+    d.sampler.wrapV = 0xFF;
+    d.viewport.valid = 0;
+    d.scissor.valid = 0;
     return PktDraw(d);
 }
 
@@ -2357,6 +2905,7 @@ void VkRenderer::DestroyRenderTarget(uint32_t id) {
     if (!t.used) return;
     fprintf(stderr, "[vk] rt del id=%u %dx%d f=%llu lastWrite=%llu\n", id, t.w, t.h,
             (unsigned long long)g_drawFrame, (unsigned long long)t.lastWriteFrame);
+    PktDropSets(id);   // 变体 descriptor set 指向这张图，先还回池里
     if (t.fb) o.destroyFramebuffer(o.dev, t.fb, nullptr);
     if (t.rp) o.destroyRenderPass(o.dev, t.rp, nullptr);
     if (t.view) o.destroyImageView(o.dev, t.view, nullptr);

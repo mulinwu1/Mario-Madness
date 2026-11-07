@@ -10,10 +10,12 @@
 // Capabilities proven: swapchain, DEVICE_LOCAL textures via staging,
 // N-sprite batching, per-texture descriptor sets, UBO, GLSL->SPIR-V shaders.
 
-// packet 执行路径（VK_PKT_EXEC=1）用的状态位。第一版这些位只记录、不选管线变体，
-// 但接口先留位：后续按状态选变体只需要在 PktDraw 里分支，不必改调用方。
+// packet 执行路径（VK_PKT_EXEC=1）用的状态位。PktDraw 按这些位选管线变体，
+// 缺的变体才新建；全部"默认"时直接复用 Init 建好的那条管线（兜底，不改画面）。
 struct PktPipelineState {
     uint8_t blendEnabled;
+    uint8_t blendSrc;      // 归一化混合因子，见 PktBlendFactor；0xFF = 未指定（默认 SRC_ALPHA）
+    uint8_t blendDst;      // 同上；0xFF = 未指定（默认 ONE_MINUS_SRC_ALPHA）
     uint8_t depthTest;
     uint8_t depthWrite;
     uint8_t stencilTest;
@@ -23,6 +25,38 @@ struct PktPipelineState {
     uint8_t colorMask;
 };
 
+// 归一化混合因子：把 GL 的几十种枚举收敛到这几种，管线的混合因子只有这几种会被用到。
+enum PktBlendFactor {
+    PKT_BLEND_UNSET = 0xFF,
+    PKT_BLEND_ONE = 0,
+    PKT_BLEND_ZERO = 1,
+    PKT_BLEND_SRC_ALPHA = 2,
+    PKT_BLEND_ONE_MINUS_SRC_ALPHA = 3,
+    PKT_BLEND_DST_ALPHA = 4,
+    PKT_BLEND_ONE_MINUS_DST_ALPHA = 5,
+    PKT_BLEND_SRC_COLOR = 6,
+    PKT_BLEND_ONE_MINUS_SRC_COLOR = 7,
+    PKT_BLEND_DST_COLOR = 8,
+    PKT_BLEND_ONE_MINUS_DST_COLOR = 9,
+    PKT_BLEND_CONST_ALPHA = 10,
+    PKT_BLEND_ONE_MINUS_CONST_ALPHA = 11,
+    PKT_BLEND_COUNT = 12
+};
+
+// 归一化采样器参数：0xFF = 未指定（沿用该纹理现有的 descriptor set，即旧行为）
+struct PktSamplerState {
+    uint8_t minFilter;   // 0=nearest 1=linear 2=nearest_mip_nearest 3=linear_mip_nearest 4=nearest_mip_linear 5=linear_mip_linear
+    uint8_t magFilter;   // 0=nearest 1=linear
+    uint8_t wrapU;       // 0=clamp 1=repeat 2=mirror
+    uint8_t wrapV;
+};
+
+// 一笔 draw 的 viewport / scissor（GL 口径：原点左下）。valid=0 时沿用 pass 打开时下发的值。
+struct PktRect {
+    int16_t x, y, w, h;
+    uint8_t valid;
+};
+
 // 一笔 draw 的完整描述。顶点布局与批处理路径完全相同（15 floats/顶点：
 // pos4, 逐顶点 alpha, colorMultiplier4, colorOffset4, uv2），所以能直接复用
 // 同一条管线与同一份 UBO 投影。
@@ -30,9 +64,14 @@ struct PktDrawDesc {
     uint32_t texId;          // VkRenderer 纹理 id（>=1000 为离屏目标）
     const float* verts;      // vertexCount * 15 floats
     int vertexCount;
-    const uint16_t* indices; // NULL = 非索引；否则 16 位索引（顶点相对本笔起点从 0 开始）
+    const uint16_t* indices; // NULL = 非索引；32 位索引时用 indices32
+    const uint32_t* indices32;
     int indexCount;
+    uint8_t index32;         // 1 = 用 indices32 上传 32 位索引
     PktPipelineState state;
+    PktSamplerState sampler;
+    PktRect viewport;
+    PktRect scissor;
 };
 
 class VkRenderer {
@@ -129,5 +168,12 @@ private:
     uint32_t CreateTextureOnce(int w, int h, const unsigned char* rgba);
     // packet 路径的动态顶点/索引缓冲（首次使用时懒创建）
     bool PktEnsureBuffers();
+    // 按状态取管线变体：默认状态直接返回 Init 建的那条，缺的才新建并缓存
+    // 返回/入参里的 Vulkan 句柄一律走 void*（本头不放 Vulkan 类型）
+    void* PktPipelineFor(const PktPipelineState& st);
+    void* PktSetFor(uint32_t texId, const PktSamplerState& ss);
+    void* PktSamplerFor(const PktSamplerState& ss);
+    // 纹理/目标销毁时丢掉指向它的变体 descriptor set（否则留下悬空引用）
+    void PktDropSets(uint32_t texId);
 };
 

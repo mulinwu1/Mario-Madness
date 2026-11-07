@@ -154,13 +154,12 @@ jobs:
           New-Item -ItemType Directory -Force -Path C:\lime-src\project\src\graphics\vulkan | Out-Null
           # 拷贝清单必须覆盖 patch_lime.py 的全部 sources（含平台文件与新增的 packet 源），
           # 少一个会在准备阶段的 assert_sources_present() 直接 exit 1
-          $files = @(
-            'vk_shaders_spv.h', 'vk_renderer.h', 'vk_renderer.cpp', 'gl_core.cpp', 'gl_compat.h',
-            'gl_vk_bridge.h', 'gl_vk_c.h', 'gl_vk_contract.h', 'gl_vk_contract.cpp', 'gl_fbo.cpp',
-            'gl_texture_params.cpp', 'gl_state.h', 'gl_state.cpp', 'gl_shader.h', 'gl_shader.cpp',
-            'vk_platform.h', 'vk_platform_win32.cpp', 'vk_platform_android.cpp',
-            'vk_packet.h', 'vk_packet.cpp', 'gl_packet.h', 'gl_packet.cpp', 'vk_tuning.h', 'vk_tuning.cpp'
-          )
+          # 动态取 native_vulkan 下全部 .h/.cpp（排除 standalone 的 main/demo/stubs）：
+          # 不再手写清单，避免“改了实现没同步头”导致 not a member of / undeclared identifier
+          $files = @(Get-ChildItem native_vulkan -File | Where-Object {
+            $_.Extension -in '.h', '.cpp' -and $_.Name -notin @('main.cpp', 'demo_renderer.cpp', 'gl_stubs.cpp')
+          } | Select-Object -ExpandProperty Name | Sort-Object)
+          Write-Host ("copying {0} native files into lime-src: {1}" -f $files.Count, ($files -join ', '))
           Copy-Item -Path ($files | ForEach-Object { "native_vulkan\$_" }) -Destination C:\lime-src\project\src\graphics\vulkan\ -Force
           # vulkan_core.h 会引用 vk_video/ 下的视频编码头，两个目录都要复制
           Copy-Item vkh\include\vulkan C:\lime-src\project\include\ -Recurse -Force
