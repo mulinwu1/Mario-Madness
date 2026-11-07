@@ -98,6 +98,7 @@ struct VkRenderer::Impl {
     std::vector<VkImage> swapImages;
     std::vector<VkImageView> swapViews;
     VkFormat colorFormat = VK_FORMAT_UNDEFINED;
+    VkColorSpaceKHR colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     VkExtent2D extent{};
 
     VkRenderPass renderPass = VK_NULL_HANDLE;
@@ -141,6 +142,9 @@ struct VkRenderer::Impl {
     bool bbHeld = false;
     bool bbLoad = false;
     bool presentReq = false;
+    // 交换链脏标记：present/acquire 返回 OUT_OF_DATE 或 SUBOPTIMAL 后置位，
+    // 下一次开后缓冲帧前无条件重建（原来全仓库没有重建分支 → 后缓冲永久开不起来）
+    bool swapDirty = false;
     // 取证：present 前把交换链图拷到主机可见缓冲，算亮度统计（VK_BBSTAT=1，默认关）
     VkBuffer statBuf = VK_NULL_HANDLE;
     VkDeviceMemory statMem = VK_NULL_HANDLE;
@@ -462,6 +466,7 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     VkSurfaceFormatKHR fmt = fmts[0];
     for (auto& f : fmts) if (f.format == VK_FORMAT_B8G8R8A8_UNORM) { fmt = f; break; }
     o.colorFormat = fmt.format;
+    o.colorSpace = fmt.colorSpace;
 
     o.extent = caps.currentExtent;
     if (o.extent.width == 0xFFFFFFFF) { o.extent.width = (uint32_t)width; o.extent.height = (uint32_t)height; }
@@ -1609,6 +1614,117 @@ void VkRenderer::ResetLastGeometryTarget() {
     impl->lastGeomTarget = 0;
 }
 
+// 交换链重建：present/acquire 一旦返回 OUT_OF_DATE 或 SUBOPTIMAL，旧交换链上
+// 所有后续 acquire 都会继续失败，而后缓冲帧开不起来 → 永久停在上一张清屏帧。
+// 这里按 surface 当前能力重建交换链 + image view + 全部 framebuffer。
+bool VkRenderer::RecreateSwapchain() {
+    Impl& o = *impl;
+    if (!o.dev || !o.swapchain || !o.gipa) return false;
+    auto createSwap = (PFN_vkCreateSwapchainKHR)o.gipa(o.inst, "vkCreateSwapchainKHR");
+    auto getImages = (PFN_vkGetSwapchainImagesKHR)o.gipa(o.inst, "vkGetSwapchainImagesKHR");
+    auto getSurfCaps = (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)o.gipa(o.inst,
+            "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+    auto createFB = (PFN_vkCreateFramebuffer)o.gipa(o.inst, "vkCreateFramebuffer");
+    if (!o.destroyFramebuffer || !o.destroyImageView || !o.destroySwapchain ||
+        !createSwap || !getImages || !getSurfCaps || !createFB) return false;
+
+    // 每帧提交后本来就 g_waitIdle(queue)，这里再等一次确保没有在飞的引用
+    if (g_waitIdle) g_waitIdle(o.queue);
+
+    uint32_t oldImages = (uint32_t)o.swapImages.size();
+    uint32_t oldExtW = o.extent.width, oldExtH = o.extent.height;
+
+    auto dropFB = [&](std::vector<VkFramebuffer>& fbs) {
+        for (auto fb : fbs) if (fb) o.destroyFramebuffer(o.dev, fb, nullptr);
+        fbs.clear();
+    };
+    dropFB(o.framebuffers);
+    dropFB(o.framebuffersLoad);
+    dropFB(o.framebuffersLoadKeep);
+    dropFB(o.framebuffersKeep);
+    for (auto v : o.swapViews) if (v) o.destroyImageView(o.dev, v, nullptr);
+    o.swapViews.clear();
+    o.swapImages.clear();
+    o.destroySwapchain(o.dev, o.swapchain, nullptr);
+    o.swapchain = VK_NULL_HANDLE;
+
+    VkSurfaceCapabilitiesKHR caps{};
+    if (getSurfCaps(o.phys, o.surf, &caps) != VK_SUCCESS) {
+        fprintf(stderr, "[vk] swapchain recreate ok=0 path=caps\n");
+        return false;
+    }
+    o.extent = caps.currentExtent;
+    if (o.extent.width == 0xFFFFFFFF) {
+        o.extent.width = (uint32_t)o.width;
+        o.extent.height = (uint32_t)o.height;
+    }
+    if (o.extent.width == 0 || o.extent.height == 0) {
+        fprintf(stderr, "[vk] swapchain recreate ok=0 path=zeroextent\n");
+        return false;
+    }
+
+    VkSwapchainCreateInfoKHR swci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+    swci.surface = o.surf;
+    swci.minImageCount = caps.minImageCount + 1;
+    swci.imageFormat = o.colorFormat;
+    swci.imageColorSpace = o.colorSpace;
+    swci.imageExtent = o.extent;
+    swci.imageArrayLayers = 1;
+    swci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    swci.preTransform = caps.currentTransform;
+    swci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    swci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    swci.clipped = VK_TRUE;
+    VkResult cr = createSwap(o.dev, &swci, nullptr, &o.swapchain);
+    if (cr != VK_SUCCESS) {
+        o.swapchain = VK_NULL_HANDLE;
+        fprintf(stderr, "[vk] swapchain recreate ok=0 path=create err=%d\n", (int)cr);
+        return false;
+    }
+
+    uint32_t ic = 0;
+    getImages(o.dev, o.swapchain, &ic, nullptr);
+    o.swapImages.resize(ic);
+    getImages(o.dev, o.swapchain, &ic, o.swapImages.data());
+    o.swapViews.assign(ic, VK_NULL_HANDLE);
+    for (uint32_t i = 0; i < ic; i++) {
+        VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vci.image = o.swapImages[i];
+        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vci.format = o.colorFormat;
+        vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        vci.subresourceRange.levelCount = 1;
+        vci.subresourceRange.layerCount = 1;
+        g_createView(o.dev, &vci, nullptr, &o.swapViews[i]);
+    }
+
+    auto mkFBSet = [&](VkRenderPass rp, std::vector<VkFramebuffer>& fbs) {
+        if (rp == VK_NULL_HANDLE) return;
+        fbs.assign(ic, VK_NULL_HANDLE);
+        for (uint32_t i = 0; i < ic; i++) {
+            VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+            fci.renderPass = rp;
+            fci.attachmentCount = 1;
+            fci.pAttachments = &o.swapViews[i];
+            fci.width = o.extent.width;
+            fci.height = o.extent.height;
+            fci.layers = 1;
+            createFB(o.dev, &fci, nullptr, &fbs[i]);
+        }
+    };
+    mkFBSet(o.renderPass, o.framebuffers);
+    mkFBSet(o.renderPassLoad, o.framebuffersLoad);
+    mkFBSet(o.renderPassLoadKeep, o.framebuffersLoadKeep);
+    mkFBSet(o.renderPassKeep, o.framebuffersKeep);
+
+    o.frameImageIndex = 0;
+    o.bbHeld = false;
+    o.bbLoad = false;
+    fprintf(stderr, "[vk] swapchain recreate ok=1 oldImages=%u newImages=%u %ux%u -> %ux%u\n",
+            oldImages, ic, oldExtW, oldExtH, o.extent.width, o.extent.height);
+    return true;
+}
+
 bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float a) {
     Impl& o = *impl;
     // 同一目标重复绑定（OpenFL 每个 pass 开头都会 glClear，gl_vk_handle_clear 又会 Bind 一次）
@@ -1680,13 +1796,21 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
     // “先绑后缓冲、再画一张全屏 quad”，一清就把这批顶点吃掉 → 屏幕只剩清屏色。
     // 顶点在 EndFrame 提交后由 EndFrame 自己清。
     if (id == 0) {
+        // 交换链脏（present/acquire 曾返回 OUT_OF_DATE/SUBOPTIMAL）→ 开帧前无条件重建。
+        // 不依赖 acquire 是否报错：present 只要失败一次，[vk] pres 就停更、后缓冲再也开不起来。
+        if (o.swapDirty) {
+            if (RecreateSwapchain()) o.swapDirty = false;
+            else return false;
+        }
         if (o.bbHeld && o.renderPassLoad != VK_NULL_HANDLE) {
             // 实验 VK_SINGLE_PRESENT=1：本帧已持有同一张图，后续合成用 LOAD pass 叠加
             o.bbLoad = true;
         } else {
             VkResult ar = g_acquire(o.dev, o.swapchain, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE, &o.frameImageIndex);
+            if (ar == VK_SUBOPTIMAL_KHR) o.swapDirty = true;
             if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
-                fprintf(stderr, "[vk] bbframe open f=%llu ok=0 target=0 path=acquire err=%d\n",
+                o.swapDirty = true;
+                fprintf(stderr, "[vk] bbframe open f=%llu ok=0 target=0 path=acquire err=%d swapDirty=1\n",
                         (unsigned long long) g_drawFrame, (int) ar);
                 return false;
             }
@@ -2159,7 +2283,8 @@ void VkRenderer::EndFrame() {
 
     // 取证 VK_BBSTAT=1（默认关）：present 前把后缓冲拷到主机缓冲，供亮度统计。
     // 只在本层 target=0 且有几何时做；barrier 走 PRESENT_SRC -> TRANSFER_SRC -> PRESENT_SRC。
-    bool doStat = (o.statBuf != VK_NULL_HANDLE && o.statPtr && o.currentTarget == 0 && totalVerts > 0);
+    bool doStat = (o.statBuf != VK_NULL_HANDLE && o.statPtr && o.currentTarget == 0 && totalVerts > 0 &&
+                   (size_t)o.extent.width * (size_t)o.extent.height * 4 <= o.statBytes);
     if (doStat) {
         VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         // 本次 pass 的 finalLayout 决定当前真实布局（PRESENT_SRC 或 COLOR_ATTACHMENT_OPTIMAL）
@@ -2271,6 +2396,12 @@ void VkRenderer::EndFrame() {
             pi.pImageIndices = &o.frameImageIndex;
             VkResult pr = g_present(o.queue, &pi);
             static uint64_t s_badPres = 0;
+            if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
+                // 交换链已过期：标记脏，下一帧开帧前重建（这是后缓冲冻结的唯一根因）
+                o.swapDirty = true;
+                fprintf(stderr, "[vk] swapchain dirty reason=present err=%d f=%llu img=%u\n",
+                        (int)pr, (unsigned long long)g_drawFrame, o.frameImageIndex);
+            }
             if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR) {
                 s_badPres++;
                 if (s_badPres <= 2000) {
