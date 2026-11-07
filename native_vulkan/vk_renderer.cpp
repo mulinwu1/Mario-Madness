@@ -1,5 +1,6 @@
 ﻿#include "vk_renderer.h"
 #include "vk_shaders_spv.h"
+#include "gl_shader.h"
 #define VK_USE_PLATFORM_WIN32_KHR
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -808,6 +809,15 @@ bool VkRenderer::Init(HWND hwnd, int width, int height) {
     g_mapMem(o.dev, o.attrMem, 0, amr.size, 0, &ap2);
     o.attrPtr = (float*)ap2;
     if (o.attrPtr) memcpy(o.attrPtr, kConstAttrs, sizeof(kConstAttrs));
+    // 观测（非变量）：binding1 常量的 map 结果与真值。loc5=0 的两种可能（map 失败 / 没写进去）
+    // 靠这一行直接分辨，不需要再去猜。
+    fprintf(stderr, "[vk] attr const buf map=%s vals=%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f\n",
+            o.attrPtr ? "ok" : "NULL",
+            o.attrPtr ? o.attrPtr[0] : -1.0f, o.attrPtr ? o.attrPtr[1] : -1.0f,
+            o.attrPtr ? o.attrPtr[2] : -1.0f, o.attrPtr ? o.attrPtr[3] : -1.0f,
+            o.attrPtr ? o.attrPtr[4] : -1.0f, o.attrPtr ? o.attrPtr[5] : -1.0f,
+            o.attrPtr ? o.attrPtr[6] : -1.0f, o.attrPtr ? o.attrPtr[7] : -1.0f,
+            o.attrPtr ? o.attrPtr[8] : -1.0f);
 
     o.textures.resize(MAX_TEXTURES);
     fprintf(stderr, "[vk] init ok swapchain=%ux%u images=%zu format=%d\n",
@@ -1394,6 +1404,18 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
         }
     }
 
+    // 观测（非行为）：记录本笔 draw 对应的 GL program，并首次见到时打一次程序表。
+    int vkProg = gl_shader_current_program ();
+    {
+        static unsigned s_progSeen[256] = {0};
+        if (vkProg >= 0 && vkProg < 256 && !s_progSeen[vkProg]) {
+            s_progSeen[vkProg] = 1;
+            fprintf(stderr, "[glprog] id=%d attrs=%d hasLoc5=%d ubo=%u\n",
+                    vkProg, gl_shader_attribute_count(vkProg),
+                    gl_shader_program_has_attribute(vkProg, 5) ? 1 : 0,
+                    (unsigned) gl_shader_uniform_buffer_size(vkProg));
+        }
+    }
     // 取证：每次绘制一条紧凑记录（纹理 id/尺寸、uv 范围、顶点包围盒、是否触发
     // 归一化分支、uv 是否覆盖整张贴图）。前 12 帧全量，之后只打"覆盖整图"的嫌疑绘制
     {
@@ -1419,10 +1441,10 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
         }
         static uint64_t s_logged = 0;
         if (s_logged < 6000 && (g_drawFrame <= 12 || spansWhole)) {
-            fprintf(stderr, "[vkdraw] f=%llu cur=%u tex=%u tsz=%.0fx%.0f n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] norm=%d whole=%d asrc=%s amin=%.3f amax=%.3f\n",
+            fprintf(stderr, "[vkdraw] f=%llu cur=%u tex=%u tsz=%.0fx%.0f n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] norm=%d whole=%d asrc=%s amin=%.3f amax=%.3f prog=%d\n",
                     (unsigned long long)g_drawFrame, o.currentTarget, texId, tw, th, vertexCount,
                     uMin, uMax, vMin, vMax, xMin, xMax, yMin, yMax,
-                    pixelUv ? 1 : 0, spansWhole ? 1 : 0, vertexAlpha ? "arr" : "const", aMin, aMax);
+                    pixelUv ? 1 : 0, spansWhole ? 1 : 0, vertexAlpha ? "arr" : "const", aMin, aMax, vkProg);
             s_logged++;
         }
     }
