@@ -46,7 +46,9 @@ public:
     uint32_t BackbufferLastSample() const;
 
     // raw vertex submission (GL-style): verts are x,y,u,v float4 per vertex
-    void DrawRaw(uint32_t texId, const float* verts, int vertexCount);
+    // vertexAlpha 非 NULL 时按顶点逐点取 alpha（lime 把 per-vertex alpha 放在 loc5
+    // 顶点数组里，黑幕的 0.05 就在这条数组里）；NULL 用 SetDrawColor 的常量值
+    void DrawRaw(uint32_t texId, const float* verts, int vertexCount, const float* vertexAlpha = nullptr);
 
     // 设置本次绘制的常量顶点属性（GL glVertexAttrib1f/4f 的语义）：
     // alpha 对应 loc1 openfl_Alpha，mult 对应 loc2 colorMultiplier，offset 对应 loc3 colorOffset。

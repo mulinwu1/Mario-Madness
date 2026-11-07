@@ -349,22 +349,41 @@ static float g_attrConst[16][4] = {{0}};
 static int g_attrConstN[16] = {0};   // 已写入的分量数
 static bool g_attrConstSet[16] = {false};
 
-static void ApplyConstAttrs() {
-    static int s_en = -1;
-    if (s_en < 0) {
-        const char* e = getenv("VK_CONST_ATTR");
-        s_en = (e && e[0] == '0') ? 0 : 1; // 默认开；VK_CONST_ATTR=0 为对照
-    }
-    if (!s_en || g_renderer == nullptr) return;
-    // prog3: openfl_Alphav = openfl_Alpha(loc1) * alpha(loc5)
+// per-vertex alpha：lime 为 openfl 的 alpha 单独开了 loc5 顶点数组
+// （实测 idx=5 size=1 stride=4 off=8，独立 VBO），黑幕的 0.05 就在这条数组里。
+// 数组未启用/越界时退回常量属性（glVertexAttrib1f 的值），再退回 1。
+static std::vector<float> BuildVertexAlpha(int count, int baseVertex, const unsigned int* indices) {
+    std::vector<float> alphas((size_t)count, 1.0f);
     float a1 = g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f;
-    float a5 = g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f;
-    // loc6/7 是逐对象的 color transform；没设置时退回顶点常量 loc2/3
-    const float* mult = g_attrConstSet[6] ? g_attrConst[6]
-                        : (g_attrConstSet[2] ? g_attrConst[2] : nullptr);
-    const float* off = g_attrConstSet[7] ? g_attrConst[7]
-                       : (g_attrConstSet[3] ? g_attrConst[3] : nullptr);
-    g_renderer->SetDrawColor(a1 * a5, mult, off);
+    float a5c = g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f;
+    const AttribState& a = g_attrs[5];
+    const unsigned char* p = nullptr;
+    size_t bytes = 0, base = 0;
+    int stride = 0;
+    if (a.enabled && a.size >= 1) {
+        if (a.client && a.clientPtr) {
+            p = (const unsigned char*)a.clientPtr;
+            stride = a.stride > 0 ? a.stride : 4;
+        } else {
+            int buf = a.buffer > 0 ? a.buffer : g_boundArrayBuffer;
+            if (buf > 0 && buf < (int)g_buffers.size() && !g_buffers[(size_t)buf].data.empty()) {
+                p = g_buffers[(size_t)buf].data.data();
+                bytes = g_buffers[(size_t)buf].data.size();
+                base = (size_t)a.offset;
+                stride = a.stride > 0 ? a.stride : 4;
+            }
+        }
+    }
+    for (int i = 0; i < count; i++) {
+        unsigned vi = indices ? indices[i] : (unsigned)(baseVertex + i);
+        float v = a5c;
+        if (p) {
+            size_t o = base + (size_t)vi * (size_t)stride;
+            if (bytes == 0 || o + 4 <= bytes) v = *(const float*)(p + o);
+        }
+        alphas[(size_t)i] = v * a1;
+    }
+    return alphas;
 }
 
 int lime_gl_create_buffer() {
@@ -583,6 +602,8 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
         return;
     }
     g_draws++;
+    // 逐顶点 alpha（loc5 数组）；这是黑幕"几乎不可见"的唯一通道
+    std::vector<float> alphas = BuildVertexAlpha(count, first, nullptr);
     // 诊断：确认 lime 传进来的 uv 是“帧子矩形归一化”还是“整图 0..1”/像素值
     {
         static int s_uvdbg = 0;
@@ -597,17 +618,22 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
                 if (x < minX) minX = x; if (x > maxX) maxX = x;
                 if (y < minY) minY = y; if (y > maxY) maxY = y;
             }
+            float aMin = 1e9f, aMax = -1e9f;
+            for (int i = 0; i < count; i++) {
+                if (alphas[(size_t)i] < aMin) aMin = alphas[(size_t)i];
+                if (alphas[(size_t)i] > aMax) aMax = alphas[(size_t)i];
+            }
             int tw = 0, th = 0; gl_vk_texture_size (texName, &tw, &th);
-            fprintf (stderr, "[gldraw] tex=%d size=%dx%d n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] pStride=%d pOff=%.0f uvBuf=%d uvStride=%d uvOff=%.0f pBufRaw=%d uBufRaw=%d posCli=%d uvCli=%d\n",
+            fprintf (stderr, "[gldraw] tex=%d size=%dx%d n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] pStride=%d pOff=%.0f uvBuf=%d uvStride=%d uvOff=%.0f pBufRaw=%d uBufRaw=%d posCli=%d uvCli=%d amin=%.3f amax=%.3f\n",
                      texName, tw, th, count, minU, maxU, minV, maxV,
                      minX, maxX, minY, maxY, strideP, g_attrs[0].offset,
                      uvBuf, strideU, g_attrs[uvIdx].offset,
-                     g_attrs[0].buffer, g_attrs[uvIdx].buffer, posClient ? 1 : 0, uvClient ? 1 : 0);
+                     g_attrs[0].buffer, g_attrs[uvIdx].buffer, posClient ? 1 : 0, uvClient ? 1 : 0,
+                     aMin, aMax);
         }
         s_uvdbg++;
     }
-    ApplyConstAttrs();
-    g_renderer->DrawRaw(vkTex, out.data(), count);
+    g_renderer->DrawRaw(vkTex, out.data(), count, alphas.data());
 }
 
 void lime_gl_draw_elements(int mode, int count, int type, double offset) {
@@ -640,6 +666,7 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
     int idxSize = (type == 0x1403) ? 2 : 4; // GL_UNSIGNED_SHORT = 0x1403
 
     std::vector<float> out((size_t)count * 4);
+    std::vector<unsigned int> idxs((size_t)count);
     const unsigned char* ip = ib.data.data();
     const unsigned char* pp = posClient
         ? (const unsigned char*)g_attrs[0].clientPtr : g_buffers[(size_t)posBuf].data.data();
@@ -656,6 +683,7 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
         unsigned int idx = (idxSize == 2)
             ? *(const unsigned short*)(ip + idxOff)
             : *(const unsigned int*)(ip + idxOff);
+        idxs[(size_t)i] = idx;
         size_t posOff = pBase0 + (size_t)idx * (size_t)strideP;
         size_t uvOff = uBase0 + (size_t)idx * (size_t)strideU;
         if ((!posClient && posOff + 8 > pBytes) || (!uvClient && uvOff + 8 > uBytes)) return;
@@ -679,6 +707,7 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
         return;
     }
     g_draws++;
+    std::vector<float> alphas = BuildVertexAlpha(count, 0, idxs.data());
     // 诊断：与 draw_arrays 同款，确认 indexed 路径的 uv 语义
     {
         static int s_uvdbg2 = 0;
@@ -693,15 +722,19 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
                 if (x < minX) minX = x; if (x > maxX) maxX = x;
                 if (y < minY) minY = y; if (y > maxY) maxY = y;
             }
+            float aMin = 1e9f, aMax = -1e9f;
+            for (int i = 0; i < count; i++) {
+                if (alphas[(size_t)i] < aMin) aMin = alphas[(size_t)i];
+                if (alphas[(size_t)i] > aMax) aMax = alphas[(size_t)i];
+            }
             int tw = 0, th = 0; gl_vk_texture_size (texName, &tw, &th);
-            fprintf (stderr, "[gldraw/ie] tex=%d size=%dx%d n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] pStride=%d pOff=%.0f uvBuf=%d uvStride=%d uvOff=%.0f pBufRaw=%d uBufRaw=%d posCli=%d uvCli=%d prog=%d blend=%d,%d,%d a1=%.2f a5=%.2f\n",
+            fprintf (stderr, "[gldraw/ie] tex=%d size=%dx%d n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] pStride=%d pOff=%.0f uvBuf=%d uvStride=%d uvOff=%.0f pBufRaw=%d uBufRaw=%d posCli=%d uvCli=%d prog=%d blend=%d,%d,%d amin=%.3f amax=%.3f\n",
                      texName, tw, th, count, minU, maxU, minV, maxV,
                      minX, maxX, minY, maxY, strideP, g_attrs[0].offset,
                      uvBuf, strideU, g_attrs[uvIdx].offset,
                      g_attrs[0].buffer, g_attrs[uvIdx].buffer, posClient ? 1 : 0, uvClient ? 1 : 0,
                      gl_shader_current_program (), g_blendEnabled ? 1 : 0, g_blendSrc, g_blendDst,
-                     g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f,
-                     g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f);
+                     aMin, aMax);
             static int s_raw2 = 0;
             if (s_raw2 < 6 && !posClient && pBytes >= pBase0 + 32) {
                 const float* f = (const float*)(pp + pBase0);
@@ -712,8 +745,7 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
         }
         s_uvdbg2++;
     }
-    ApplyConstAttrs();
-    g_renderer->DrawRaw(vkTex, out.data(), count);
+    g_renderer->DrawRaw(vkTex, out.data(), count, alphas.data());
 }
 
 int lime_gl_get_error() {

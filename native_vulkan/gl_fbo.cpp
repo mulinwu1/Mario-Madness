@@ -201,6 +201,7 @@ bool DrawSceneOverlay (VkRenderer* r) {
         W,    0.0f, 1.0f, 0.0f,
         W,    H,    1.0f, 1.0f,
     };
+    r->SetDrawColor (1.0f, nullptr, nullptr);
     r->DrawRaw (src, quad, 6);
     fprintf (stderr, "[glvk] comp-override f=%llu src=%u %dx%d -> %dx%d\n",
              (unsigned long long)r->FrameIndex (), src, tw, th, (int)W, (int)H);
@@ -697,6 +698,7 @@ void lime_gl_blit_framebuffer (int srcX0, int srcY0, int srcX1, int srcY1,
         (float)dstX1, (float)dstY0, (float)srcX1, (float)srcY0,
         (float)dstX1, (float)dstY1, (float)srcX1, (float)srcY1,
     };
+    r->SetDrawColor (1.0f, nullptr, nullptr);
     r->DrawRaw (srcTex, quad, 6);
 }
 
@@ -757,6 +759,7 @@ void gl_vk_present_frame () {
                     W,    0.0f, (float)tw, 0.0f,
                     W,    H,    (float)tw, (float)th,
                 };
+                r->SetDrawColor (1.0f, nullptr, nullptr);
                 r->DrawRaw (src, quad, 6);
                 composed = src;
                 g_backbufferOpen = true;
@@ -787,6 +790,7 @@ void gl_vk_present_frame () {
                     W,    0.0f, (float)tw, 0.0f,
                     W,    H,    (float)tw, (float)th,
                 };
+                r->SetDrawColor (1.0f, nullptr, nullptr);
                 r->DrawRaw (src, quad, 6);
                 composed = src;
                 g_backbufferOpen = true;

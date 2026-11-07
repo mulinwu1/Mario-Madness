@@ -183,18 +183,23 @@ static float g_drawAlpha = 1.0f;
 static float g_drawMult[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 static float g_drawOff[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
-static void PushLimeVertex(std::vector<float>& out, float x, float y, float u, float v) {
+static void PushLimeVertex(std::vector<float>& out, float x, float y, float u, float v,
+                           float alpha, const float* mult, const float* off) {
     out.push_back(x);
     out.push_back(y);
     out.push_back(0.0f);
     out.push_back(1.0f);
-    out.push_back(g_drawAlpha);                            // alpha
-    out.push_back(g_drawMult[0]); out.push_back(g_drawMult[1]);
-    out.push_back(g_drawMult[2]); out.push_back(g_drawMult[3]); // colorMultiplier
-    out.push_back(g_drawOff[0]); out.push_back(g_drawOff[1]);
-    out.push_back(g_drawOff[2]); out.push_back(g_drawOff[3]);   // colorOffset
+    out.push_back(alpha);                                  // alpha
+    out.push_back(mult[0]); out.push_back(mult[1]);
+    out.push_back(mult[2]); out.push_back(mult[3]);        // colorMultiplier
+    out.push_back(off[0]); out.push_back(off[1]);
+    out.push_back(off[2]); out.push_back(off[3]);          // colorOffset
     out.push_back(u);
     out.push_back(v);
+}
+
+static void PushLimeVertex(std::vector<float>& out, float x, float y, float u, float v) {
+    PushLimeVertex(out, x, y, u, v, g_drawAlpha, g_drawMult, g_drawOff);
 }
 
 static std::vector<char> ReadFileLocal(const std::string& path) {
@@ -1255,7 +1260,7 @@ void VkRenderer::DrawSprite(uint32_t texId, float x, float y, float w, float h,
     }
 }
 
-void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount) {
+void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, const float* vertexAlpha) {
     Impl& o = *impl;
     std::vector<float>* vertsPtr = nullptr;
     if (texId >= 1000) {
@@ -1394,7 +1399,8 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount) {
             if (u > 1.001f || u < -1.001f) u = tw > 0 ? u / tw : 1.0f;
             if (v > 1.001f || v < -1.001f) v = th > 0 ? v / th : 1.0f;
         }
-        PushLimeVertex(*vertsPtr, px, py, u, v);
+        PushLimeVertex(*vertsPtr, px, py, u, v,
+                       vertexAlpha ? vertexAlpha[i] : g_drawAlpha, g_drawMult, g_drawOff);
     }
 }
 
