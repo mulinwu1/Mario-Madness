@@ -106,9 +106,14 @@ jobs:
           haxelib dev openfl $fork
           $lines = @(haxelib path openfl)
           Write-Host "haxelib path openfl -> $($lines -join '; ')"
-          if (-not ($lines[0] -match 'vendor\\openfl\\src')) {
-            throw "openfl does not resolve to vendor/openfl/src: $($lines[0])"
+          # 注意：fork 的 haxelib 额外参数会让首行是 --macro（路径在后面行），必须全行匹配
+          $hit = @($lines | Where-Object { $_ -match 'vendor\\openfl' -or $_ -match 'vendor/openfl' })
+          if ($hit.Count -eq 0) {
+            Write-Host '=== haxelib path openfl (first 20 lines) ==='
+            $lines | Select-Object -First 20 | ForEach-Object { Write-Host $_ }
+            throw "openfl does not resolve to vendor/openfl: no line matches vendor/openfl in $($lines.Count) lines"
           }
+          Write-Host "openfl resolves to fork: $($hit[0])"
           Add-Content -Path $env:GITHUB_ENV -Value "OPENFL_VKPKT_FORK=$fork"
 
       # 定义走 Project.xml（lime 会把它翻成 -D openfl_vk_pkt 写进生成的 hxml）；
