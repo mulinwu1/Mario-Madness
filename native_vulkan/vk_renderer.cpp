@@ -3834,6 +3834,12 @@ void VkRenderer::EndFrame() {
     }
 
     if (o.currentTarget == 0) {
+        // [vkfix] 每帧一行：常量乘数全零折叠成 identity 的笔数 / 总笔数
+        extern int g_vkfixDrawTotal;
+        extern int g_vkfixDrawFolded;
+        fprintf(stderr, "[vkfix] zero_mult_identity=%d/%d\n", g_vkfixDrawFolded, g_vkfixDrawTotal);
+        g_vkfixDrawFolded = 0;
+        g_vkfixDrawTotal = 0;
         // 实验 VK_SINGLE_PRESENT=1：中间合成只提交几何、保持 image 不归还；
         // 只有真实 swap（gl_fbo 调 RequestPresent）才 present 一次。
         if (!willPresent) {
