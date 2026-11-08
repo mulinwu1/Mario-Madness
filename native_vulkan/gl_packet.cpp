@@ -537,12 +537,104 @@ static bool ReadFloatComp (const AttrRead& ar, int64_t vidx, int comp, float* ou
     return true;
 }
 
+// ---------------------------------------------------------------- 逐笔 trace（只读诊断）
+//
+// 开关：VK_TRACE_DRAW=1；只在帧号命中 VK_TRACE_FRAME（默认 5）时打印，
+// 单帧最多 VK_TRACE_MAX（默认 64）行。字段与 GL 侧 [vkdraw] 对齐，便于逐笔对账。
+// 本段除 fprintf 外不改任何执行行为（不读显存回读，采样色一律 px=no_readback）。
+
+static int TraceEnv (int* frameOut, int* maxOut) {
+    static int on = -1;
+    static int fm = 5;
+    static int mx = 64;
+    if (on < 0) {
+        const char* v = getenv("VK_TRACE_DRAW");
+        on = (v && v[0] == '1') ? 1 : 0;
+        const char* vf = getenv("VK_TRACE_FRAME");
+        const char* vm = getenv("VK_TRACE_MAX");
+        if (vf && vf[0]) fm = atoi(vf);
+        if (vm && vm[0]) mx = atoi(vm);
+        if (on) fprintf(stderr, "[trace] enabled frame=%d max=%d\n", fm, mx);
+    }
+    *frameOut = fm;
+    *maxOut = mx;
+    return on;
+}
+
+// 本笔是否要打：开关 + 帧号命中 + 本帧预算未用完。
+static bool TraceWant () {
+    int fm = 5, mx = 64;
+    if (!TraceEnv(&fm, &mx)) return false;
+    if ((int)g_rt.frameGen != fm) return false;
+    static uint32_t gen = 0xFFFFFFFFu;
+    static int used = 0;
+    if (gen != g_rt.frameGen) { gen = g_rt.frameGen; used = 0; }
+    if (used >= mx) return false;
+    used++;
+    return true;
+}
+
+struct TraceInfo {
+    int texName = 0;
+    int tw = 0, th = 0;
+    int pixelUv = 0;                          // 1 = 走像素坐标归一化分支
+    float u0 = 0, u1 = 0, v0 = 0, v1 = 0;     // 归一化前
+    float nu0 = 0, nu1 = 0, nv0 = 0, nv1 = 0; // 实际写进顶点的值
+    float x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+    int asrc = 0;                             // 0=const 1=arr
+    float amin = 1.0f, amax = 1.0f;
+};
+
+static void TraceSkip (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& rec, const char* verdict) {
+    if (!TraceWant()) return;
+    int texName = 0;
+    for (int i = 0; i < (int)vkpkt::kMaxTexSlots; i++) {
+        if (rec.tex[i].unit == vkpkt::kTexSlotUnused) continue;
+        texName = (int)rec.tex[i].texName;
+        break;
+    }
+    fprintf(stderr, "[trace] f=%u prog=%u s=%u n=%d tex=%d px=no_readback verdict=%s\n",
+            (unsigned)g_rt.frameGen, (unsigned)w.program, (unsigned)w.seq, (int)w.count,
+            texName, verdict);
+}
+
+static void TracePrint (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& rec,
+                        const TraceInfo& ti, const PktDrawDesc& d, const char* verdict) {
+    if (!TraceWant()) return;
+    bool whole = (!ti.pixelUv && ti.u0 <= 0.001f && ti.u1 >= 0.999f &&
+                  ti.v0 <= 0.001f && ti.v1 >= 0.999f);
+    // sc_src：pkt=本笔画了有效裁剪框；default=本笔没带框，沿用 pass 打开时下发的那一次
+    const char* scSrc = d.scissor.valid ? "pkt" : "default";
+    fprintf(stderr,
+            "[trace] f=%u prog=%u s=%u n=%d tex=%d tsz=%dx%d "
+            "uv=[%.3f..%.3f, %.3f..%.3f] nuv=[%.4f..%.4f, %.4f..%.4f] "
+            "pos=[%.1f..%.1f, %.1f..%.1f] norm=%d whole=%d "
+            "asrc=%s amin=%.3f amax=%.3f blend=%d(%u,%u) "
+            "vp=%d,%d,%d,%d,%d sc=%d,%d,%d,%d,%d sc_src=%s "
+            "depth=%d depthcmp=0x%x dwrite=%d px=no_readback verdict=%s\n",
+            (unsigned)g_rt.frameGen, (unsigned)w.program, (unsigned)w.seq, (int)w.count,
+            ti.texName, ti.tw, ti.th,
+            ti.u0, ti.u1, ti.v0, ti.v1,
+            ti.nu0, ti.nu1, ti.nv0, ti.nv1,
+            ti.x0, ti.x1, ti.y0, ti.y1,
+            ti.pixelUv, whole ? 1 : 0,
+            ti.asrc ? "arr" : "const", ti.amin, ti.amax,
+            (int)d.state.blendEnabled, (unsigned)d.state.blendSrc, (unsigned)d.state.blendDst,
+            (int)d.viewport.valid, (int)d.viewport.x, (int)d.viewport.y,
+            (int)d.viewport.w, (int)d.viewport.h,
+            (int)d.scissor.valid, (int)d.scissor.x, (int)d.scissor.y,
+            (int)d.scissor.w, (int)d.scissor.h,
+            scSrc, (int)d.state.depthTest, (unsigned)rec.depthFunc, (int)d.state.depthWrite,
+            verdict);
+}
+
 static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& rec, uint32_t rtId) {
     VkRenderer* r = gl_vk_get_renderer();
     if (!r) return false;
     // 清屏行（n=0）：pass 已在 BindRenderTarget 时打开，这里只做一次幂等对齐，
     // 保证执行日志与 packet 一一对应（没有绘制命令要发）。
     if (w.count <= 0) {
+        TraceSkip(w, rec, "skip_n0");
         return r->PktBeginTarget(rtId, rec.clearColorF[0], rec.clearColorF[1],
                                  rec.clearColorF[2], rec.clearColorF[3]);
     }
@@ -562,6 +654,7 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
             fprintf(stderr, "[vkexec] err=no_tex prog=%u s=%u\n", (unsigned)w.program, (unsigned)w.seq);
         }
         s_noTex++;
+        TraceSkip(w, rec, "skip_tex");
         return false;
     }
 
@@ -581,6 +674,7 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
         rec.attrs[5].size >= 1) alphaIdx = 5;
     if (posIdx < 0) {
         fprintf(stderr, "[vkexec] err=no_pos prog=%u s=%u\n", (unsigned)w.program, (unsigned)w.seq);
+        TraceSkip(w, rec, "skip_no_pos");
         return false;
     }
 
@@ -588,6 +682,7 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
     if (!ResolveAttrRead(posIdx, rec.attrs[posIdx], &pos)) {
         fprintf(stderr, "[vkexec] err=pos_src idx=%d buf=%u s=%u\n",
                 posIdx, (unsigned)rec.attrs[posIdx].bufferName, (unsigned)w.seq);
+        TraceSkip(w, rec, "skip_pos_src");
         return false;
     }
     if (uvIdx >= 0 && !ResolveAttrRead(uvIdx, rec.attrs[uvIdx], &uv)) uvIdx = -1;
@@ -599,6 +694,7 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
     if (w.kind == vkpkt::KIND_DRAW_ELEMENTS) {
         if (!SnapshotBuffer((int)w.ibo, &idx, &idxBytes) || !idx) {
             fprintf(stderr, "[vkexec] err=idx_src ibo=%u s=%u\n", (unsigned)w.ibo, (unsigned)w.seq);
+            TraceSkip(w, rec, "skip_idx_src");
             return false;
         }
     }
@@ -608,6 +704,10 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
     if (alphaIdx >= 0) alphas.assign((size_t)w.count, 1.0f);
     float uMin = 0, uMax = 0, vMin = 0, vMax = 0;
     bool firstUv = true;
+    // trace 用：几何与 alpha 的实际取值范围（只读累加，不参与任何计算）
+    float xMin = 0, xMax = 0, yMin = 0, yMax = 0;
+    bool firstPos = true;
+    float aMin = 1.0f, aMax = 1.0f;
 
     for (int i = 0; i < w.count; i++) {
         int64_t vidx = 0;
@@ -628,6 +728,7 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
                         posIdx, (long long)vidx, (unsigned)w.seq);
             }
             s_bad++;
+            TraceSkip(w, rec, "skip_pos_range");
             return false;
         }
         if (uvIdx >= 0) {
@@ -638,11 +739,18 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
             float a = 1.0f;
             ReadFloatComp(alpha, vidx, 0, &a);
             alphas[(size_t)i] = a;
+            if (a < aMin) aMin = a;
+            if (a > aMax) aMax = a;
         }
         verts[(size_t)i * 4 + 0] = x;
         verts[(size_t)i * 4 + 1] = y;
         verts[(size_t)i * 4 + 2] = u;
         verts[(size_t)i * 4 + 3] = vv;
+        if (firstPos) { xMin = xMax = x; yMin = yMax = y; firstPos = false; }
+        if (x < xMin) xMin = x;
+        if (x > xMax) xMax = x;
+        if (y < yMin) yMin = y;
+        if (y > yMax) yMax = y;
         if (firstUv) { uMin = uMax = u; vMin = vMax = vv; firstUv = false; }
         if (u < uMin) uMin = u;
         if (u > uMax) uMax = u;
@@ -675,8 +783,12 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
     float alphaConst = 1.0f;
     if (rec.attrs[1].kind == vkpkt::ATTR_CONSTANT) alphaConst *= rec.attrs[1].constValue[0];
     if (rec.attrs[5].kind == vkpkt::ATTR_CONSTANT) alphaConst *= rec.attrs[5].constValue[0];
+    if (alphaIdx < 0) { aMin = aMax = alphaConst; }
 
     std::vector<float> packed((size_t)w.count * 15);
+    // trace 用：真正写进顶点的 uv 范围（只读累加，不参与任何计算）
+    float nuMin = 0, nuMax = 0, nvMin = 0, nvMax = 0;
+    bool firstNorm = true;
     for (int i = 0; i < w.count; i++) {
         float u = verts[(size_t)i * 4 + 2];
         float v = verts[(size_t)i * 4 + 3];
@@ -702,6 +814,11 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
         for (int k = 0; k < 4; k++) o15[9 + k] = off[k];
         o15[13] = u;
         o15[14] = v;
+        if (firstNorm) { nuMin = nuMax = u; nvMin = nvMax = v; firstNorm = false; }
+        if (u < nuMin) nuMin = u;
+        if (u > nuMax) nuMax = u;
+        if (v < nvMin) nvMin = v;
+        if (v > nvMax) nvMax = v;
     }
 
     // 索引按展开后的顺序给 0..n-1：顶点已经按原索引顺序展开，视觉结果与原索引一致。
@@ -767,11 +884,26 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
     d.scissor.y = (int16_t)rec.scissorY;
     d.scissor.w = (int16_t)rec.scissorW;
     d.scissor.h = (int16_t)rec.scissorH;
+    // trace（只读）：把这一笔的实际取值原样打出来，字段与 GL 侧 [vkdraw] 对齐
+    TraceInfo ti;
+    ti.texName = texName;
+    ti.tw = tw; ti.th = th;
+    ti.pixelUv = pixelUv ? 1 : 0;
+    ti.u0 = uMin; ti.u1 = uMax; ti.v0 = vMin; ti.v1 = vMax;
+    ti.nu0 = nuMin; ti.nu1 = nuMax; ti.nv0 = nvMin; ti.nv1 = nvMax;
+    ti.x0 = xMin; ti.x1 = xMax; ti.y0 = yMin; ti.y1 = yMax;
+    ti.asrc = (alphaIdx >= 0) ? 1 : 0;
+    ti.amin = aMin; ti.amax = aMax;
+
     // 兜底：正常流程里 pass 在 BindRenderTarget 时就开了；这里按 packet 里的目标
     // 再对齐一次（同目标幂等不重清，换目标会先把上一笔 pass 收尾再开新的）。
     if (!r->PktBeginTarget(rtId, rec.clearColorF[0], rec.clearColorF[1],
                            rec.clearColorF[2], rec.clearColorF[3])) return false;
-    if (!r->PktDraw(d)) return false;
+    if (!r->PktDraw(d)) {
+        TracePrint(w, rec, ti, d, "skip_pipeline");
+        return false;
+    }
+    TracePrint(w, rec, ti, d, "drawn");
 
     g_rt.executed++;
     if (g_rt.executed <= 4 || g_rt.executed % 500 == 0) {

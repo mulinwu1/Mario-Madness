@@ -2473,11 +2473,37 @@ void VkRenderer::PktDropSets(uint32_t texId) {
     }
 }
 
+// trace（默认关闭）：VK_TRACE_DRAW=1 打开；总预算 VK_TRACE_MAX（默认 64）行。
+// 只读诊断：回答"这次 begin 的 clear 到底有没有真的执行"。
+static bool TraceClearWant () {
+    static int on = -1;
+    static int mx = 64;
+    static int used = 0;
+    if (on < 0) {
+        const char* v = getenv("VK_TRACE_DRAW");
+        on = (v && v[0] == '1') ? 1 : 0;
+        const char* vm = getenv("VK_TRACE_MAX");
+        if (vm && vm[0]) mx = atoi(vm);
+    }
+    if (!on) return false;
+    if (used >= mx) return false;
+    used++;
+    return true;
+}
+
+static void TraceClearLog (uint32_t id, float r, float g, float b, float a,
+                           int applied, const char* why) {
+    if (!TraceClearWant()) return;
+    fprintf(stderr, "[trace] clear= target=%u rgb=(%.3f,%.3f,%.3f,%.3f) applied=%d why=%s loadOp=%s\n",
+            id, r, g, b, a, applied, why, id >= 1000 ? "load" : "clear");
+}
+
 bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a) {
     Impl& o = *impl;
     // 同一目标重复绑定（OpenFL 每次 glClear 都会再 Bind）：只更新清屏色
     if (o.pktOpen && o.pktTarget == id) {
         o.clearR = r; o.clearG = g; o.clearB = b; o.clearA = a;
+        TraceClearLog(id, r, g, b, a, 0, "same_target_rebind");
         return true;
     }
     if (o.pktOpen) PktEndTarget();
@@ -2506,6 +2532,7 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a)
         if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
             o.swapDirty = true;
             fprintf(stderr, "[pkt] begin target=0 ok=0 acquire_err=%d\n", (int)ar);
+            TraceClearLog(0, r, g, b, a, 0, "acquire_err");
             return false;
         }
         o.bbHeld = true;
@@ -2550,6 +2577,10 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a)
     rbi.clearValueCount = 1;
     rbi.pClearValues = &cv;
     g_beginRP(o.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+    // 离屏目标（>=1000）的 pass 是 LOAD（见 CreateRenderTarget），传进来的 clear 色
+    // 不会被应用；只有后缓冲（target 0）的 pass 是 CLEAR。
+    TraceClearLog(id, r, g, b, a, id >= 1000 ? 0 : 1,
+                  id >= 1000 ? "rp_load_ignores_clear" : "rp_clear_applied");
 
     // viewport/scissor 取"绑定这一刻"的 GL 状态（不是帧末）
     const vktuning::Values& tv = vktuning::Get();
