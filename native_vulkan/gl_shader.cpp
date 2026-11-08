@@ -3081,7 +3081,9 @@ static uint32_t ElementBase (const UniformInfo& uniform, int element) {
 }
 
 // 诊断用：gl_core.cpp 里的采样槽镜像（返回当前绑定到该单元的纹理名）
+namespace pkt {
 int SnapshotTexBound (int unit);
+}
 
 // 诊断：prog 5/6/7 每写一次 uniform，打印该 program 全部 uniform 的当前值；
 // 每个 program 只打前 20 次，避免刷屏。只读，不影响渲染。
@@ -3102,7 +3104,7 @@ static void MaybeLogUniformValues (Program* program) {
 
 		if (u.kind == BASE_SAMPLER) {
 
-			snprintf (val, sizeof (val), "unit=%d tex=%d", u.textureUnit, SnapshotTexBound (u.textureUnit));
+			snprintf (val, sizeof (val), "unit=%d tex=%d", u.textureUnit, pkt::SnapshotTexBound (u.textureUnit));
 
 		} else if (u.kind == 0 && u.columns > 1) {
 
