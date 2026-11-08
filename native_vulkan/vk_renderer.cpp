@@ -21,6 +21,7 @@
 
 // gl_fbo 侧的当前目标（只读探针用，定义在 lime 命名空间的 gl_fbo.cpp:706）
 namespace lime { uint32_t gl_vk_current_target (); }
+namespace lime { extern int g_vkfixDrawTotal; extern int g_vkfixDrawFolded; }
 
 // 接线探针（本轮只接不选）：gl_shader 自己建的管线。它不参与任何 draw，
 // 只在 render pass 开头绑一次、紧接着换回固定管线（两次绑定之间没有 draw）。
@@ -3835,11 +3836,10 @@ void VkRenderer::EndFrame() {
 
     if (o.currentTarget == 0) {
         // [vkfix] 每帧一行：常量乘数全零折叠成 identity 的笔数 / 总笔数
-        extern int g_vkfixDrawTotal;
-        extern int g_vkfixDrawFolded;
-        fprintf(stderr, "[vkfix] zero_mult_identity=%d/%d\n", g_vkfixDrawFolded, g_vkfixDrawTotal);
-        g_vkfixDrawFolded = 0;
-        g_vkfixDrawTotal = 0;
+        fprintf(stderr, "[vkfix] zero_mult_identity=%d/%d\n",
+                lime::g_vkfixDrawFolded, lime::g_vkfixDrawTotal);
+        lime::g_vkfixDrawFolded = 0;
+        lime::g_vkfixDrawTotal = 0;
         // 实验 VK_SINGLE_PRESENT=1：中间合成只提交几何、保持 image 不归还；
         // 只有真实 swap（gl_fbo 调 RequestPresent）才 present 一次。
         if (!willPresent) {
