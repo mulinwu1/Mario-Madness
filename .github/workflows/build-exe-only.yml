@@ -30,6 +30,10 @@ on:
         description: "复刻组单变量：no_opt / fork / no_preload（空=纯 11-05 复刻）"
         required: false
         default: ""
+      ablate:
+        description: "单变量减法（基线=今天配置 + disable_vk_pkt=true）：no_opt / no_fork；空=基线本身"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -123,15 +127,17 @@ jobs:
         env:
           REPLICA_1105: ${{ inputs.replica_1105 }}
           REPLICA_VARIANT: ${{ inputs.replica_variant }}
+          ABLATE: ${{ inputs.ablate }}
         run: |
           $ErrorActionPreference = 'Stop'
           $useFork = $true
           if ($env:REPLICA_1105 -eq 'true' -and $env:REPLICA_VARIANT -ne 'fork') { $useFork = $false }
+          if ($env:ABLATE -eq 'no_fork') { $useFork = $false }
           if (-not $useFork) {
-            Write-Host 'REPLICA 11-05: skip haxelib dev; use haxelib openfl 9.2.0 as-is'
+            Write-Host "ABLATE/REPLICA: skip haxelib dev (ablate='$env:ABLATE'); use haxelib openfl 9.2.0 as-is"
             $lines = @(haxelib path openfl)
             Write-Host "haxelib path openfl -> $($lines -join '; ')"
-            if (@($lines | Where-Object { $_ -match 'vendor' }).Count -gt 0) { throw 'replica mode but openfl still resolves to vendor' }
+            if (@($lines | Where-Object { $_ -match 'vendor' }).Count -gt 0) { throw 'ablate=no_fork but openfl still resolves to vendor' }
           } else {
           $fork = (Resolve-Path 'vendor\openfl').Path
           haxelib dev openfl $fork
@@ -157,6 +163,7 @@ jobs:
           REPLICA_1105: ${{ inputs.replica_1105 }}
           REPLICA_VK_PKT: ${{ inputs.replica_vk_pkt }}
           REPLICA_VARIANT: ${{ inputs.replica_variant }}
+          ABLATE: ${{ inputs.ablate }}
         run: |
           $ErrorActionPreference = 'Stop'
           $px = Get-Content Project.xml -Raw
@@ -198,8 +205,9 @@ jobs:
           # 幂等插入，只影响 CI 里的这份 Project.xml，不改仓库文件
           $needNoOpt = $true
           if ($env:REPLICA_1105 -eq 'true' -and $variant -ne 'no_opt') { $needNoOpt = $false }
+          if ($env:ABLATE -eq 'no_opt') { $needNoOpt = $false }
           if (-not $needNoOpt) {
-            Write-Host 'REPLICA 11-05: skip --no-opt (11-05 did not use it)'
+            Write-Host "ABLATE/REPLICA: skip --no-opt (ablate='$env:ABLATE', variant='$variant')"
           } elseif ($check -match '--no-opt') {
             Write-Host 'Project.xml already has <haxeflag name="--no-opt" />'
           } else {
