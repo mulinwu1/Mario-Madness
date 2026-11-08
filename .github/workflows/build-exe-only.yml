@@ -57,6 +57,26 @@ jobs:
         with:
           fetch-depth: 1
 
+      # 每个 job 开头打印全部输入快照：一眼看出这轮带没带探针开关
+      - name: Input snapshot
+        shell: pwsh
+        env:
+          IN_NDLL_RUN_ID: ${{ inputs.ndll_run_id }}
+          IN_DISABLE_VK_PKT: ${{ inputs.disable_vk_pkt }}
+          IN_REPLICA_1105: ${{ inputs.replica_1105 }}
+          IN_REPLICA_VK_PKT: ${{ inputs.replica_vk_pkt }}
+          IN_FRONTEND_ONLY: ${{ inputs.frontend_only }}
+          IN_REPLICA_VARIANT: ${{ inputs.replica_variant }}
+          IN_ABLATE: ${{ inputs.ablate }}
+          IN_VERBOSE: ${{ inputs.verbose }}
+        run: |
+          Write-Host '=== input snapshot (empty = 未设) ==='
+          foreach ($k in @('IN_NDLL_RUN_ID','IN_DISABLE_VK_PKT','IN_REPLICA_1105','IN_REPLICA_VK_PKT','IN_FRONTEND_ONLY','IN_REPLICA_VARIANT','IN_ABLATE','IN_VERBOSE')) {
+            $v = [Environment]::GetEnvironmentVariable($k)
+            Write-Host ("{0}='{1}'" -f ($k -replace '^IN_',''), $v)
+          }
+          Write-Host ("ref={0} sha={1} run={2} attempt={3}" -f $env:GITHUB_REF, $env:GITHUB_SHA.Substring(0,8), $env:GITHUB_RUN_ID, $env:GITHUB_RUN_ATTEMPT)
+
       # 前置硬门：分叉源码必须在仓库里（vendor/openfl）。缺了就直接失败，
       # 否则编出来的是上游 openfl 9.2.0，exe 里永远不会有记录侧。
       - name: Assert openfl fork is committed in repo
@@ -220,24 +240,14 @@ jobs:
           if ($ao.Count -gt 0) { Write-Host "WARN: Project.xml 出现 analyzer-optimize（内存翻倍项）：$($ao[0].Line.Trim())" }
           else { Write-Host 'analyzer-optimize: absent in Project.xml (lime 8.0.2 默认也不加)' }
 
-          # 内存实验 2/2：本轮显式关掉 haxe 优化器（--no-opt），降低编译器峰值内存；
-          # 幂等插入，只影响 CI 里的这份 Project.xml，不改仓库文件
-          $needNoOpt = $true
-          if ($env:REPLICA_1105 -eq 'true' -and $variant -ne 'no_opt') { $needNoOpt = $false }
-          if ($env:ABLATE -like '*no_opt*') { $needNoOpt = $false }
-          if (-not $needNoOpt) {
-            Write-Host "ABLATE/REPLICA: skip --no-opt (ablate='$env:ABLATE', variant='$variant')"
-          } elseif ($check -match '--no-opt') {
-            Write-Host 'Project.xml already has <haxeflag name="--no-opt" />'
-          } else {
-            $px2 = Get-Content Project.xml -Raw
-            $px2 = $px2 -replace '</project>', "`t<haxeflag name=`"--no-opt`" />`n</project>"
-            Set-Content -Path Project.xml -Value $px2 -NoNewline
-            Write-Host 'inserted <haxeflag name="--no-opt" /> (memory experiment)'
-          }
+          # --no-opt 永久移除（不再是可选实验）：42439069362 实测——带 --no-opt 时 haxe 生成的
+          # lime/utils/_DataPointer/DataPointer_Impl_.cpp 丢失 @:generic 的 fromPointer，
+          # hxcpp 阶段必挂 C2440/C2039/C3861；去掉后同一 head 正常编到 obj=1319 / 906s。
+          # 这里只做"确认没有"，防止有人再加回来。
           $final = Get-Content Project.xml -Raw
-          if ($final -notmatch 'no-opt' -and $needNoOpt) { throw 'failed to insert --no-opt' }
-          Write-Host "project.xml variant='$variant' needNoOpt=$needNoOpt fork=$(if ($env:REPLICA_1105 -eq 'true') { if ($variant -eq 'fork') { 'YES' } else { 'NO' } } else { 'YES' })"
+          if ($final -match 'no-opt') { throw 'Project.xml contains --no-opt: breaks lime DataPointer C++ codegen (see run 42439069362)' }
+          Write-Host '--no-opt: absent (removed permanently)'
+          Write-Host "project.xml variant='$variant' fork=$(if ($env:REPLICA_1105 -eq 'true') { if ($variant -eq 'fork') { 'YES' } else { 'NO' } } else { 'YES' })"
 
       # 有 artifact 就覆盖 haxelib 里的 ndll；没有就原地用 haxelib lime 自带的那份，
       # 并记录 VULKAN_LIME_NDLL 供打包步骤贴到 exe 旁边。
@@ -392,6 +402,38 @@ jobs:
           } else {
             Write-Host 'CONCLUSION: pagefile effective within this job; commit limit can grow'
           }
+
+      # 出包前置硬断言：探针/实验开关一旦带进来，产物就没有记录侧（final.hxml 无 openfl_vk_pkt），
+      # 必须在这之前挡住，别等编完 25 分钟才被第 15 步断言拦下。
+      - name: Preflight - refuse probe switches when packaging
+        shell: pwsh
+        env:
+          IN_DISABLE_VK_PKT: ${{ inputs.disable_vk_pkt }}
+          IN_REPLICA_1105: ${{ inputs.replica_1105 }}
+          IN_REPLICA_VK_PKT: ${{ inputs.replica_vk_pkt }}
+          IN_FRONTEND_ONLY: ${{ inputs.frontend_only }}
+          IN_REPLICA_VARIANT: ${{ inputs.replica_variant }}
+          IN_ABLATE: ${{ inputs.ablate }}
+          IN_VERBOSE: ${{ inputs.verbose }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bad = @()
+          foreach ($pair in @(
+            @('disable_vk_pkt','IN_DISABLE_VK_PKT'),
+            @('replica_1105','IN_REPLICA_1105'),
+            @('replica_vk_pkt','IN_REPLICA_VK_PKT'),
+            @('frontend_only','IN_FRONTEND_ONLY'),
+            @('replica_variant','IN_REPLICA_VARIANT'),
+            @('ablate','IN_ABLATE'),
+            @('verbose','IN_VERBOSE')
+          )) {
+            $v = [Environment]::GetEnvironmentVariable($pair[1])
+            if ($v -ne '' -and $v -ne 'false' -and $v -ne '0') { $bad += ("{0}='{1}'" -f $pair[0], $v) }
+          }
+          if ($bad.Count -gt 0) {
+            throw ("probe/experiment inputs present -> refusing to package (no recorder side in exe): " + ($bad -join '; '))
+          }
+          Write-Host 'preflight OK: pure packaging config (vendor/openfl fork + openfl_vk_pkt define)'
 
       # 冷构建：不使用任何 hxcpp/obj 缓存（单变量原则），保证产物一定是本轮新编的
       # 单阶段：haxe 前台跑（输出实时进 Actions 日志）+ 独立监控进程（每 60s 一行心跳，卡死自动 taskkill）
