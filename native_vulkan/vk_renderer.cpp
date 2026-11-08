@@ -68,6 +68,9 @@ struct RenderTarget {
     VkImageView view = VK_NULL_HANDLE;
     VkFramebuffer fb = VK_NULL_HANDLE;
     VkRenderPass rp = VK_NULL_HANDLE;
+    // offscreen_clear=loadop 专用：loadOp=CLEAR 的第二套 pass/fb（默认 image 路径不用）
+    VkFramebuffer fbClear = VK_NULL_HANDLE;
+    VkRenderPass rpClear = VK_NULL_HANDLE;
     VkDescriptorSet set = VK_NULL_HANDLE;
     int w = 0, h = 0;
     bool used = false;
@@ -75,6 +78,8 @@ struct RenderTarget {
     // 取证用：创建帧号 / 最后一次"真的有顶点"的提交帧号（0 = 从未写过）
     uint64_t createdFrame = 0;
     uint64_t lastWriteFrame = 0;
+    // 取证用：最近一次"clear 真的执行"的帧号（0 = 从未清过）
+    uint64_t clearedFrame = 0;
 };
 
 // 取证用：当前挂着但未提交的顶点总数（顶点 = 15 floats）
@@ -240,6 +245,7 @@ static PFN_vkAllocateDescriptorSets g_allocDS;
 static PFN_vkFreeDescriptorSets g_freeDS;
 static PFN_vkUpdateDescriptorSets g_updateDS;
 static PFN_vkCmdPipelineBarrier g_cmdBarrier;
+static PFN_vkCmdClearColorImage g_cmdClearColorImage;
 static PFN_vkCmdCopyBufferToImage g_cmdCopyImg;
 static PFN_vkCmdCopyImageToBuffer g_cmdCopyImgToBuf;
 static PFN_vkCmdBindPipeline g_bindPipe;
@@ -486,6 +492,7 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     g_freeDS = (PFN_vkFreeDescriptorSets)o.gipa(o.inst, "vkFreeDescriptorSets");
     g_updateDS = (PFN_vkUpdateDescriptorSets)o.gipa(o.inst, "vkUpdateDescriptorSets");
     g_cmdBarrier = (PFN_vkCmdPipelineBarrier)o.gipa(o.inst, "vkCmdPipelineBarrier");
+    g_cmdClearColorImage = (PFN_vkCmdClearColorImage)o.gipa(o.inst, "vkCmdClearColorImage");
     g_cmdCopyImg = (PFN_vkCmdCopyBufferToImage)o.gipa(o.inst, "vkCmdCopyBufferToImage");
     g_cmdCopyImgToBuf = (PFN_vkCmdCopyImageToBuffer)o.gipa(o.inst, "vkCmdCopyImageToBuffer");
     g_bindPipe = (PFN_vkCmdBindPipeline)o.gipa(o.inst, "vkCmdBindPipeline");
@@ -2473,11 +2480,12 @@ void VkRenderer::PktDropSets(uint32_t texId) {
     }
 }
 
-// trace（默认关闭）：VK_TRACE_DRAW=1 打开；总预算 VK_TRACE_MAX（默认 64）行。
+// trace（默认关闭）：VK_TRACE_DRAW=1 打开；预算 VK_TRACE_MAX（默认 64）**按帧**计。
 // 只读诊断：回答"这次 begin 的 clear 到底有没有真的执行"。
 static bool TraceClearWant () {
     static int on = -1;
     static int mx = 64;
+    static uint64_t gen = 0;
     static int used = 0;
     if (on < 0) {
         const char* v = getenv("VK_TRACE_DRAW");
@@ -2486,27 +2494,81 @@ static bool TraceClearWant () {
         if (vm && vm[0]) mx = atoi(vm);
     }
     if (!on) return false;
+    // 按帧单独计数：clear 行不再吃"整局一次"的预算，菜单/后期帧也能拿到自己的 clear 行
+    if (gen != g_drawFrame) { gen = g_drawFrame; used = 0; }
     if (used >= mx) return false;
     used++;
     return true;
+}
+
+// 离屏目标 clear（image 路径）：在 render pass 之外整幅清色。
+// 为什么不会破坏"保留语义"：只有收到明确的 clear 包（colorClear=true）才调用；
+// 普通绑定/同目标复用仍走 LOAD pass，上一 pass 的内容照旧保留。
+// 清屏本身就是要丢弃旧内容，所以 oldLayout 用 UNDEFINED（不与任何旧 layout 冲突）。
+static void ClearOffscreenImage (VkCommandBuffer cmd, VkImage img,
+                                 float r, float g, float b, float a) {
+    if (!g_cmdBarrier || !g_cmdClearColorImage || !img) return;
+    VkImageMemoryBarrier bar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.image = img;
+    bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    bar.srcAccessMask = 0;
+    bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    g_cmdBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                 0, 1, nullptr, 0, nullptr, 1, &bar);
+
+    VkClearColorValue cc{};
+    cc.float32[0] = r; cc.float32[1] = g; cc.float32[2] = b; cc.float32[3] = a;
+    VkImageSubresourceRange rng{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    g_cmdClearColorImage(cmd, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &cc, 1, &rng);
+
+    VkImageMemoryBarrier back = bar;
+    back.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    back.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    back.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    back.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    g_cmdBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+                 0, 1, nullptr, 0, nullptr, 1, &back);
 }
 
 static void TraceClearLog (uint32_t id, float r, float g, float b, float a,
                            int applied, const char* why) {
     if (!TraceClearWant()) return;
     fprintf(stderr, "[trace] clear= target=%u rgb=(%.3f,%.3f,%.3f,%.3f) applied=%d why=%s loadOp=%s\n",
-            id, r, g, b, a, applied, why, id >= 1000 ? "load" : "clear");
+            id, r, g, b, a, applied, why,
+            (why && (!strcmp(why, "rp_clear_applied") || !strcmp(why, "clear_loadop"))) ? "clear" : "load");
 }
 
-bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a) {
+bool VkRenderer::PktTargetClearedThisFrame(uint32_t id) {
     Impl& o = *impl;
-    // 同一目标重复绑定（OpenFL 每次 glClear 都会再 Bind）：只更新清屏色
+    if (id < 1000) return false;
+    uint32_t ti = id - 1000;
+    if (ti >= o.targets.size() || !o.targets[ti].used) return false;
+    return o.targets[ti].clearedFrame == g_drawFrame;
+}
+
+bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a, bool colorClear) {
+    Impl& o = *impl;
+    const vktuning::Values& tv0 = vktuning::Get();
+    // 只有"明确的 clear 包 + 离屏目标 + 开关未关"才真的清；普通绑定保持 LOAD 语义
+    bool wantImageClear = colorClear && id >= 1000 && tv0.offscreenClear == vktuning::CLEAR_IMAGE;
+    bool wantLoadClear = colorClear && id >= 1000 && tv0.offscreenClear == vktuning::CLEAR_LOADOP;
+
+    // 同一目标重复绑定（OpenFL 每次 glClear 都会再 Bind）：普通情况只更新清屏色
     if (o.pktOpen && o.pktTarget == id) {
         o.clearR = r; o.clearG = g; o.clearB = b; o.clearA = a;
-        TraceClearLog(id, r, g, b, a, 0, "same_target_rebind");
-        return true;
+        if (!wantImageClear && !wantLoadClear) {
+            TraceClearLog(id, r, g, b, a, 0, "same_target_rebind");
+            return true;
+        }
+        // glClear 是整幅生效：先收尾当前 pass（旧内容本就要丢弃），再按 clear 语义重开
+        PktEndTarget();
+    } else if (o.pktOpen) {
+        PktEndTarget();
     }
-    if (o.pktOpen) PktEndTarget();
     if (!PktEnsureBuffers()) return false;
     o.pktVbOff = 0;
     o.pktIbOff = 0;
@@ -2515,11 +2577,19 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a)
     VkFramebuffer fb = VK_NULL_HANDLE;
     VkRenderPass rp = VK_NULL_HANDLE;
     VkExtent2D ext = o.extent;
+    uint32_t ti = 0;
+    bool usedClearPass = false;
     if (id >= 1000) {
-        uint32_t ti = id - 1000;
+        ti = id - 1000;
         if (ti >= o.targets.size() || !o.targets[ti].used) return false;
-        fb = o.targets[ti].fb;
-        rp = o.targets[ti].rp;
+        if (wantLoadClear && o.targets[ti].rpClear && o.targets[ti].fbClear) {
+            fb = o.targets[ti].fbClear;
+            rp = o.targets[ti].rpClear;
+            usedClearPass = true;
+        } else {
+            fb = o.targets[ti].fb;
+            rp = o.targets[ti].rp;
+        }
         ext = {(uint32_t)o.targets[ti].w, (uint32_t)o.targets[ti].h};
     } else {
         if (o.swapDirty) {
@@ -2564,6 +2634,11 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a)
         o.uboPtr[15] = 1.0f;
     }
 
+    // image 路径：在 pass 之外把整幅目标清成 clear 包的颜色（layout 往返见 ClearOffscreenImage）
+    if (wantImageClear && !usedClearPass) {
+        ClearOffscreenImage(o.cmd, o.targets[ti].image, r, g, b, a);
+    }
+
     VkClearValue cv{};
     cv.color.float32[0] = r;
     cv.color.float32[1] = g;
@@ -2577,10 +2652,18 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a)
     rbi.clearValueCount = 1;
     rbi.pClearValues = &cv;
     g_beginRP(o.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
-    // 离屏目标（>=1000）的 pass 是 LOAD（见 CreateRenderTarget），传进来的 clear 色
-    // 不会被应用；只有后缓冲（target 0）的 pass 是 CLEAR。
-    TraceClearLog(id, r, g, b, a, id >= 1000 ? 0 : 1,
-                  id >= 1000 ? "rp_load_ignores_clear" : "rp_clear_applied");
+    if (id < 1000) {
+        TraceClearLog(id, r, g, b, a, 1, "rp_clear_applied");
+    } else if (usedClearPass) {
+        o.targets[ti].clearedFrame = g_drawFrame;
+        TraceClearLog(id, r, g, b, a, 1, "clear_loadop");
+    } else if (wantImageClear) {
+        o.targets[ti].clearedFrame = g_drawFrame;
+        TraceClearLog(id, r, g, b, a, 1, "clear_image");
+    } else {
+        // 普通绑定（不是 clear 包）或 offscreen_clear=off：LOAD pass 保留上一 pass 内容
+        TraceClearLog(id, r, g, b, a, 0, "rp_load_ignores_clear");
+    }
 
     // viewport/scissor 取"绑定这一刻"的 GL 状态（不是帧末）
     const vktuning::Values& tv = vktuning::Get();
@@ -2813,7 +2896,8 @@ uint32_t VkRenderer::CreateRenderTarget(int w, int h) {
     ici.arrayLayers = 1;
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+              | VK_IMAGE_USAGE_TRANSFER_DST_BIT;   // 离屏 clear（vkCmdClearColorImage）需要
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (g_createImage(o.dev, &ici, nullptr, &t.image) != VK_SUCCESS) {
         o.targets.pop_back();
@@ -2880,6 +2964,20 @@ uint32_t VkRenderer::CreateRenderTarget(int w, int h) {
     auto createFB2 = (PFN_vkCreateFramebuffer)g_gipa(o.inst, "vkCreateFramebuffer");
     createFB2(o.dev, &fci, nullptr, &t.fb);
 
+    // 第二套 pass/fb：loadOp=CLEAR（只有 offscreen_clear=loadop 才用；默认 image 路径不碰）
+    {
+        VkAttachmentDescription attClear = att;
+        attClear.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        VkRenderPassCreateInfo rpciClear = rpci;
+        rpciClear.pAttachments = &attClear;
+        createRP2(o.dev, &rpciClear, nullptr, &t.rpClear);
+        if (t.rpClear) {
+            VkFramebufferCreateInfo fciClear = fci;
+            fciClear.renderPass = t.rpClear;
+            createFB2(o.dev, &fciClear, nullptr, &t.fbClear);
+        }
+    }
+
     std::vector<VkDescriptorSetLayout> layouts(1, o.dsl);
     VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     dsai.descriptorPool = o.descPool;
@@ -2939,6 +3037,8 @@ void VkRenderer::DestroyRenderTarget(uint32_t id) {
     PktDropSets(id);   // 变体 descriptor set 指向这张图，先还回池里
     if (t.fb) o.destroyFramebuffer(o.dev, t.fb, nullptr);
     if (t.rp) o.destroyRenderPass(o.dev, t.rp, nullptr);
+    if (t.fbClear) o.destroyFramebuffer(o.dev, t.fbClear, nullptr);
+    if (t.rpClear) o.destroyRenderPass(o.dev, t.rpClear, nullptr);
     if (t.view) o.destroyImageView(o.dev, t.view, nullptr);
     if (t.image) o.destroyImage(o.dev, t.image, nullptr);
     if (t.mem) o.freeMemory(o.dev, t.mem, nullptr);

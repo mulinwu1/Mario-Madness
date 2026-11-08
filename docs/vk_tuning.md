@@ -36,6 +36,7 @@
 | `viewport` | `keep` \| `full` | `keep` | ✅ | `keep` = 用绑定这一刻的 GL 视口；`full` = 强制整 target 全幅（怀疑视口残留时用） |
 | `scissor` | `keep` \| `full` | `keep` | ✅ | 同上，作用于裁剪框 |
 | `mip` | `off` \| `on` | `off` | ⚠️ 半生效 | `off` = 不请求生成 mip；`on` = 走生成请求。但纹理只分配 1 级，目前不会真的多出 level（保留位） |
+| `offscreen_clear` | `image` \| `loadop` \| `off` | `image` | ✅ | 离屏目标（id>=1000）收到 clear 包时的清屏路径。`image` = pass 外 `vkCmdClearColorImage`（layout 往返 TRANSFER_DST）；`loadop` = 用 loadOp=CLEAR 的第二套 pass；`off` = 旧行为（LOAD pass 忽略 clear，`[trace]` 记为 `rp_load_ignores_clear`） |
 
 `#` 和 `;` 开头是注释；`[section]` 行会被忽略（写成 INI 风格不会报错）。
 

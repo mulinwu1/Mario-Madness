@@ -543,29 +543,56 @@ static bool ReadFloatComp (const AttrRead& ar, int64_t vidx, int comp, float* ou
 // 单帧最多 VK_TRACE_MAX（默认 64）行。字段与 GL 侧 [vkdraw] 对齐，便于逐笔对账。
 // 本段除 fprintf 外不改任何执行行为（不读显存回读，采样色一律 px=no_readback）。
 
-static int TraceEnv (int* frameOut, int* maxOut) {
+// 帧号列表：VK_TRACE_FRAME 支持逗号分隔（"5,2700"），一次跑就能同时拿标题帧和菜单帧。
+static const int kTraceMaxFrames = 8;
+static int g_traceFrames[kTraceMaxFrames];
+static int g_traceFrameCount = 0;
+
+static int TraceEnv (int* maxOut) {
     static int on = -1;
-    static int fm = 5;
     static int mx = 64;
     if (on < 0) {
         const char* v = getenv("VK_TRACE_DRAW");
         on = (v && v[0] == '1') ? 1 : 0;
         const char* vf = getenv("VK_TRACE_FRAME");
         const char* vm = getenv("VK_TRACE_MAX");
-        if (vf && vf[0]) fm = atoi(vf);
         if (vm && vm[0]) mx = atoi(vm);
-        if (on) fprintf(stderr, "[trace] enabled frame=%d max=%d\n", fm, mx);
+        char buf[256] = {0};
+        if (vf && vf[0]) {
+            int n = 0;
+            const char* p = vf;
+            while (*p && n < kTraceMaxFrames) {
+                while (*p == ' ' || *p == ',') p++;
+                if (!*p) break;
+                int v = atoi(p);
+                if (v >= 0) g_traceFrames[n++] = v;
+                while (*p && *p != ',') p++;
+            }
+            if (n > 0) {
+                g_traceFrameCount = n;
+                snprintf(buf, sizeof(buf), "%d", g_traceFrames[0]);
+                for (int i = 1; i < n; i++) {
+                    size_t l = strlen(buf);
+                    snprintf(buf + l, sizeof(buf) - l, ",%d", g_traceFrames[i]);
+                }
+            }
+        }
+        if (g_traceFrameCount == 0) { g_traceFrames[0] = 5; g_traceFrameCount = 1; snprintf(buf, sizeof(buf), "5"); }
+        if (on) fprintf(stderr, "[trace] enabled frame=%s max=%d\n", buf, mx);
     }
-    *frameOut = fm;
     *maxOut = mx;
     return on;
 }
 
-// 本笔是否要打：开关 + 帧号命中 + 本帧预算未用完。
+// 本笔是否要打：开关 + 帧号命中（列表任一）+ 本帧预算未用完。
 static bool TraceWant () {
-    int fm = 5, mx = 64;
-    if (!TraceEnv(&fm, &mx)) return false;
-    if ((int)g_rt.frameGen != fm) return false;
+    int mx = 64;
+    if (!TraceEnv(&mx)) return false;
+    bool hit = false;
+    for (int i = 0; i < g_traceFrameCount; i++) {
+        if ((int)g_rt.frameGen == g_traceFrames[i]) { hit = true; break; }
+    }
+    if (!hit) return false;
     static uint32_t gen = 0xFFFFFFFFu;
     static int used = 0;
     if (gen != g_rt.frameGen) { gen = g_rt.frameGen; used = 0; }
@@ -585,6 +612,16 @@ struct TraceInfo {
     float amin = 1.0f, amax = 1.0f;
 };
 
+// 不占 draw 行预算的判定：canvas3x 这种"附加对账行"专用（仍然受帧号列表约束）。
+static bool TraceWantExtra () {
+    int mx = 64;
+    if (!TraceEnv(&mx)) return false;
+    for (int i = 0; i < g_traceFrameCount; i++) {
+        if ((int)g_rt.frameGen == g_traceFrames[i]) return true;
+    }
+    return false;
+}
+
 static void TraceSkip (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& rec, const char* verdict) {
     if (!TraceWant()) return;
     int texName = 0;
@@ -593,9 +630,36 @@ static void TraceSkip (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& rec,
         texName = (int)rec.tex[i].texName;
         break;
     }
-    fprintf(stderr, "[trace] f=%u prog=%u s=%u n=%d tex=%d px=no_readback verdict=%s\n",
+    // 几何：尽力从位置属性解析包围盒；clear 行（n=0）/索引绘制/解析失败一律 pos=na
+    char posBuf[80];
+    snprintf(posBuf, sizeof(posBuf), "pos=na");
+    if (w.count > 0 && w.kind != vkpkt::KIND_DRAW_ELEMENTS) {
+        int posIdx = -1;
+        for (int i = 0; i < (int)vkpkt::kMaxAttrSlots; i++) {
+            if ((rec.attrs[i].kind == vkpkt::ATTR_ARRAY || rec.attrs[i].kind == vkpkt::ATTR_CLIENT) &&
+                rec.attrs[i].size >= 2) { posIdx = i; break; }
+        }
+        AttrRead ar;
+        if (posIdx >= 0 && ResolveAttrRead(posIdx, rec.attrs[posIdx], &ar)) {
+            bool ok = true, first = true;
+            float x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+            for (int i = 0; i < (int)w.count; i++) {
+                float x, y;
+                if (!ReadFloatComp(ar, i, 0, &x) || !ReadFloatComp(ar, i, 1, &y)) { ok = false; break; }
+                if (first) { x0 = x1 = x; y0 = y1 = y; first = false; }
+                else {
+                    if (x < x0) x0 = x; if (x > x1) x1 = x;
+                    if (y < y0) y0 = y; if (y > y1) y1 = y;
+                }
+            }
+            if (ok && !first) {
+                snprintf(posBuf, sizeof(posBuf), "pos=[%.1f..%.1f, %.1f..%.1f]", x0, x1, y0, y1);
+            }
+        }
+    }
+    fprintf(stderr, "[trace] f=%u prog=%u s=%u n=%d tex=%d %s px=no_readback verdict=%s\n",
             (unsigned)g_rt.frameGen, (unsigned)w.program, (unsigned)w.seq, (int)w.count,
-            texName, verdict);
+            texName, posBuf, verdict);
 }
 
 static void TracePrint (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& rec,
@@ -635,8 +699,10 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
     // 保证执行日志与 packet 一一对应（没有绘制命令要发）。
     if (w.count <= 0) {
         TraceSkip(w, rec, "skip_n0");
+        // 只有当 clearMask 含颜色位时才算"要清色"；纯深度/模板 clear 不能整幅抹掉颜色
+        bool colorClear = (rec.colorMaskBits & 0x0F) != 0;
         return r->PktBeginTarget(rtId, rec.clearColorF[0], rec.clearColorF[1],
-                                 rec.clearColorF[2], rec.clearColorF[3]);
+                                 rec.clearColorF[2], rec.clearColorF[3], colorClear);
     }
     if (w.kind != vkpkt::KIND_DRAW_ARRAYS && w.kind != vkpkt::KIND_DRAW_ELEMENTS) return false;
 
@@ -904,6 +970,11 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
         return false;
     }
     TracePrint(w, rec, ti, d, "drawn");
+    // 对账行：这笔搬的是离屏画布（>=1000）时，直接给出"清没清 + 谁在用"。
+    if (vkTex >= 1000 && TraceWantExtra()) {
+        fprintf(stderr, "[trace] canvas3x target=%u cleared=%d used_by_s=%u\n",
+                vkTex, r->PktTargetClearedThisFrame(vkTex) ? 1 : 0, (unsigned)w.seq);
+    }
 
     g_rt.executed++;
     if (g_rt.executed <= 4 || g_rt.executed % 500 == 0) {

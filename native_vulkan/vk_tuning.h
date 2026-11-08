@@ -21,6 +21,11 @@ enum { BLEND_SRC_ALPHA = 0, BLEND_PREMUL = 1, BLEND_ADDITIVE = 2, BLEND_OFF = 3 
 enum { KEEP = -1, OFF = 0, ON = 1 };
 // viewport / scissor 策略：0 = 按记录逐笔（默认），1 = 按 target 全幅
 enum { POLICY_RECORDED = 0, POLICY_FULL_TARGET = 1 };
+// 离屏目标（id>=1000）的 clear 路径：
+//   image  = 在 render pass 外做 vkCmdClearColorImage（默认；只在收到 clear 包时执行）
+//   loadop = 用 loadOp=CLEAR 的第二个 render pass 建 pass
+//   off    = 保持旧行为（LOAD pass 忽略 clear）
+enum { CLEAR_IMAGE = 0, CLEAR_LOADOP = 1, CLEAR_OFF = 2 };
 
 struct SizeRule {
     int maxDim;   // 适用上限：max(w,h) <= maxDim 时命中（mode 的含义与上面两套枚举一致）
@@ -47,6 +52,8 @@ struct Values {
 
     int viewportPolicy;
     int scissorPolicy;
+
+    int offscreenClear;   // CLEAR_IMAGE / CLEAR_LOADOP / CLEAR_OFF
 
     int mipGenerate;   // 预留：纹理只分配 1 级 mip，打开不会凭空生成 level
 };

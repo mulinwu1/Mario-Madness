@@ -31,6 +31,7 @@ static void SetDefaults () {
     g_v.stencilTest = KEEP;
     g_v.viewportPolicy = POLICY_RECORDED;
     g_v.scissorPolicy = POLICY_RECORDED;
+    g_v.offscreenClear = CLEAR_IMAGE;
     g_v.mipGenerate = 0;
 }
 
@@ -77,6 +78,13 @@ static int ParseOnOff (const char* v) {
 static int ParsePolicy (const char* v) {
     if (!strcmp (v, "keep") || !strcmp (v, "recorded")) return POLICY_RECORDED;
     if (!strcmp (v, "full") || !strcmp (v, "target")) return POLICY_FULL_TARGET;
+    return -1;
+}
+
+static int ParseOffscreenClear (const char* v) {
+    if (!strcmp (v, "image")) return CLEAR_IMAGE;
+    if (!strcmp (v, "loadop")) return CLEAR_LOADOP;
+    if (!strcmp (v, "off") || !strcmp (v, "none")) return CLEAR_OFF;
     return -1;
 }
 
@@ -191,6 +199,9 @@ static void Apply (char* key, char* val) {
         int m = ParseOnOff (val);
         if (m == -2) AddBad (key, val);
         else g_v.mipGenerate = (m == ON) ? 1 : 0;
+    } else if (!strcmp (key, "offscreen_clear")) {
+        int m = ParseOffscreenClear (val);
+        if (m < 0) AddBad (key, val); else g_v.offscreenClear = m;
     } else {
         // 未知键不报错（允许留着其他分支的调参），但记进 [vk] tuning 的 unknown=
         AddBad (key, val);
@@ -273,6 +284,10 @@ static const char* PolicyName (int m) {
     return m == POLICY_FULL_TARGET ? "full" : "keep";
 }
 
+static const char* OffscreenClearName (int m) {
+    return m == CLEAR_LOADOP ? "loadop" : (m == CLEAR_OFF ? "off" : "image");
+}
+
 static const char* TriName (int m) {
     return m == ON ? "on" : (m == OFF ? "off" : "keep");
 }
@@ -306,13 +321,14 @@ void LogEffective () {
     fprintf (stderr,
              "[vk] tuning src=%s texture.filter=%s texture.filter.by_size=%s texture.filter.by_glname=%s "
              "texture.wrap=%s texture.wrap.by_size=%s blend=%s depth.test=%s depth.write=%s stencil.test=%s "
-             "viewport=%s scissor=%s mip=%s unknown=%s\n",
+             "viewport=%s scissor=%s offscreen_clear=%s mip=%s unknown=%s\n",
              g_src,
              FilterName (v.filterDefault), sizeRules[0] ? sizeRules : "-", names[0] ? names : "-",
              WrapName (v.wrapDefault), wrapRules[0] ? wrapRules : "-",
              BlendName (v.blendVariant),
              TriName (v.depthTest), TriName (v.depthWrite), TriName (v.stencilTest),
              PolicyName (v.viewportPolicy), PolicyName (v.scissorPolicy),
+             OffscreenClearName (v.offscreenClear),
              v.mipGenerate ? "on" : "off",
              g_bad[0] ? g_bad : "-");
 }

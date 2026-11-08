@@ -146,7 +146,12 @@ public:
     // ---- packet 执行路径（只给 VK_PKT_EXEC=1 用；与批处理路径互斥）----
     // 进目标：开 render pass、绑 framebuffer、按当前 viewport/scissor 下发。
     // 在 BindRenderTarget 的时机被调用（不是帧末）；同一目标重复调用只更新清屏色。
-    bool PktBeginTarget(uint32_t targetId, float r, float g, float b, float a);
+    // colorClear=true 表示这一笔是明确的 clear 包（且 clearMask 含颜色位）：
+    // 离屏目标（>=1000）会真的把整幅清成 (r,g,b,a)；普通绑定保持 LOAD 语义。
+    bool PktBeginTarget(uint32_t targetId, float r, float g, float b, float a,
+                        bool colorClear = false);
+    // 取证：该离屏目标在"本帧"是否真的执行过 clear（配合 trace 的 canvas3x 行）。
+    bool PktTargetClearedThisFrame(uint32_t targetId);
     // 一笔 draw：绑管线 -> 绑 descriptor（按纹理槽）-> 绑顶点/索引 -> vkCmdDraw*，
     // 命令立刻写进当前命令缓冲（不是每笔一次 vkQueueSubmit）。
     bool PktDraw(const PktDrawDesc& desc);
