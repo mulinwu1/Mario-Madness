@@ -296,7 +296,7 @@ jobs:
       # -v 证据：ShaderMacro.build 最后一个 "Calling" 没有 "Exiting"，指向 11-06 那批 ES 1.00 改过的 shader。
       # revert_ycbu = 只回滚 YCBUEndingShader；revert_shaders = 三个文件全部回滚到改前版本。
       - name: Ablate - restore 11-06 shaders (revert_ycbu / revert_shaders)
-        if: ${{ contains(inputs.ablate, 'revert_ycbu') || contains(inputs.ablate, 'revert_shaders') }}
+        if: ${{ contains(inputs.ablate, 'revert_ycbu') || contains(inputs.ablate, 'revert_shaders') || contains(inputs.ablate, 'revert_oldtv') || contains(inputs.ablate, 'revert_vcr') }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -309,9 +309,16 @@ jobs:
             @{ p = 'source\OldTVShader.hx';      ref = 'afcdbab9135128ad857f0d2981dcb1e0ff70747a' },
             @{ p = 'source\VCRMario85.hx';       ref = '6a016b547ddf088272c363a9fcd5d994f38ddac7' }
           )
-          $targets = $all
-          if (-not $env:ABLATE.Contains('revert_shaders')) { $targets = @($all[0]) }
-          foreach ($t in $targets) {
+          $targets = @()
+          if ($env:ABLATE.Contains('revert_shaders')) { $targets = @(0, 1, 2) }
+          else {
+            if ($env:ABLATE.Contains('revert_ycbu'))  { $targets += 0 }
+            if ($env:ABLATE.Contains('revert_oldtv')) { $targets += 1 }
+            if ($env:ABLATE.Contains('revert_vcr'))   { $targets += 2 }
+          }
+          if ($targets.Count -eq 0) { throw 'no revert target selected' }
+          foreach ($idx in $targets) {
+            $t = $all[$idx]
             $p = $t.p
             $rel = $p -replace '\\', '/'
             Write-Host "before: $p size=$((Get-Item $p).Length)"
