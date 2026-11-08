@@ -981,7 +981,11 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
             cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
             cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
             cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-            cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            // dstAlpha 从 ZERO 改为 ONE_MINUS_SRC_ALPHA：
+            // ZERO 会把目标 alpha 清零（贴图黑底=alpha 0 的区域变成实心黑），
+            // 改成与 color 一致的合成式即可保留目标 alpha，且不像 premul 那样把 color 因子也改成 ONE
+            // （那会把绿蓝放大）。color 三个因子保持原样不动。
+            cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
             break;
     }
     cba.colorBlendOp = VK_BLEND_OP_ADD;
