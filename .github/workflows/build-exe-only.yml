@@ -31,7 +31,11 @@ on:
         required: false
         default: ""
       ablate:
-        description: "单变量减法（基线=今天配置 + disable_vk_pkt=true）：no_opt / no_fork；空=基线本身"
+        description: "单变量减法（基线=今天配置 + disable_vk_pkt=true）：no_opt / no_fork / keep_assets / lime_src；空=基线本身"
+        required: false
+        default: ""
+      verbose:
+        description: "诊断：true = 给 haxe 加 -v（逐模块打印），抓最后卡在哪个模块/宏"
         required: false
         default: ""
 
@@ -132,7 +136,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $useFork = $true
           if ($env:REPLICA_1105 -eq 'true' -and $env:REPLICA_VARIANT -ne 'fork') { $useFork = $false }
-          if ($env:ABLATE -eq 'no_fork') { $useFork = $false }
+          if ($env:ABLATE -like '*no_fork*') { $useFork = $false }
           if (-not $useFork) {
             Write-Host "ABLATE/REPLICA: skip haxelib dev (ablate='$env:ABLATE'); use haxelib openfl 9.2.0 as-is"
             $lines = @(haxelib path openfl)
@@ -164,6 +168,7 @@ jobs:
           REPLICA_VK_PKT: ${{ inputs.replica_vk_pkt }}
           REPLICA_VARIANT: ${{ inputs.replica_variant }}
           ABLATE: ${{ inputs.ablate }}
+          VERBOSE: ${{ inputs.verbose }}
         run: |
           $ErrorActionPreference = 'Stop'
           $px = Get-Content Project.xml -Raw
@@ -194,6 +199,20 @@ jobs:
           $check = Get-Content Project.xml -Raw
           if ($check -notmatch '<haxedef name="openfl_vk_pkt"' -and $env:DISABLE_VK_PKT -ne 'true' -and $env:REPLICA_1105 -ne 'true') { throw 'failed to enable openfl_vk_pkt in Project.xml' }
 
+          # 诊断仪器：-v 让 haxe 逐模块打印；卡住时日志最后一条就指向嫌疑模块/宏
+          if ($env:VERBOSE -eq 'true') {
+            $pv = Get-Content Project.xml -Raw
+            if ($pv -match '<haxeflag name="-v"') {
+              Write-Host 'Project.xml already has <haxeflag name="-v" />'
+            } else {
+              $pv = $pv -replace '</project>', "`t<haxeflag name=`"-v`" />`n</project>"
+              Set-Content -Path Project.xml -Value $pv -NoNewline
+              Write-Host 'inserted <haxeflag name="-v" /> (verbose diagnostic)'
+            }
+            $vf = Get-Content Project.xml -Raw
+            if ($vf -notmatch '<haxeflag name="-v"') { throw 'failed to insert -v haxeflag' }
+          }
+
           # 内存实验 1/2：analyzer-optimize 是已知的内存翻倍项。源侧核查结论：
           # lime 8.0.2 (HXProject/ProjectXMLParser/Platform) 与仓库 Project.xml 都没有它，
           # 所以这里只做"确认没有"，若以后有人加进来会立刻在日志里暴露。
@@ -205,7 +224,7 @@ jobs:
           # 幂等插入，只影响 CI 里的这份 Project.xml，不改仓库文件
           $needNoOpt = $true
           if ($env:REPLICA_1105 -eq 'true' -and $variant -ne 'no_opt') { $needNoOpt = $false }
-          if ($env:ABLATE -eq 'no_opt') { $needNoOpt = $false }
+          if ($env:ABLATE -like '*no_opt*') { $needNoOpt = $false }
           if (-not $needNoOpt) {
             Write-Host "ABLATE/REPLICA: skip --no-opt (ablate='$env:ABLATE', variant='$variant')"
           } elseif ($check -match '--no-opt') {
@@ -250,6 +269,29 @@ jobs:
           $shim = (Resolve-Path 'lime-vulkan-artifact\lime_glslang.dll' -ErrorAction SilentlyContinue)
           if ($shim) { Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_LIME_SHIM=$($shim.Path)" }
           else { Write-Host 'WARN: lime_glslang.dll not in artifact; packaging will rely on the local shim' }
+
+      # 11-05 那次用的是 lime 源码（haxelib dev lime C:\lime-src），今天用的是 haxelib 发行包。
+      # 单变量：把 lime 也换成 8.0.2 源码，其余不动。
+      - name: Point lime at 8.0.2 source (ablate=lime_src)
+        if: ${{ contains(inputs.ablate, 'lime_src') }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path 'C:\lime-src')) {
+            git clone --depth 1 --branch 8.0.2 --recursive --shallow-submodules https://github.com/openfl/lime.git C:\lime-src
+          }
+          haxelib dev lime C:\lime-src
+          $lines = @(haxelib path lime)
+          Write-Host "haxelib path lime -> $($lines -join '; ')"
+          if (@($lines | Where-Object { $_ -match 'lime-src' }).Count -eq 0) { throw 'ablate=lime_src but lime does not resolve to C:\lime-src' }
+          # 把现有 Windows ndll 预置进源码树，避免 lime 在 haxe 前端之前先跑 native rebuild（会污染前端判据）
+          if ($env:VULKAN_LIME_NDLL -and (Test-Path $env:VULKAN_LIME_NDLL)) {
+            New-Item -ItemType Directory -Force -Path 'C:\lime-src\ndll\Windows64' | Out-Null
+            Copy-Item $env:VULKAN_LIME_NDLL 'C:\lime-src\ndll\Windows64\lime.ndll' -Force
+            Write-Host "seeded lime.ndll into source tree: size=$((Get-Item 'C:\lime-src\ndll\Windows64\lime.ndll').Length)"
+          } else { Write-Host 'WARN: VULKAN_LIME_NDLL unavailable; lime source may trigger a native rebuild' }
+          Write-Host 'lime source dirs:'
+          Get-ChildItem 'C:\lime-src\src\lime' -Directory -ErrorAction SilentlyContinue | Select-Object -First 8 -ExpandProperty Name | ForEach-Object { Write-Host "  $_" }
 
       # discord_rpc 的 native 源码 haxelib 包里缺失，需要手工补齐（与既有构建一致）
       - name: Patch discord_rpc native sources
@@ -331,7 +373,7 @@ jobs:
           $outDir = "export\release\windows"
           if ($env:REPLICA_1105 -eq 'true') {
             Write-Host 'REPLICA 11-05: keep assets as-is (11-05 compiled with full assets + PRELOAD_ALL)'
-          } elseif ($env:ABLATE -eq 'keep_assets') {
+          } elseif ($env:ABLATE -like '*keep_assets*') {
             Write-Host 'ABLATE keep_assets: skip assets wipe (restore the full asset set)'
           } else {
           Get-ChildItem 'assets' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
