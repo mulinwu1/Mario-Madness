@@ -14,6 +14,14 @@ on:
         description: "二分实验：true = 不插入 openfl_vk_pkt 定义（fork 类路径保留），用于定位 13.9GB OOM 来源"
         required: false
         default: ""
+      replica_1105:
+        description: "对照实验：true = 完全复刻 11-05 输入（haxelib openfl 9.2.0 + PRELOAD_ALL + angle + 不加 vk_pkt/--no-opt）"
+        required: false
+        default: ""
+      frontend_only:
+        description: "提速：true = 只要出现第一条 TU 就记 frontend_s 并杀进程（分钟级实验）"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -104,8 +112,16 @@ jobs:
       # 用仓库内的分叉 openfl 覆盖 haxelib 里的上游 9.2.0（haxelib dev 不复制、只改解析路径）
       - name: Point openfl at vendor/openfl
         shell: pwsh
+        env:
+          REPLICA_1105: ${{ inputs.replica_1105 }}
         run: |
           $ErrorActionPreference = 'Stop'
+          if ($env:REPLICA_1105 -eq 'true') {
+            Write-Host 'REPLICA 11-05: skip haxelib dev; use haxelib openfl 9.2.0 as-is'
+            $lines = @(haxelib path openfl)
+            Write-Host "haxelib path openfl -> $($lines -join '; ')"
+            if (@($lines | Where-Object { $_ -match 'vendor' }).Count -gt 0) { throw 'replica mode but openfl still resolves to vendor' }
+          } else {
           $fork = (Resolve-Path 'vendor\openfl').Path
           haxelib dev openfl $fork
           $lines = @(haxelib path openfl)
@@ -119,6 +135,7 @@ jobs:
           }
           Write-Host "openfl resolves to fork: $($hit[0])"
           Add-Content -Path $env:GITHUB_ENV -Value "OPENFL_VKPKT_FORK=$fork"
+          }
 
       # 定义走 Project.xml（lime 会把它翻成 -D openfl_vk_pkt 写进生成的 hxml）；
       # 幂等插入，重复跑不会叠加。
@@ -126,10 +143,17 @@ jobs:
         shell: pwsh
         env:
           DISABLE_VK_PKT: ${{ inputs.disable_vk_pkt }}
+          REPLICA_1105: ${{ inputs.replica_1105 }}
         run: |
           $ErrorActionPreference = 'Stop'
           $px = Get-Content Project.xml -Raw
-          if ($env:DISABLE_VK_PKT -eq 'true') {
+          if ($env:REPLICA_1105 -eq 'true') {
+            Write-Host 'REPLICA 11-05: add PRELOAD_ALL + angle defines (11-05 hxml), no openfl_vk_pkt, no --no-opt'
+            $px = $px -replace '</project>', "`t<haxedef name=`"PRELOAD_ALL`" />`n`t<haxedef name=`"angle`" />`n</project>"
+            Set-Content -Path Project.xml -Value $px -NoNewline
+            $rc = Get-Content Project.xml -Raw
+            if ($rc -notmatch '<haxedef name="PRELOAD_ALL"' -or $rc -notmatch '<haxedef name="angle"') { throw 'replica defines insert failed' }
+          } elseif ($env:DISABLE_VK_PKT -eq 'true') {
             Write-Host 'BISECT PROBE: openfl_vk_pkt define intentionally skipped (fork classpath kept)'
           } elseif ($px -match 'openfl_vk_pkt') {
             Write-Host 'Project.xml already has openfl_vk_pkt'
@@ -139,7 +163,7 @@ jobs:
             Write-Host 'inserted <haxedef name="openfl_vk_pkt" />'
           }
           $check = Get-Content Project.xml -Raw
-          if ($check -notmatch '<haxedef name="openfl_vk_pkt"' -and $env:DISABLE_VK_PKT -ne 'true') { throw 'failed to enable openfl_vk_pkt in Project.xml' }
+          if ($check -notmatch '<haxedef name="openfl_vk_pkt"' -and $env:DISABLE_VK_PKT -ne 'true' -and $env:REPLICA_1105 -ne 'true') { throw 'failed to enable openfl_vk_pkt in Project.xml' }
 
           # 内存实验 1/2：analyzer-optimize 是已知的内存翻倍项。源侧核查结论：
           # lime 8.0.2 (HXProject/ProjectXMLParser/Platform) 与仓库 Project.xml 都没有它，
@@ -150,7 +174,9 @@ jobs:
 
           # 内存实验 2/2：本轮显式关掉 haxe 优化器（--no-opt），降低编译器峰值内存；
           # 幂等插入，只影响 CI 里的这份 Project.xml，不改仓库文件
-          if ($check -match '--no-opt') {
+          if ($env:REPLICA_1105 -eq 'true') {
+            Write-Host 'REPLICA 11-05: skip --no-opt (11-05 did not use it)'
+          } elseif ($check -match '--no-opt') {
             Write-Host 'Project.xml already has <haxeflag name="--no-opt" />'
           } else {
             $px2 = Get-Content Project.xml -Raw
@@ -159,7 +185,7 @@ jobs:
             Write-Host 'inserted <haxeflag name="--no-opt" /> (memory experiment)'
           }
           $final = Get-Content Project.xml -Raw
-          if ($final -notmatch 'no-opt') { throw 'failed to insert --no-opt' }
+          if ($final -notmatch 'no-opt' -and $env:REPLICA_1105 -ne 'true') { throw 'failed to insert --no-opt' }
 
       # 有 artifact 就覆盖 haxelib 里的 ndll；没有就原地用 haxelib lime 自带的那份，
       # 并记录 VULKAN_LIME_NDLL 供打包步骤贴到 exe 旁边。
@@ -261,6 +287,9 @@ jobs:
       - name: Build game with openfl_vk_pkt
         shell: pwsh
         timeout-minutes: 150
+        env:
+          REPLICA_1105: ${{ inputs.replica_1105 }}
+          FRONTEND_ONLY: ${{ inputs.frontend_only }}
         run: |
           $ErrorActionPreference = 'Stop'
           $buildStart = (Get-Date).ToUniversalTime()
@@ -279,6 +308,7 @@ jobs:
           haxelib list
 
           $stageArgs = @('run','lime','build','windows','-D','HXCPP_FAST_LINK')
+          if ($env:REPLICA_1105 -eq 'true') { $stageArgs = @('run','lime','build','windows','-D','angle') }
           Write-Host "cmd: $hx $($stageArgs -join ' ')"
 
           # 监控脚本：三个信号全部实测（取不到的写 NA，不写 0 假装有数）
@@ -287,7 +317,7 @@ jobs:
           # 3) export 下 .cpp 数量与总字节（haxe 生成完会从 0 跳到几千）
           # 另有 obj 数作为第二条硬证据；判定卡死 = haxe_cpu 连续 10 次采样无增量 且 cpp/obj 都没涨
           Set-Content -Path monitor.ps1 -Encoding UTF8 -Value @'
-          param([string]$Wd, [string]$Marker, [string]$HbLog, [int]$MaxMin = 110, [int]$StallSamples = 10)
+          param([string]$Wd, [string]$Marker, [string]$HbLog, [int]$MaxMin = 110, [int]$StallSamples = 10, [switch]$FrontendOnly)
           Set-Location $Wd
           $t0 = Get-Date
           $prevCpu = 0.0
@@ -331,6 +361,18 @@ jobs:
             if ($mem -ne 'NA' -and [int]$mem -gt $peak) { $peak = [int]$mem }
             if ($commitMB -gt $peakCommit) { $peakCommit = $commitMB }
             Set-Content -Path (Join-Path $Wd 'peak_mem.txt') -Value ("peak_haxe_mem_MB=$peak`npeak_commit_MB=$peakCommit`ncommit_limit_MB=$limitMB`nelapsed_s=$elapsed`nhaxe_cpu_s=$cpu")
+            # 前端判据：build.log 出现第一条 TU 行（" - xxx.cpp"）即说明 haxe 前端已过、hxcpp 开始编译
+            if ($FrontendOnly) {
+              $bl = Join-Path $Wd 'build.log'
+              $tuHit = @()
+              if (Test-Path $bl) { $tuHit = @(Select-String -Path $bl -Pattern '^\s*-\s+\S+\.cpp\s*$' -ErrorAction SilentlyContinue) }
+              if ($tuHit.Count -gt 0) {
+                Set-Content -Path (Join-Path $Wd 'frontend.txt') -Value ("frontend_s=$elapsed`ntu_lines=$($tuHit.Count)`nfirst_tu=$($tuHit[0].Line.Trim())")
+                Write-Host ("::notice::[frontend] reached first TU at ${elapsed}s -> killing for frontend-only measurement")
+                Kill-Tree
+                break
+              }
+            }
             # 硬护栏：haxe 堆超过 13500MB 就主动杀，记录 ABORT_MEM，不等它自己崩（每轮省 10 分钟）
             if ($mem -ne 'NA' -and [int]$mem -gt 13500) {
               Set-Content -Path $Marker -Value "ABORT_MEM mem=${mem}MB elapsed=${elapsed}s cpp=$cppCount obj=$objCount haxe_cpu=${cpu}s"
@@ -358,6 +400,15 @@ jobs:
                             '-Wd', $wd, '-Marker', (Join-Path $wd 'stall.txt'), '-HbLog', (Join-Path $wd 'hb.log'),
                             '-MaxMin', '110', '-StallSamples', '10') `
             -NoNewWindow -PassThru
+          if ($env:FRONTEND_ONLY -eq 'true') {
+            Stop-Process -Id $monProc.Id -Force
+            $monProc = Start-Process -FilePath (Get-Command pwsh).Source `
+              -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File', (Join-Path $wd 'monitor.ps1'),
+                              '-Wd', $wd, '-Marker', (Join-Path $wd 'stall.txt'), '-HbLog', (Join-Path $wd 'hb.log'),
+                              '-MaxMin', '110', '-StallSamples', '10', '-FrontendOnly') `
+              -NoNewWindow -PassThru
+            Write-Host 'monitor: frontend-only mode (kill on first TU)'
+          }
 
           # 前台跑：stdout 逐行实时打到 Actions 日志并落 build.log；stderr 落 build.err
           $runStart = Get-Date
@@ -411,6 +462,7 @@ jobs:
 
       # 关键断言 1：生成的 hxml 里必须同时出现分叉 classpath 与 openfl_vk_pkt
       - name: Assert generated hxml wired to fork + define
+        if: ${{ inputs.replica_1105 != 'true' && inputs.frontend_only != 'true' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -431,6 +483,7 @@ jobs:
 
       # 关键断言 2：exe 里必须搜到记录侧符号，且 exe 是本轮新编的（不是缓存旧物）
       - name: Assert exe contains packet recorder and is freshly built
+        if: ${{ inputs.replica_1105 != 'true' && inputs.frontend_only != 'true' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -459,6 +512,7 @@ jobs:
             hb.log
             stall.txt
             peak_mem.txt
+            frontend.txt
           if-no-files-found: warn
           retention-days: 7
 
