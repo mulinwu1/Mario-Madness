@@ -45,6 +45,9 @@ bool SnapshotBuffer (int name, const uint8_t** data, uint32_t* bytes);
 // 执行路径是否在工作（VK_PKT_EXEC=1）。GL 侧据此跳过对应绘制，避免同一笔画两遍。
 bool ExecActive ();
 
+// 当前 packet 帧代（就是 trace 里的 f=）。取证转储（VK_DUMP_TEX）用它对齐"该帧"。
+uint32_t SnapshotFrameGen ();
+
 } // namespace pkt
 } // namespace lime
 

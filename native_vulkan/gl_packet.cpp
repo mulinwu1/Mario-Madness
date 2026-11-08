@@ -702,7 +702,8 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
         // 只有当 clearMask 含颜色位时才算"要清色"；纯深度/模板 clear 不能整幅抹掉颜色
         bool colorClear = (rec.colorMaskBits & 0x0F) != 0;
         return r->PktBeginTarget(rtId, rec.clearColorF[0], rec.clearColorF[1],
-                                 rec.clearColorF[2], rec.clearColorF[3], colorClear);
+                                 rec.clearColorF[2], rec.clearColorF[3], colorClear,
+                                 rec.colorMaskBits);
     }
     if (w.kind != vkpkt::KIND_DRAW_ARRAYS && w.kind != vkpkt::KIND_DRAW_ELEMENTS) return false;
 
@@ -964,7 +965,7 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
     // 兜底：正常流程里 pass 在 BindRenderTarget 时就开了；这里按 packet 里的目标
     // 再对齐一次（同目标幂等不重清，换目标会先把上一笔 pass 收尾再开新的）。
     if (!r->PktBeginTarget(rtId, rec.clearColorF[0], rec.clearColorF[1],
-                           rec.clearColorF[2], rec.clearColorF[3])) return false;
+                           rec.clearColorF[2], rec.clearColorF[3], false, 0)) return false;
     if (!r->PktDraw(d)) {
         TracePrint(w, rec, ti, d, "skip_pipeline");
         return false;
@@ -983,6 +984,10 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
                 d.indexCount, use32 ? 32 : 16);
     }
     return true;
+}
+
+uint32_t SnapshotFrameGen () {
+    return g_rt.frameGen;
 }
 
 } // namespace pkt

@@ -1,7 +1,8 @@
 ﻿#include "vk_renderer.h"
 #include "vk_shaders_spv.h"
 #include "vk_platform.h"
-#include "gl_packet.h"   // 仅为了 packet 执行路径的开关查询（ExecActive）
+#include "gl_packet.h"   // 仅为了 packet 执行路径的开关查询（ExecActive/SnapshotFrameGen）
+#include "vk_packet.h"   // 取证转储要用 Sha256（同一实现，避免再写一份）
 #include "vk_tuning.h"   // 运行时调参（vk_tuning.ini），默认值 === 加模块前的写死值
 #define VK_NO_PROTOTYPES
 #include "gl_shader.h"
@@ -12,6 +13,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#if defined(_WIN32)
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
 
 // gl_fbo 侧的当前目标（只读探针用，定义在 lime 命名空间的 gl_fbo.cpp:706）
 namespace lime { uint32_t gl_vk_current_target (); }
@@ -60,6 +66,12 @@ struct TexSlot {
     size_t bytes = 0;
     bool used = false;
     std::vector<float> verts;
+    // 取证：创建时 CPU 数据按 stride=97 采样的 mean/nb（与 [vk] texmean 同口径），
+    // 供转储自校验；updates>0 时基线已失效（texSubImage2D 改过内容）
+    float createMean = 0.0f;
+    float createNb = 0.0f;
+    bool hasCreateMean = false;
+    uint32_t updates = 0;
 };
 
 struct RenderTarget {
@@ -78,8 +90,9 @@ struct RenderTarget {
     // 取证用：创建帧号 / 最后一次"真的有顶点"的提交帧号（0 = 从未写过）
     uint64_t createdFrame = 0;
     uint64_t lastWriteFrame = 0;
-    // 取证用：最近一次"clear 真的执行"的帧号（0 = 从未清过）
+    // 取证用：最近一次"clear 真的执行"的帧号 + 独立有效标志（别拿 0 当哨兵）
     uint64_t clearedFrame = 0;
+    bool cleared = false;
 };
 
 // 取证用：当前挂着但未提交的顶点总数（顶点 = 15 floats）
@@ -180,6 +193,10 @@ struct VkRenderer::Impl {
     uint32_t currentTarget = 0;
     // 最后一次真正收到顶点并提交的离屏目标（present 选源用）
     uint32_t lastGeomTarget = 0;
+    // 取证转储：本帧被采样过的纹理/目标 id（去重），按 gl_packet 的 frameGen 分桶
+    std::vector<uint32_t> sampled;
+    uint64_t sampleGen = ~0ull;
+    bool dumpDone = false;
     uint32_t frameImageIndex = 0;
     bool frameOpen = false;
     // ---- packet 执行路径（VK_PKT_EXEC=1）：独立命令流，不碰批处理的 verts 列表 ---- 
@@ -1173,7 +1190,8 @@ uint32_t VkRenderer::CreateTextureOnce(int w, int h, const unsigned char* rgba) 
         ici.arrayLayers = 1;
         ici.samples = VK_SAMPLE_COUNT_1_BIT;
         ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-        ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                  | VK_IMAGE_USAGE_SAMPLED_BIT;   // TRANSFER_SRC：取证转储（VK_DUMP_TEX）要读回
         ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (g_createImage(o.dev, &ici, nullptr, &t.image) != VK_SUCCESS) return 0;
 
@@ -1298,21 +1316,25 @@ uint32_t VkRenderer::CreateTextureOnce(int w, int h, const unsigned char* rgba) 
         wds[1].pImageInfo = &dii;
         g_updateDS(o.dev, 2, wds, 0, nullptr);
 
-        // 取证（默认常开，仅大图打印一行）：确认大图上传的 CPU 数据本身是否全黑
+        // 取证：始终按 stride=97 采样存下创建时的 mean/nb（与下面的 [vk] texmean 完全同一口径），
+        // 转储（VK_DUMP_TEX）时用它对账；只有大图才打印，避免刷屏
+        size_t cnt = 0, sum = 0, nb = 0;
+        size_t px = (size_t)w * h;
+        for (size_t k = 0; k < px; k += 97) {
+            const unsigned char* p = rgba + k * 4;
+            unsigned int v = (p[0] + p[1] + p[2]) / 3;
+            sum += v;
+            if (v >= 8) nb++;
+            cnt++;
+        }
+        t.createMean = cnt ? (float)((double)sum / (double)cnt) : 0.0f;
+        t.createNb = cnt ? (float)(100.0 * (double)nb / (double)cnt) : 0.0f;
+        t.hasCreateMean = cnt > 0;
+        t.updates = 0;
         if ((size_t)w * h >= (size_t)2048 * 2048) {
-            size_t cnt = 0, sum = 0, nb = 0;
-            size_t px = (size_t)w * h;
-            for (size_t k = 0; k < px; k += 97) {
-                const unsigned char* p = rgba + k * 4;
-                unsigned int v = (p[0] + p[1] + p[2]) / 3;
-                sum += v;
-                if (v >= 8) nb++;
-                cnt++;
-            }
             fprintf(stderr, "[vk] texmean id=%u w=%d h=%d mean=%.2f nb=%.1f\n",
                     (unsigned)i + 1, w, h,
-                    cnt ? (double)sum / (double)cnt : 0.0,
-                    cnt ? 100.0 * (double)nb / (double)cnt : 0.0);
+                    t.createMean, t.createNb);
         }
         t.w = w;
         t.h = h;
@@ -1522,6 +1544,7 @@ bool VkRenderer::UpdateSubImage(uint32_t texId, int level, int x, int y, int w, 
     ((PFN_vkFreeCommandBuffers)g_gipa(o.inst, "vkFreeCommandBuffers"))(o.dev, o.cmdPool, 1, &cb);
     o.destroyBuffer(o.dev, stage, nullptr);
     o.freeMemory(o.dev, stageMem, nullptr);
+    t.updates++;   // 取证：创建时的 createMean 基线从此失效
     return true;
 }
 
@@ -1574,6 +1597,7 @@ void VkRenderer::DrawSprite(uint32_t texId, float x, float y, float w, float h,
         if (!t.used) return;
         vertsPtr = &t.verts;
     }
+    NoteSampled(texId);
     float hw = w * 0.5f, hh = h * 0.5f;
     float qx[6] = {x - hw, x + hw, x + hw, x - hw, x + hw, x - hw};
     float qy[6] = {y - hh, y - hh, y + hh, y - hh, y + hh, y + hh};
@@ -1603,6 +1627,7 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
         if (!t.used) return;
         vertsPtr = &t.verts;
     }
+    NoteSampled(texId);
     if (vertexCount <= 0) return;
     if (o.currentTarget == 0) {
         static int s_dbg = 0;
@@ -2504,20 +2529,24 @@ static bool TraceClearWant () {
 // 离屏目标 clear（image 路径）：在 render pass 之外整幅清色。
 // 为什么不会破坏"保留语义"：只有收到明确的 clear 包（colorClear=true）才调用；
 // 普通绑定/同目标复用仍走 LOAD pass，上一 pass 的内容照旧保留。
-// 清屏本身就是要丢弃旧内容，所以 oldLayout 用 UNDEFINED（不与任何旧 layout 冲突）。
+// 清屏本身要丢弃旧内容，但旧布局必须按"真实状态"写：离屏目标创建时
+// initialLayout、每个 pass 的 finalLayout 都是 SHADER_READ_ONLY_OPTIMAL。
+// 用 UNDEFINED 等于告诉驱动"内容可丢"，驱动会整图 discard/重整，
+// 实测 image 态会直接 0xc0000005（nvoglv64.dll）。所以旧布局用
+// SHADER_READ_ONLY_OPTIMAL + SHADER_READ，而不是 UNDEFINED。
 static void ClearOffscreenImage (VkCommandBuffer cmd, VkImage img,
                                  float r, float g, float b, float a) {
     if (!g_cmdBarrier || !g_cmdClearColorImage || !img) return;
     VkImageMemoryBarrier bar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    bar.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bar.image = img;
     bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    bar.srcAccessMask = 0;
+    bar.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
     bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    g_cmdBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    g_cmdBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                  0, 1, nullptr, 0, nullptr, 1, &bar);
 
     VkClearColorValue cc{};
@@ -2535,10 +2564,10 @@ static void ClearOffscreenImage (VkCommandBuffer cmd, VkImage img,
 }
 
 static void TraceClearLog (uint32_t id, float r, float g, float b, float a,
-                           int applied, const char* why) {
+                           int applied, const char* why, uint8_t mask) {
     if (!TraceClearWant()) return;
-    fprintf(stderr, "[trace] clear= target=%u rgb=(%.3f,%.3f,%.3f,%.3f) applied=%d why=%s loadOp=%s\n",
-            id, r, g, b, a, applied, why,
+    fprintf(stderr, "[trace] clear= target=%u mask=%u rgb=(%.3f,%.3f,%.3f,%.3f) applied=%d why=%s loadOp=%s\n",
+            id, (unsigned)mask, r, g, b, a, applied, why,
             (why && (!strcmp(why, "rp_clear_applied") || !strcmp(why, "clear_loadop"))) ? "clear" : "load");
 }
 
@@ -2547,10 +2576,11 @@ bool VkRenderer::PktTargetClearedThisFrame(uint32_t id) {
     if (id < 1000) return false;
     uint32_t ti = id - 1000;
     if (ti >= o.targets.size() || !o.targets[ti].used) return false;
-    return o.targets[ti].clearedFrame == g_drawFrame;
+    return o.targets[ti].cleared && o.targets[ti].clearedFrame == g_drawFrame;
 }
 
-bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a, bool colorClear) {
+bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
+                                bool colorClear, uint8_t clearMask) {
     Impl& o = *impl;
     const vktuning::Values& tv0 = vktuning::Get();
     // 只有"明确的 clear 包 + 离屏目标 + 开关未关"才真的清；普通绑定保持 LOAD 语义
@@ -2561,7 +2591,7 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
     if (o.pktOpen && o.pktTarget == id) {
         o.clearR = r; o.clearG = g; o.clearB = b; o.clearA = a;
         if (!wantImageClear && !wantLoadClear) {
-            TraceClearLog(id, r, g, b, a, 0, "same_target_rebind");
+            TraceClearLog(id, r, g, b, a, 0, "same_target_rebind", clearMask);
             return true;
         }
         // glClear 是整幅生效：先收尾当前 pass（旧内容本就要丢弃），再按 clear 语义重开
@@ -2602,7 +2632,7 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
         if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
             o.swapDirty = true;
             fprintf(stderr, "[pkt] begin target=0 ok=0 acquire_err=%d\n", (int)ar);
-            TraceClearLog(0, r, g, b, a, 0, "acquire_err");
+            TraceClearLog(0, r, g, b, a, 0, "acquire_err", clearMask);
             return false;
         }
         o.bbHeld = true;
@@ -2653,16 +2683,18 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
     rbi.pClearValues = &cv;
     g_beginRP(o.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
     if (id < 1000) {
-        TraceClearLog(id, r, g, b, a, 1, "rp_clear_applied");
+        TraceClearLog(id, r, g, b, a, 1, "rp_clear_applied", clearMask);
     } else if (usedClearPass) {
+        o.targets[ti].cleared = true;
         o.targets[ti].clearedFrame = g_drawFrame;
-        TraceClearLog(id, r, g, b, a, 1, "clear_loadop");
+        TraceClearLog(id, r, g, b, a, 1, "clear_loadop", clearMask);
     } else if (wantImageClear) {
+        o.targets[ti].cleared = true;
         o.targets[ti].clearedFrame = g_drawFrame;
-        TraceClearLog(id, r, g, b, a, 1, "clear_image");
+        TraceClearLog(id, r, g, b, a, 1, "clear_image", clearMask);
     } else {
         // 普通绑定（不是 clear 包）或 offscreen_clear=off：LOAD pass 保留上一 pass 内容
-        TraceClearLog(id, r, g, b, a, 0, "rp_load_ignores_clear");
+        TraceClearLog(id, r, g, b, a, 0, "rp_load_ignores_clear", clearMask);
     }
 
     // viewport/scissor 取"绑定这一刻"的 GL 状态（不是帧末）
@@ -2704,6 +2736,7 @@ bool VkRenderer::PktDraw(const PktDrawDesc& d) {
 
     VkDescriptorSet set = (VkDescriptorSet)(uintptr_t)PktSetFor(d.texId, d.sampler);
     if (!set) return false;
+    NoteSampled(d.texId);   // 取证：本帧真正被采样的纹理/目标
 
     VkDeviceSize vbytes = (VkDeviceSize)d.vertexCount * 15u * sizeof(float);
     if (o.pktVbOff + vbytes > o.pktVbBytes) {
@@ -2837,6 +2870,8 @@ void VkRenderer::PktEndTarget() {
     fprintf(stderr, "[pkt] end target=%u draws=%llu present=%d img=%u\n",
             t, (unsigned long long)draws, present ? 1 : 0, o.frameImageIndex);
     o.pktOpen = false;
+    // 取证转储：一帧的最后一笔是后缓冲 pass（t==0）时，GPU 已 idle，正好读回本帧采样过的纹理
+    if (t == 0) MaybeDumpTextures((uint64_t)lime::pkt::SnapshotFrameGen());
 }
 
 bool VkRenderer::PktComposite(uint32_t srcTargetId) {
@@ -2897,7 +2932,8 @@ uint32_t VkRenderer::CreateRenderTarget(int w, int h) {
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
     ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
-              | VK_IMAGE_USAGE_TRANSFER_DST_BIT;   // 离屏 clear（vkCmdClearColorImage）需要
+              | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+              | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;   // TRANSFER_SRC：取证转储（VK_DUMP_TEX）要读回
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (g_createImage(o.dev, &ici, nullptr, &t.image) != VK_SUCCESS) {
         o.targets.pop_back();
@@ -3045,6 +3081,250 @@ void VkRenderer::DestroyRenderTarget(uint32_t id) {
     t = RenderTarget();
     // 目标 id 按槽位复用，留着旧 id 会让 present 采样到无关的目标
     if (o.lastGeomTarget == id) o.lastGeomTarget = 0;
+}
+
+// ---- 取证转储（默认关）：VK_DUMP_TEX=<dir> + VK_DUMP_FRAME=<帧号> ----
+// 目的：不再猜机制，把"该帧真正被采样"的纹理/离屏目标按 RGBA8 原样落盘给眼睛看。
+// 开关只在环境变量里读一次；不设 VK_DUMP_TEX 时 NoteSampled 只做一次 bool 判断。
+struct TexDumpCfg {
+    int on = 0;          // 0=关 1=开（只解析一次）
+    std::string dir;
+    uint64_t frame = 0;  // VK_DUMP_FRAME
+    bool frameSet = false;  // false = 第一有机会的帧就转
+};
+
+static TexDumpCfg& TexDumpConfig () {
+    static TexDumpCfg c;
+    static bool parsed = false;
+    if (!parsed) {
+        parsed = true;
+        const char* d = getenv("VK_DUMP_TEX");
+        if (d && d[0]) {
+            c.on = 1;
+            c.dir = d;
+            const char* f = getenv("VK_DUMP_FRAME");
+            if (f && f[0]) {
+                c.frame = (uint64_t)strtoull(f, nullptr, 10);
+                c.frameSet = true;
+            }
+        }
+    }
+    return c;
+}
+
+void VkRenderer::NoteSampled(uint32_t texId) {
+    if (!TexDumpConfig().on || texId == 0) return;
+    Impl& o = *impl;
+    // 帧号口径与 trace 的 f= 一致：packet 模式用 gl_packet 的 frameGen，批处理用 g_drawFrame
+    uint64_t gen = lime::pkt::ExecActive() ? (uint64_t)lime::pkt::SnapshotFrameGen()
+                                           : (uint64_t)g_drawFrame;
+    if (gen != o.sampleGen) {
+        o.sampled.clear();
+        o.sampleGen = gen;
+    }
+    for (size_t i = 0; i < o.sampled.size(); i++) {
+        if (o.sampled[i] == texId) return;   // 同一张纹理按 id 去重
+    }
+    o.sampled.push_back(texId);
+}
+
+bool VkRenderer::MaybeDumpTextures(uint64_t frameHint) {
+    TexDumpCfg& cfg = TexDumpConfig();
+    if (!cfg.on) return false;
+    Impl& o = *impl;
+    if (o.dumpDone || o.sampled.empty()) return false;
+    // 命中：显式指定的帧号（批处理帧号或 packet frameGen 任一相同即可）
+    if (cfg.frameSet) {
+        bool hit = (frameHint == cfg.frame);
+        if (!hit && lime::pkt::ExecActive())
+            hit = ((uint64_t)lime::pkt::SnapshotFrameGen() == cfg.frame);
+        if (!hit) return false;   // 没命中就等下一帧，dumpDone 不置位
+    }
+    o.dumpDone = true;
+
+#if defined(_WIN32)
+    _mkdir(cfg.dir.c_str());
+#else
+    mkdir(cfg.dir.c_str(), 0755);
+#endif
+
+    char manPath[640];
+    snprintf(manPath, sizeof(manPath), "%s/manifest.txt", cfg.dir.c_str());
+    FILE* man = fopen(manPath, "w");
+    // manifest 每行：id w h fmt bytes sha256 首个非零字节偏移 [truncated]
+    // w/h 是"实际写入文件"的尺寸；超 4096 的边被截断时行尾多一个 truncated 标记
+    uint32_t dumped = 0, skipped = 0;
+    uint64_t dumpedBytes = 0;
+
+    for (size_t k = 0; k < o.sampled.size(); k++) {
+        uint32_t id = o.sampled[k];
+        VkImage img = VK_NULL_HANDLE;
+        int w = 0, h = 0;
+        TexSlot* ts = nullptr;       // 贴图才有 CPU 创建时 mean 可对账
+        if (id < 1000) {
+            if (id > o.textures.size()) { skipped++; continue; }
+            ts = &o.textures[id - 1];
+            if (!ts->used) { skipped++; continue; }
+            img = ts->image; w = ts->w; h = ts->h;
+        } else {
+            uint32_t ti = id - 1000;
+            if (ti >= o.targets.size() || !o.targets[ti].used) { skipped++; continue; }
+            img = o.targets[ti].image; w = o.targets[ti].w; h = o.targets[ti].h;
+        }
+        if (!img || w <= 0 || h <= 0) { skipped++; continue; }
+
+        // 单张上限 4096：超出就截断（取左上 4096×4096），manifest 标 truncated
+        int tw = w > 4096 ? 4096 : w;
+        int th = h > 4096 ? 4096 : h;
+        bool trunc = (tw != w || th != h);
+        size_t bytes = (size_t)tw * th * 4;
+        if (dumpedBytes + (uint64_t)bytes > (uint64_t)1024 * 1024 * 1024) {
+            fprintf(stderr, "[dump] skip id=%u bytes=%zu reason=budget used=%llu\n",
+                    id, bytes, (unsigned long long)dumpedBytes);
+            skipped++;
+            continue;
+        }
+
+        // staging 缓冲（HOST_VISIBLE|HOST_COHERENT）
+        VkBuffer sb = VK_NULL_HANDLE;
+        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bci.size = (VkDeviceSize)bytes;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        if (g_createBuf(o.dev, &bci, nullptr, &sb) != VK_SUCCESS || !sb) { skipped++; continue; }
+
+        VkMemoryRequirements smr{};
+        g_getBufReqs(o.dev, sb, &smr);
+        VkPhysicalDeviceMemoryProperties mp{};
+        ((PFN_vkGetPhysicalDeviceMemoryProperties)g_gipa(o.inst, "vkGetPhysicalDeviceMemoryProperties"))(o.phys, &mp);
+        VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        mai.allocationSize = smr.size;
+        mai.memoryTypeIndex = FindMemType(mp, smr.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        VkDeviceMemory sm = VK_NULL_HANDLE;
+        if (g_allocMem(o.dev, &mai, nullptr, &sm) != VK_SUCCESS || !sm) {
+            o.destroyBuffer(o.dev, sb, nullptr);
+            skipped++;
+            continue;
+        }
+        g_bindBufMem(o.dev, sb, sm, 0);
+
+        // 一次性命令缓冲：SHADER_READ_ONLY -> TRANSFER_SRC -> 拷回 -> SHADER_READ_ONLY
+        VkCommandBuffer cb = VK_NULL_HANDLE;
+        VkCommandBufferAllocateInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        cbi.commandPool = o.cmdPool;
+        cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbi.commandBufferCount = 1;
+        ((PFN_vkAllocateCommandBuffers)g_gipa(o.inst, "vkAllocateCommandBuffers"))(o.dev, &cbi, &cb);
+        VkCommandBufferBeginInfo cbb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        g_beginCB(cb, &cbb);
+
+        VkImageMemoryBarrier b1{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b1.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b1.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        b1.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b1.image = img;
+        b1.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        b1.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        b1.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        g_cmdBarrier(cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                     0, 0, nullptr, 0, nullptr, 1, &b1);
+
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {(uint32_t)tw, (uint32_t)th, 1};
+        g_cmdCopyImgToBuf(cb, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sb, 1, &region);
+
+        VkImageMemoryBarrier b2 = b1;
+        b2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        b2.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b2.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        g_cmdBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+                     0, 0, nullptr, 0, nullptr, 1, &b2);
+
+        g_endCB(cb);
+        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &cb;
+        g_submit(o.queue, 1, &si, VK_NULL_HANDLE);
+        g_waitIdle(o.queue);
+        ((PFN_vkFreeCommandBuffers)g_gipa(o.inst, "vkFreeCommandBuffers"))(o.dev, o.cmdPool, 1, &cb);
+
+        std::vector<unsigned char> px(bytes);
+        void* sp = nullptr;
+        g_mapMem(o.dev, sm, 0, smr.size, 0, &sp);
+        if (sp) memcpy(px.data(), sp, bytes);
+        g_unmapMem(o.dev, sm);
+        o.destroyBuffer(o.dev, sb, nullptr);
+        o.freeMemory(o.dev, sm, nullptr);
+
+        // 落盘：tex_<id>_<w>x<h>.raw（RGBA8、行主序、无压缩）
+        char path[700];
+        snprintf(path, sizeof(path), "%s/tex_%u_%dx%d.raw", cfg.dir.c_str(), id, tw, th);
+        FILE* fp = fopen(path, "wb");
+        if (!fp) {
+            fprintf(stderr, "[dump] err=open path=%s\n", path);
+            skipped++;
+            continue;
+        }
+        fwrite(px.data(), 1, bytes, fp);
+        fclose(fp);
+
+        // 自校验：与创建时 [vk] texmean 同一口径（stride=97，(r+g+b)/3）
+        uint64_t sum = 0, cnt = 0, nb = 0;
+        size_t npx = (size_t)tw * th;
+        for (size_t p = 0; p < npx; p += 97) {
+            const unsigned char* q = px.data() + p * 4;
+            unsigned int v = (q[0] + q[1] + q[2]) / 3;
+            sum += v;
+            if (v >= 8) nb++;
+            cnt++;
+        }
+        double mean = cnt ? (double)sum / (double)cnt : 0.0;
+        double nbPct = cnt ? 100.0 * (double)nb / (double)cnt : 0.0;
+
+        size_t firstnz = bytes;
+        for (size_t b = 0; b < bytes; b++) {
+            if (px[b]) { firstnz = b; break; }
+        }
+
+        uint8_t dig[32];
+        lime::vkpkt::Sha256(px.data(), bytes, dig);
+        char shex[65];
+        for (int i = 0; i < 32; i++) snprintf(shex + i * 2, 3, "%02x", (unsigned)dig[i]);
+
+        if (man) {
+            fprintf(man, "%u %d %d RGBA8 %zu %s %zu%s\n",
+                    id, tw, th, bytes, shex, firstnz, trunc ? " truncated" : "");
+        }
+        dumped++;
+        dumpedBytes += (uint64_t)bytes;
+
+        // 对账：GPU 读回算出的 mean 必须与 CPU 创建时的 [vk] texmean 一致才可信
+        if (ts) {
+            if (ts->updates > 0 || !ts->hasCreateMean) {
+                fprintf(stderr, "[dump] id=%u %dx%d mean=%.2f nb=%.1f verify=stale(updates=%u) bytes=%zu\n",
+                        id, tw, th, mean, nbPct, ts->updates, bytes);
+            } else {
+                double d = mean - (double)ts->createMean;
+                if (d < 0) d = -d;
+                fprintf(stderr, "[dump] id=%u %dx%d mean=%.2f texmean=%.2f nb=%.1f/%.1f delta=%.3f ok=%d bytes=%zu%s\n",
+                        id, tw, th, mean, (double)ts->createMean, nbPct, (double)ts->createNb,
+                        d, (d < 0.01 && !trunc) ? 1 : 0, bytes, trunc ? " truncated" : "");
+            }
+        } else {
+            fprintf(stderr, "[dump] id=%u %dx%d mean=%.2f nb=%.1f verify=n/a(target) bytes=%zu%s\n",
+                    id, tw, th, mean, nbPct, bytes, trunc ? " truncated" : "");
+        }
+    }
+
+    if (man) fclose(man);
+    fprintf(stderr, "[dump] done frame=%llu dumped=%u skipped=%u bytes=%llu dir=%s sampled=%zu\n",
+            (unsigned long long)frameHint, dumped, skipped, (unsigned long long)dumpedBytes,
+            cfg.dir.c_str(), o.sampled.size());
+    return dumped > 0;
 }
 
 void VkRenderer::EndFrame() {
@@ -3501,6 +3781,9 @@ void VkRenderer::EndFrame() {
             o.presentReq = false;
         }
     }
+
+    // 取证转储（批处理路径；packet 路径在 PktEndTarget 里触发）：提交+waitIdle 之后读回
+    MaybeDumpTextures(g_drawFrame);
 
     o.frameOpen = false;
     g_bbLastTex = 0;

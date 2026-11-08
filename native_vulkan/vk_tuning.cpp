@@ -31,7 +31,8 @@ static void SetDefaults () {
     g_v.stencilTest = KEEP;
     g_v.viewportPolicy = POLICY_RECORDED;
     g_v.scissorPolicy = POLICY_RECORDED;
-    g_v.offscreenClear = CLEAR_IMAGE;
+    // image 路径会让 nvoglv64.dll 崩溃（0xc0000005），先默认 off；屏障修好后验证不崩再切回 image
+    g_v.offscreenClear = CLEAR_OFF;
     g_v.mipGenerate = 0;
 }
 

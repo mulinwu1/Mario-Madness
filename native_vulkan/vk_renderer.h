@@ -149,7 +149,7 @@ public:
     // colorClear=true 表示这一笔是明确的 clear 包（且 clearMask 含颜色位）：
     // 离屏目标（>=1000）会真的把整幅清成 (r,g,b,a)；普通绑定保持 LOAD 语义。
     bool PktBeginTarget(uint32_t targetId, float r, float g, float b, float a,
-                        bool colorClear = false);
+                        bool colorClear = false, uint8_t clearMask = 0);
     // 取证：该离屏目标在"本帧"是否真的执行过 clear（配合 trace 的 canvas3x 行）。
     bool PktTargetClearedThisFrame(uint32_t targetId);
     // 一笔 draw：绑管线 -> 绑 descriptor（按纹理槽）-> 绑顶点/索引 -> vkCmdDraw*，
@@ -180,5 +180,10 @@ private:
     void* PktSamplerFor(const PktSamplerState& ss);
     // 纹理/目标销毁时丢掉指向它的变体 descriptor set（否则留下悬空引用）
     void PktDropSets(uint32_t texId);
+    // ---- 取证转储（默认关）：VK_DUMP_TEX=<dir> + VK_DUMP_FRAME=<帧号> ----
+    // 记下本帧被采样的纹理/目标 id（去重）；真正的读回在 MaybeDumpTextures 里做
+    void NoteSampled(uint32_t texId);
+    // 帧号命中（gl_packet 的 frameGen 或批处理帧号）才转储一次，返回是否真的写了文件
+    bool MaybeDumpTextures(uint64_t frameHint);
 };
 
