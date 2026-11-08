@@ -3133,9 +3133,10 @@ bool VkRenderer::MaybeDumpTextures(uint64_t frameHint) {
     if (!cfg.on) return false;
     Impl& o = *impl;
     if (o.dumpDone || o.sampled.empty()) return false;
-    // 命中：显式指定的帧号（批处理帧号或 packet frameGen 任一相同即可）
+    // 命中：显式指定的帧号。优先看 sampleGen（采样发生在哪一帧，批处理路径的 g_drawFrame
+    // 是在 EndFrame 收尾时才自增的，直接用 frameHint 会差一帧）
     if (cfg.frameSet) {
-        bool hit = (frameHint == cfg.frame);
+        bool hit = ((uint64_t)o.sampleGen == cfg.frame) || (frameHint == cfg.frame);
         if (!hit && lime::pkt::ExecActive())
             hit = ((uint64_t)lime::pkt::SnapshotFrameGen() == cfg.frame);
         if (!hit) return false;   // 没命中就等下一帧，dumpDone 不置位
