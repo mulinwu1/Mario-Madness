@@ -18,6 +18,10 @@ on:
         description: "对照实验：true = 完全复刻 11-05 输入（haxelib openfl 9.2.0 + PRELOAD_ALL + angle + 不加 vk_pkt/--no-opt）"
         required: false
         default: ""
+      replica_vk_pkt:
+        description: "对照组 ③：replica_1105 基础上只加 openfl_vk_pkt 一个变量"
+        required: false
+        default: ""
       frontend_only:
         description: "提速：true = 只要出现第一条 TU 就记 frontend_s 并杀进程（分钟级实验）"
         required: false
@@ -144,15 +148,21 @@ jobs:
         env:
           DISABLE_VK_PKT: ${{ inputs.disable_vk_pkt }}
           REPLICA_1105: ${{ inputs.replica_1105 }}
+          REPLICA_VK_PKT: ${{ inputs.replica_vk_pkt }}
         run: |
           $ErrorActionPreference = 'Stop'
           $px = Get-Content Project.xml -Raw
           if ($env:REPLICA_1105 -eq 'true') {
-            Write-Host 'REPLICA 11-05: add PRELOAD_ALL + angle defines (11-05 hxml), no openfl_vk_pkt, no --no-opt'
+            Write-Host 'REPLICA 11-05: add PRELOAD_ALL + angle defines (11-05 hxml), no --no-opt'
             $px = $px -replace '</project>', "`t<haxedef name=`"PRELOAD_ALL`" />`n`t<haxedef name=`"angle`" />`n</project>"
+            if ($env:REPLICA_VK_PKT -eq 'true') {
+              $px = $px -replace '</project>', "`t<haxedef name=`"openfl_vk_pkt`" />`n</project>"
+              Write-Host 'REPLICA + vk_pkt: openfl_vk_pkt define added (single variable on top of replica)'
+            }
             Set-Content -Path Project.xml -Value $px -NoNewline
             $rc = Get-Content Project.xml -Raw
             if ($rc -notmatch '<haxedef name="PRELOAD_ALL"' -or $rc -notmatch '<haxedef name="angle"') { throw 'replica defines insert failed' }
+            if ($env:REPLICA_VK_PKT -eq 'true' -and $rc -notmatch '<haxedef name="openfl_vk_pkt"') { throw 'replica vk_pkt define insert failed' }
           } elseif ($env:DISABLE_VK_PKT -eq 'true') {
             Write-Host 'BISECT PROBE: openfl_vk_pkt define intentionally skipped (fork classpath kept)'
           } elseif ($px -match 'openfl_vk_pkt') {
@@ -373,6 +383,14 @@ jobs:
               if ($tuHit.Count -gt 0) {
                 Set-Content -Path (Join-Path $Wd 'frontend.txt') -Value ("frontend_s=$elapsed`ntu_lines=$($tuHit.Count)`nfirst_tu=$($tuHit[0].Line.Trim())")
                 Write-Host ("::notice::[frontend] reached first TU at ${elapsed}s -> killing for frontend-only measurement")
+                Kill-Tree
+                break
+              }
+              # 判据：10 分钟内没出现第一条 TU 即视为病态前端，直接杀（不拿 25s 当通过线）
+              if ($elapsed -ge 600) {
+                Set-Content -Path $Marker -Value "FRONTEND_TIMEOUT no TU within 600s (elapsed=${elapsed}s mem=${mem}MB haxe_cpu=${cpu}s cpp=$cppCount)"
+                Set-Content -Path (Join-Path $Wd 'frontend.txt') -Value ("frontend_s=NOT_REACHED`ngate_s=600`nmem_MB=$mem`nhaxe_cpu_s=$cpu")
+                Write-Host ("::notice::[frontend] NO TU within 600s -> pathological, killing")
                 Kill-Tree
                 break
               }
