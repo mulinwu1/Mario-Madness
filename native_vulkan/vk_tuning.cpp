@@ -20,12 +20,18 @@ static char g_src[64] = "default";
 static char g_bad[256] = {0};   // 解析失败的条目，打进 [vk] tuning 行便于定位
 
 // ---------------------------------------------------------------- 默认值
-// 全部等于引入本模块之前的写死行为，任何一项改动都不该来自这里。
+// 除 blendVariant 外全部等于引入本模块之前的写死行为；本轮只动这一个变量。
 static void SetDefaults () {
     memset (&g_v, 0, sizeof (g_v));
     g_v.filterDefault = FILTER_GL;
     g_v.wrapDefault = WRAP_GL;
-    g_v.blendVariant = BLEND_SRC_ALPHA;
+    // GL 侧 OpenFL 每笔都发 glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+    // （实跑日志 [gldraw/ie] blend=1,1,771），真 prog3 frag 输出的也是预乘色
+    // （vk_prog_3.frag:70 的 color.rgb*color.a）。默认混合必须与之一致，
+    // 否则预乘色再被 SRC_ALPHA 乘一次：离屏画布退化成非预乘态并整体变暗，
+    // 下一轮采样时 frag:58 的 rgb/a 被 clamp 压成三通道全 1（顶带中性灰 74、
+    // 整屏 97.6% 黑，第十一轮实测）。回退：vk_tuning.ini 写 blend=srcalpha，无需重编。
+    g_v.blendVariant = BLEND_PREMUL;
     g_v.depthTest = KEEP;
     g_v.depthWrite = KEEP;
     g_v.stencilTest = KEEP;
