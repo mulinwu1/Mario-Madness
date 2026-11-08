@@ -780,7 +780,7 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
     g_vkfixDrawTotal++;
     if (foldZeroMult) g_vkfixDrawFolded++;
     g_renderer->SetDrawColor ((g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f) *
-                              (g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f),
+                              ((g_attrConstSet[5] && g_attrConst[5][0] != 0.0f) ? g_attrConst[5][0] : 1.0f),
                               foldZeroMult ? nullptr : (g_attrConstSet[6] ? g_attrConst[6] : nullptr),
                               g_attrConstSet[7] ? g_attrConst[7] : nullptr);
     // 诊断：确认 lime 传进来的 uv 是“帧子矩形归一化”还是“整图 0..1”/像素值
@@ -904,7 +904,7 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
     g_vkfixDrawTotal++;
     if (foldZeroMult) g_vkfixDrawFolded++;
     g_renderer->SetDrawColor ((g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f) *
-                              (g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f),
+                              ((g_attrConstSet[5] && g_attrConst[5][0] != 0.0f) ? g_attrConst[5][0] : 1.0f),
                               foldZeroMult ? nullptr : (g_attrConstSet[6] ? g_attrConst[6] : nullptr),
                               g_attrConstSet[7] ? g_attrConst[7] : nullptr);
     // 诊断：与 draw_arrays 同款，确认 indexed 路径的 uv 语义
