@@ -1286,6 +1286,13 @@ uint32_t VkRenderer::CreateTextureOnce(int w, int h, const unsigned char* rgba) 
         tvi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         tvi.subresourceRange.levelCount = 1;
         tvi.subresourceRange.layerCount = 1;
+        // 预览开关 swizzle=rb：采样时 R↔B 互换（默认 none = identity，与现状一致）
+        if (vktuning::Get().swizzle == vktuning::SWIZZLE_RB) {
+            tvi.components.r = VK_COMPONENT_SWIZZLE_B;
+            tvi.components.g = VK_COMPONENT_SWIZZLE_G;
+            tvi.components.b = VK_COMPONENT_SWIZZLE_R;
+            tvi.components.a = VK_COMPONENT_SWIZZLE_A;
+        }
         g_createView(o.dev, &tvi, nullptr, &t.view);
 
         std::vector<VkDescriptorSetLayout> layouts(1, o.dsl);
@@ -2605,6 +2612,8 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
     // 要清就走"loadOp=CLEAR 的整幅 pass"（不碰 vkCmdClearColorImage）：同一 pass 内先清后画，
     // 颜色取包里 rgb，等价于整幅替换，且不依赖任何图像布局记录。
     bool wantPassClear = wantImageClear || wantLoadClear || wantRebindClear;
+    // 预览开关 offscreen_loadop=clear：离屏目标每次绑定的 pass 都用 CLEAR（清成黑）
+    if (id >= 1000 && vktuning::Get().offscreenLoadop == vktuning::LOADOP_CLEAR) wantPassClear = true;
 
     // 同一目标重复绑定（同上）
     if (o.pktOpen && o.pktTarget == id) {
@@ -3593,11 +3602,21 @@ void VkRenderer::EndFrame() {
             }
         }
     }
+    bool clearZero = false;
     if (o.currentTarget >= 1000) {
         uint32_t ti = o.currentTarget - 1000;
         if (ti < o.targets.size() && o.targets[ti].used) {
-            fb = o.targets[ti].fb;
-            rp = o.targets[ti].rp;
+            // 预览开关 offscreen_loadop=clear：每个离屏 pass 都走 CLEAR 版 pass/fb，
+            // 清成 (0,0,0,0)，让自反馈链每帧从干净状态开始（默认 load = 现状）
+            if (vktuning::Get().offscreenLoadop == vktuning::LOADOP_CLEAR
+                && o.targets[ti].rpClear && o.targets[ti].fbClear) {
+                fb = o.targets[ti].fbClear;
+                rp = o.targets[ti].rpClear;
+                clearZero = true;
+            } else {
+                fb = o.targets[ti].fb;
+                rp = o.targets[ti].rp;
+            }
             ext = {(uint32_t)o.targets[ti].w, (uint32_t)o.targets[ti].h};
         }
     }
@@ -3612,10 +3631,18 @@ void VkRenderer::EndFrame() {
         return;
     }
     VkClearValue cv{};
-    cv.color.float32[0] = o.clearR;
-    cv.color.float32[1] = o.clearG;
-    cv.color.float32[2] = o.clearB;
-    cv.color.float32[3] = o.clearA;
+    if (clearZero) {
+        // 强制清洗不沿用上次 clear 包的颜色，避免把旧颜色带进来
+        cv.color.float32[0] = 0.0f;
+        cv.color.float32[1] = 0.0f;
+        cv.color.float32[2] = 0.0f;
+        cv.color.float32[3] = 0.0f;
+    } else {
+        cv.color.float32[0] = o.clearR;
+        cv.color.float32[1] = o.clearG;
+        cv.color.float32[2] = o.clearB;
+        cv.color.float32[3] = o.clearA;
+    }
     VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rbi.renderPass = rp;
     rbi.framebuffer = fb;

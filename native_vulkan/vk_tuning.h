@@ -28,6 +28,16 @@ enum { POLICY_RECORDED = 0, POLICY_FULL_TARGET = 1 };
 //   imgcmd = vkCmdClearColorImage 路径（仅诊断用：nvoglv64 上会 0xc0000005，勿在正式跑用）
 enum { CLEAR_IMAGE = 0, CLEAR_LOADOP = 1, CLEAR_OFF = 2, CLEAR_IMGCMD = 3 };
 
+// 离屏 pass 的 loadOp（预览开关，默认 = 现状 LOAD）：
+//   load  = 沿用旧行为（LOAD，保留上一帧内容）
+//   clear = 每个离屏 pass 都走 loadOp=CLEAR 的第二套 pass/fb（每帧从干净状态开始）
+enum { LOADOP_LOAD = 0, LOADOP_CLEAR = 1 };
+
+// 纹理 image view 的通道映射（预览开关，默认 = 现状 identity）：
+//   none = identity（不映射）
+//   rb   = R↔B 互换（验证 BGRA/RGBA 假设）
+enum { SWIZZLE_NONE = 0, SWIZZLE_RB = 1 };
+
 struct SizeRule {
     int maxDim;   // 适用上限：max(w,h) <= maxDim 时命中（mode 的含义与上面两套枚举一致）
     int mode;
@@ -57,6 +67,9 @@ struct Values {
     int offscreenClear;   // CLEAR_IMAGE / CLEAR_LOADOP / CLEAR_OFF
     // 同目标重绑时收到带颜色位的 clear，是否真的执行（0=保持旧行为跳过，1=执行，默认 1）
     int offscreenRebindClear;   // ON / OFF
+
+    int offscreenLoadop;  // LOADOP_LOAD / LOADOP_CLEAR（默认 LOAD = 现状）
+    int swizzle;          // SWIZZLE_NONE / SWIZZLE_RB（默认 NONE = 现状）
 
     int mipGenerate;   // 预留：纹理只分配 1 级 mip，打开不会凭空生成 level
 };

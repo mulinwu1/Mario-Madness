@@ -35,6 +35,9 @@ static void SetDefaults () {
     g_v.offscreenClear = CLEAR_OFF;
     // 同目标重绑的"真清除"默认打开：这是修复画布永不清的病灶路径，且不依赖 offscreen_clear
     g_v.offscreenRebindClear = ON;
+    // 预览开关：默认 = 现状（LOAD / identity），编出来必须与现状逐像素一致
+    g_v.offscreenLoadop = LOADOP_LOAD;
+    g_v.swizzle = SWIZZLE_NONE;
     g_v.mipGenerate = 0;
 }
 
@@ -97,6 +100,18 @@ static int ParseBlend (const char* v) {
     if (!strcmp (v, "premul") || !strcmp (v, "premultiplied")) return BLEND_PREMUL;
     if (!strcmp (v, "add") || !strcmp (v, "additive")) return BLEND_ADDITIVE;
     if (!strcmp (v, "off") || !strcmp (v, "none")) return BLEND_OFF;
+    return -1;
+}
+
+static int ParseLoadop (const char* v) {
+    if (!strcmp (v, "load") || !strcmp (v, "keep")) return LOADOP_LOAD;
+    if (!strcmp (v, "clear")) return LOADOP_CLEAR;
+    return -1;
+}
+
+static int ParseSwizzle (const char* v) {
+    if (!strcmp (v, "none") || !strcmp (v, "identity") || !strcmp (v, "keep")) return SWIZZLE_NONE;
+    if (!strcmp (v, "rb") || !strcmp (v, "bgra")) return SWIZZLE_RB;
     return -1;
 }
 
@@ -210,6 +225,12 @@ static void Apply (char* key, char* val) {
         int m = ParseOnOff (val);
         if (m == -2 || m == KEEP) AddBad (key, val);
         else g_v.offscreenRebindClear = (m == ON) ? ON : OFF;
+    } else if (!strcmp (key, "offscreen_loadop")) {
+        int m = ParseLoadop (val);
+        if (m < 0) AddBad (key, val); else g_v.offscreenLoadop = m;
+    } else if (!strcmp (key, "swizzle")) {
+        int m = ParseSwizzle (val);
+        if (m < 0) AddBad (key, val); else g_v.swizzle = m;
     } else {
         // 未知键不报错（允许留着其他分支的调参），但记进 [vk] tuning 的 unknown=
         AddBad (key, val);
@@ -332,7 +353,8 @@ void LogEffective () {
     fprintf (stderr,
              "[vk] tuning src=%s texture.filter=%s texture.filter.by_size=%s texture.filter.by_glname=%s "
              "texture.wrap=%s texture.wrap.by_size=%s blend=%s depth.test=%s depth.write=%s stencil.test=%s "
-             "viewport=%s scissor=%s offscreen_clear=%s offscreen_rebind_clear=%s mip=%s unknown=%s\n",
+             "viewport=%s scissor=%s offscreen_clear=%s offscreen_rebind_clear=%s "
+             "offscreen_loadop=%s swizzle=%s mip=%s unknown=%s\n",
              g_src,
              FilterName (v.filterDefault), sizeRules[0] ? sizeRules : "-", names[0] ? names : "-",
              WrapName (v.wrapDefault), wrapRules[0] ? wrapRules : "-",
@@ -341,6 +363,8 @@ void LogEffective () {
              PolicyName (v.viewportPolicy), PolicyName (v.scissorPolicy),
              OffscreenClearName (v.offscreenClear),
              v.offscreenRebindClear == ON ? "on" : "off",
+             v.offscreenLoadop == LOADOP_CLEAR ? "clear" : "load",
+             v.swizzle == SWIZZLE_RB ? "rb" : "none",
              v.mipGenerate ? "on" : "off",
              g_bad[0] ? g_bad : "-");
 }
