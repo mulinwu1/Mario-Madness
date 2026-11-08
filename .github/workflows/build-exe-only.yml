@@ -295,8 +295,12 @@ jobs:
           $buildStart = (Get-Date).ToUniversalTime()
           Add-Content -Path $env:GITHUB_ENV -Value "VKPKT_BUILD_START=$($buildStart.ToString('o'))"
           $outDir = "export\release\windows"
+          if ($env:REPLICA_1105 -eq 'true') {
+            Write-Host 'REPLICA 11-05: keep assets as-is (11-05 compiled with full assets + PRELOAD_ALL)'
+          } else {
           Get-ChildItem 'assets' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
             Get-ChildItem $_.FullName -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          }
           }
           $hx = (Get-Command haxelib).Source
           $wd = (Get-Location).Path
