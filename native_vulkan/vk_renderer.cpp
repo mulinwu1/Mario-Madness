@@ -1644,6 +1644,21 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
     }
     NoteSampled(texId);
     if (vertexCount <= 0) return;
+    // 实验 VK_COMP_ALPHA=<0..1>：后缓冲合成笔（采样 1002）按固定 alpha 叠加。
+    // 背景：标题页一个视觉帧分两笔铺后缓冲，批处理按纹理 id 排序 → 1001 先、1002 后，
+    // 而两层 alpha 都是 255（同一帧 RT 转储实测），直接叠加只能二选一。
+    // 原版形态 ≈ 0.70×1002 + 0.23×1001，等价于把后画的 1002 降到半透明。
+    // 默认不设变量 → s_compAlpha=1.0，行为逐字不变。
+    static float s_compAlpha = -1.0f;
+    if (s_compAlpha < 0.0f) {
+        const char* v = getenv("VK_COMP_ALPHA");
+        s_compAlpha = (v && v[0]) ? (float)atof(v) : 1.0f;
+    }
+    static std::vector<float> s_alphaBuf;
+    if (s_compAlpha < 1.0f && o.currentTarget == 0 && texId == 1002) {
+        s_alphaBuf.assign((size_t)vertexCount, s_compAlpha);
+        vertexAlpha = s_alphaBuf.data();
+    }
     if (o.currentTarget == 0) {
         static int s_dbg = 0;
         if (s_dbg < 12 || s_dbg % 120 == 0) {
