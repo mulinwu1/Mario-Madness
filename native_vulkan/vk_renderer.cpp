@@ -693,12 +693,14 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
         createFB(o.dev, &fci, nullptr, &o.framebuffers[i]);
     }
 
-    // 实验 VK_SINGLE_PRESENT=1（默认关）：同一张交换链图在一个视觉帧内多次合成，
+    // 单次上屏（第十四轮采纳为默认）：同一张交换链图在一个视觉帧内多次合成，
     // 第二次起用 LOAD pass 叠加上一层内容，最后只在真实 swap 时 present 一次。
     // 关键：中间合成结束在 COLOR_ATTACHMENT_OPTIMAL（不以 PRESENT_SRC 作 initialLayout）。
+    // 标题页一个视觉帧会发两次 present（FBO 切换 + ContextFlip），两次各只铺一层，
+    // 不定这个开关就会在 1001/1002 之间逐帧交替 → 闪烁。显式设 VK_SINGLE_PRESENT=0 可退回旧行为。
     {
         const char* v = getenv("VK_SINGLE_PRESENT");
-        if (v && v[0] == '1') {
+        if (!(v && v[0] == '0')) {
             auto mkRP = [&](VkAttachmentLoadOp lop, VkImageLayout init, VkImageLayout fin, VkRenderPass* out) {
                 VkAttachmentDescription a2 = att;
                 a2.loadOp = lop;
@@ -1644,18 +1646,17 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
     }
     NoteSampled(texId);
     if (vertexCount <= 0) return;
-    // 实验 VK_COMP_ALPHA=<0..1>：后缓冲合成笔（采样 1002）按固定 alpha 叠加。
-    // 背景：标题页一个视觉帧分两笔铺后缓冲，批处理按纹理 id 排序 → 1001 先、1002 后，
-    // 而两层 alpha 都是 255（同一帧 RT 转储实测），直接叠加只能二选一。
-    // 原版形态 ≈ 0.70×1002 + 0.23×1001，等价于把后画的 1002 降到半透明。
-    // 默认不设变量 → s_compAlpha=1.0，行为逐字不变。
+    // 后缓冲合成笔的 alpha（第十四轮采纳默认 0.77）：标题页一个视觉帧分两笔铺后缓冲，
+    // 批处理按纹理 id 排序 → 1001 先、1002 后，而两层 alpha 都是 255（同帧 RT 转储实测），
+    // 直接叠加只能二选一。原版形态 ≈ 0.70×1002 + 0.23×1001，等价于把后画的 1002 降到半透明。
+    // 只在"叠在已有层之上"（bbLoad=1）时生效，单层场景不受影响；VK_COMP_ALPHA=1 可关闭。
     static float s_compAlpha = -1.0f;
     if (s_compAlpha < 0.0f) {
         const char* v = getenv("VK_COMP_ALPHA");
-        s_compAlpha = (v && v[0]) ? (float)atof(v) : 1.0f;
+        s_compAlpha = (v && v[0]) ? (float)atof(v) : 0.77f;
     }
     static std::vector<float> s_alphaBuf;
-    if (s_compAlpha < 1.0f && o.currentTarget == 0 && texId == 1002) {
+    if (s_compAlpha < 1.0f && o.currentTarget == 0 && o.bbLoad && texId == 1002) {
         s_alphaBuf.assign((size_t)vertexCount, s_compAlpha);
         vertexAlpha = s_alphaBuf.data();
     }
