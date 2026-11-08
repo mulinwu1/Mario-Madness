@@ -175,6 +175,42 @@ bool CompOverrideEnabled () {
     return s_enabled != 0;
 }
 
+// VK_COMP_LAYER_A=1：后缓冲这一笔只采样了 1002（场景层 1001 没进后缓冲）时，
+// 把 1001 全屏补画到 1002 之上再 present。默认关闭；关闭时不进这条路径。
+// 背景：单次上屏（VK_SINGLE_PRESENT=1）后每视觉帧只剩一个采样源，但原版画面是
+// “1002 打底 + 1001 低 alpha 叠加”，缺了 1001 就只剩 logo 层。
+bool CompLayerAEnabled () {
+    static int s_enabled = -1;
+    if (s_enabled < 0) {
+        const char* v = getenv ("VK_COMP_LAYER_A");
+        s_enabled = (v && v[0] == '1') ? 1 : 0;
+    }
+    return s_enabled != 0;
+}
+
+bool DrawLayerAOverlay (VkRenderer* r) {
+    if (!r) return false;
+    if (r->BackbufferLastSample () != 1002) return false;
+    int tw = 0, th = 0;
+    if (!r->GetRenderTargetSize (1001, &tw, &th) || tw <= 0 || th <= 0) return false;
+
+    float W = (float)r->ScreenWidth ();
+    float H = (float)r->ScreenHeight ();
+    float quad[24] = {
+        0.0f, 0.0f, 0.0f, 0.0f,
+        W,    0.0f, 1.0f, 0.0f,
+        0.0f, H,    0.0f, 1.0f,
+        0.0f, H,    0.0f, 1.0f,
+        W,    0.0f, 1.0f, 0.0f,
+        W,    H,    1.0f, 1.0f,
+    };
+    r->SetDrawColor (1.0f, nullptr, nullptr);
+    r->DrawRaw (1001, quad, 6);
+    fprintf (stderr, "[glvk] comp-layerA f=%llu src=1001 %dx%d -> %dx%d\n",
+             (unsigned long long)r->FrameIndex (), tw, th, (int)W, (int)H);
+    return true;
+}
+
 // 在后缓冲当前这批顶点里追加一张全屏 1002。只加几何、不 acquire、不额外 present，
 // 所以交换链 image 的“acquire -> 本帧 present 归还”周期不变。
 bool DrawSceneOverlay (VkRenderer* r) {
@@ -852,6 +888,10 @@ void gl_vk_present_frame () {
         // 开关关闭时不进入，行为与 logdiag 版完全一致。
         if (CompOverrideEnabled () && g_currentTarget == 0) {
             if (DrawSceneOverlay (r)) composed = 1002;
+        }
+        // 实验 VK_COMP_LAYER_A=1：本笔只采样了 1002 时，把场景层 1001 叠回去
+        if (CompLayerAEnabled () && g_currentTarget == 0) {
+            DrawLayerAOverlay (r);
         }
         static uint64_t s_compLog = 0;
         if (s_compLog < 20000) {
