@@ -205,9 +205,9 @@ jobs:
             if ($pv -match '<haxeflag name="-v"') {
               Write-Host 'Project.xml already has <haxeflag name="-v" />'
             } else {
-              $pv = $pv -replace '</project>', "`t<haxeflag name=`"-v`" />`n</project>"
+              $pv = $pv -replace '</project>', "`t<haxeflag name=`"-v`" />`n`t<haxedef name=`"macro-times`" />`n</project>"
               Set-Content -Path Project.xml -Value $pv -NoNewline
-              Write-Host 'inserted <haxeflag name="-v" /> (verbose diagnostic)'
+              Write-Host 'inserted <haxeflag name="-v" /> + <haxedef name="macro-times" /> (verbose diagnostic)'
             }
             $vf = Get-Content Project.xml -Raw
             if ($vf -notmatch '<haxeflag name="-v"') { throw 'failed to insert -v haxeflag' }
@@ -366,6 +366,7 @@ jobs:
           REPLICA_1105: ${{ inputs.replica_1105 }}
           FRONTEND_ONLY: ${{ inputs.frontend_only }}
           ABLATE: ${{ inputs.ablate }}
+          VERBOSE: ${{ inputs.verbose }}
         run: |
           $ErrorActionPreference = 'Stop'
           $buildStart = (Get-Date).ToUniversalTime()
@@ -399,7 +400,7 @@ jobs:
           # 3) export 下 .cpp 数量与总字节（haxe 生成完会从 0 跳到几千）
           # 另有 obj 数作为第二条硬证据；判定卡死 = haxe_cpu 连续 10 次采样无增量 且 cpp/obj 都没涨
           Set-Content -Path monitor.ps1 -Encoding UTF8 -Value @'
-          param([string]$Wd, [string]$Marker, [string]$HbLog, [int]$MaxMin = 110, [int]$StallSamples = 10, [switch]$FrontendOnly)
+          param([string]$Wd, [string]$Marker, [string]$HbLog, [int]$MaxMin = 110, [int]$StallSamples = 10, [switch]$FrontendOnly, [int]$GateS = 600)
           Set-Location $Wd
           $t0 = Get-Date
           $prevCpu = 0.0
@@ -444,22 +445,44 @@ jobs:
             if ($mem -ne 'NA' -and [int]$mem -gt $peak) { $peak = [int]$mem }
             if ($commitMB -gt $peakCommit) { $peakCommit = $commitMB }
             Set-Content -Path (Join-Path $Wd 'peak_mem.txt') -Value ("peak_haxe_mem_MB=$peak`npeak_commit_MB=$peakCommit`ncommit_limit_MB=$limitMB`nelapsed_s=$elapsed`nhaxe_cpu_s=$cpu")
-            # 前端判据：build.log 出现第一条 TU 行（" - xxx.cpp"）即说明 haxe 前端已过、hxcpp 开始编译
+            # 前端判据：只认"游戏自己的 haxe 前端已过"——必须先出现 hxcpp 对游戏源码的编译组
+            # （Compiling group: haxe 或命令行含 export\release\windows\...obj），之后的 TU 行才算数。
+            # 否则 lime 自身的 native rebuild（-Fd C:\lime-src\project\obj）会误判为前端完成。
             if ($FrontendOnly) {
               $bl = Join-Path $Wd 'build.log'
               $tuHit = @()
-              if (Test-Path $bl) { $tuHit = @(Select-String -Path $bl -Pattern '^\s*-\s+\S+\.cpp\s*$' -ErrorAction SilentlyContinue) }
+              $anchor = -1
+              $anchorLine = ''
+              if (Test-Path $bl) {
+                $ls = @(Get-Content $bl -ErrorAction SilentlyContinue)
+                for ($i = 0; $i -lt $ls.Count; $i++) {
+                  if ($ls[$i] -match 'Compiling group:\s*haxe' -or $ls[$i] -match 'export[\\/]release[\\/]windows[\\/][^ ]*\.obj') { $anchor = $i; $anchorLine = $ls[$i].Trim() }
+                }
+                if ($anchor -ge 0) {
+                  for ($i = $anchor; $i -lt $ls.Count; $i++) {
+                    if ($ls[$i] -match '^\s*-\s+\S+\.cpp\s*$') { $tuHit += $i }
+                  }
+                }
+              }
               if ($tuHit.Count -gt 0) {
-                Set-Content -Path (Join-Path $Wd 'frontend.txt') -Value ("frontend_s=$elapsed`ntu_lines=$($tuHit.Count)`nfirst_tu=$($tuHit[0].Line.Trim())")
-                Write-Host ("::notice::[frontend] reached first TU at ${elapsed}s -> killing for frontend-only measurement")
+                $firstIdx = $tuHit[0]
+                $cmdLine = ''
+                for ($i = $firstIdx; $i -ge 0; $i--) {
+                  if ($ls[$i] -match 'cl\.exe|cl ' -and $ls[$i] -match 'export') { $cmdLine = $ls[$i].Trim(); break }
+                }
+                if ($cmdLine -eq '' -and $firstIdx -gt 0) { $cmdLine = $ls[$firstIdx - 1].Trim() }
+                if ($cmdLine.Length -gt 120) { $cmdLine = $cmdLine.Substring(0, 120) }
+                $tuLine = $ls[$firstIdx].Trim()
+                Set-Content -Path (Join-Path $Wd 'frontend.txt') -Value ("frontend_s=$elapsed`ntu_lines=$($tuHit.Count)`nanchor=$anchorLine`nfirst_tu=$tuLine`ncl_cmd=$cmdLine")
+                Write-Host ("::notice::[frontend] game TU reached at ${elapsed}s -> killing for frontend-only measurement")
                 Kill-Tree
                 break
               }
-              # 判据：10 分钟内没出现第一条 TU 即视为病态前端，直接杀（不拿 25s 当通过线）
-              if ($elapsed -ge 600) {
-                Set-Content -Path $Marker -Value "FRONTEND_TIMEOUT no TU within 600s (elapsed=${elapsed}s mem=${mem}MB haxe_cpu=${cpu}s cpp=$cppCount)"
-                Set-Content -Path (Join-Path $Wd 'frontend.txt') -Value ("frontend_s=NOT_REACHED`ngate_s=600`nmem_MB=$mem`nhaxe_cpu_s=$cpu")
-                Write-Host ("::notice::[frontend] NO TU within 600s -> pathological, killing")
+              # 判据：GateS 内没出现第一条游戏 TU 即视为病态前端，直接杀（-v 诊断用 180s）
+              if ($elapsed -ge $GateS) {
+                Set-Content -Path $Marker -Value "FRONTEND_TIMEOUT no game TU within ${GateS}s (elapsed=${elapsed}s mem=${mem}MB haxe_cpu=${cpu}s cpp=$cppCount)"
+                Set-Content -Path (Join-Path $Wd 'frontend.txt') -Value ("frontend_s=NOT_REACHED`ngate_s=$GateS`nmem_MB=$mem`nhaxe_cpu_s=$cpu")
+                Write-Host ("::notice::[frontend] NO game TU within ${GateS}s -> pathological, killing")
                 Kill-Tree
                 break
               }
@@ -495,20 +518,13 @@ jobs:
           }
           '@
 
-          $monProc = Start-Process -FilePath (Get-Command pwsh).Source `
-            -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File', (Join-Path $wd 'monitor.ps1'),
-                            '-Wd', $wd, '-Marker', (Join-Path $wd 'stall.txt'), '-HbLog', (Join-Path $wd 'hb.log'),
-                            '-MaxMin', '110', '-StallSamples', '10') `
-            -NoNewWindow -PassThru
-          if ($env:FRONTEND_ONLY -eq 'true') {
-            Stop-Process -Id $monProc.Id -Force
-            $monProc = Start-Process -FilePath (Get-Command pwsh).Source `
-              -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File', (Join-Path $wd 'monitor.ps1'),
-                              '-Wd', $wd, '-Marker', (Join-Path $wd 'stall.txt'), '-HbLog', (Join-Path $wd 'hb.log'),
-                              '-MaxMin', '110', '-StallSamples', '10', '-FrontendOnly') `
-              -NoNewWindow -PassThru
-            Write-Host 'monitor: frontend-only mode (kill on first TU)'
-          }
+          $monArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File', (Join-Path $wd 'monitor.ps1'),
+                       '-Wd', $wd, '-Marker', (Join-Path $wd 'stall.txt'), '-HbLog', (Join-Path $wd 'hb.log'),
+                       '-MaxMin', '110', '-StallSamples', '10')
+          if ($env:FRONTEND_ONLY -eq 'true') { $monArgs += @('-FrontendOnly') }
+          if ($env:VERBOSE -eq 'true') { $monArgs += @('-GateS', '180') } else { $monArgs += @('-GateS', '600') }
+          $monProc = Start-Process -FilePath (Get-Command pwsh).Source -ArgumentList $monArgs -NoNewWindow -PassThru
+          Write-Host "monitor: frontend_only=$($env:FRONTEND_ONLY) verbose=$($env:VERBOSE)"
 
           # 前台跑：stdout 逐行实时打到 Actions 日志并落 build.log；stderr 落 build.err
           $runStart = Get-Date
