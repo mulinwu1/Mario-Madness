@@ -21,6 +21,7 @@
 
 // gl_fbo 侧的当前目标（只读探针用，定义在 lime 命名空间的 gl_fbo.cpp:706）
 namespace lime { uint32_t gl_vk_current_target (); }
+namespace lime { extern int g_vkfixDrawTotal; extern int g_vkfixDrawFolded; }
 
 // 接线探针（本轮只接不选）：gl_shader 自己建的管线。它不参与任何 draw，
 // 只在 render pass 开头绑一次、紧接着换回固定管线（两次绑定之间没有 draw）。
@@ -1831,7 +1832,11 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
         }
         // 每顶点颜色调制：loc6/loc7 的真实数据（来自 GL 的 loc6/loc7 顶点数组），
         // 没有逐顶点数组时退回 SetDrawColor 的常量
+        static const float kIdentityMult[4] = {1.0f, 1.0f, 1.0f, 1.0f};
         const float* m = vertexMult ? (vertexMult + (size_t)i * 4) : g_drawMult;
+        // [vkfix] 数组路径的乘数三通道全零 = GL 侧没设 colorTransform，折成 identity，
+        // 与常量路径同样处理；否则真 frag 会把整笔乘成黑。
+        if (vertexMult && m[0] == 0.0f && m[1] == 0.0f && m[2] == 0.0f) m = kIdentityMult;
         const float* f = vertexOff ? (vertexOff + (size_t)i * 4) : g_drawOff;
         PushLimeVertex(*vertsPtr, px, py, u, v,
                        vertexAlpha ? vertexAlpha[i] : g_drawAlpha, m, f);
@@ -3834,6 +3839,11 @@ void VkRenderer::EndFrame() {
     }
 
     if (o.currentTarget == 0) {
+        // [vkfix] 每帧一行：常量乘数全零折叠成 identity 的笔数 / 总笔数
+        fprintf(stderr, "[vkfix] zero_mult_identity=%d/%d\n",
+                lime::g_vkfixDrawFolded, lime::g_vkfixDrawTotal);
+        lime::g_vkfixDrawFolded = 0;
+        lime::g_vkfixDrawTotal = 0;
         // 实验 VK_SINGLE_PRESENT=1：中间合成只提交几何、保持 image 不归还；
         // 只有真实 swap（gl_fbo 调 RequestPresent）才 present 一次。
         if (!willPresent) {

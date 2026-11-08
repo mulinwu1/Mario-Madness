@@ -359,6 +359,20 @@ static float g_attrConst[16][4] = {{0}};
 static int g_attrConstN[16] = {0};   // 已写入的分量数
 static bool g_attrConstSet[16] = {false};
 
+// [vkfix] 常量乘数 (0,0,0,0) 折叠成 identity 的计数（vk_renderer EndFrame 每帧打印并清零）
+int g_vkfixDrawTotal = 0;
+int g_vkfixDrawFolded = 0;
+
+// 常量乘数是否等于 (0,0,0,0)：Flixel 没设 colorTransform 时 loc6 保持默认零，
+// 真 shader 的 hasColorTransform 分支会把它乘成黑，所以这一批必须当 identity。
+static bool ConstMultAllZero() {
+    if (!g_attrConstSet[6]) return true;
+    for (int k = 0; k < 4; k++) {
+        if (g_attrConst[6][k] != 0.0f) return false;
+    }
+    return true;
+}
+
 static bool ResolveAttrSource(const AttribState& a, const unsigned char** p,
                               size_t* base, size_t* bytes, int* stride);
 
@@ -761,9 +775,13 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
     bool colorFromArray = false;
     BuildVertexColor(count, first, nullptr, mults, offs, &colorFromArray);
     LogAlpha567(texName, count, alphas, alphaFromArray, first, nullptr);
+    // [vkfix] 常量乘数全零 ⇒ 交给 SetDrawColor 的 nullptr（identity），否则真 frag 会乘成黑
+    const bool foldZeroMult = !colorFromArray && ConstMultAllZero();
+    g_vkfixDrawTotal++;
+    if (foldZeroMult) g_vkfixDrawFolded++;
     g_renderer->SetDrawColor ((g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f) *
                               (g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f),
-                              g_attrConstSet[6] ? g_attrConst[6] : nullptr,
+                              foldZeroMult ? nullptr : (g_attrConstSet[6] ? g_attrConst[6] : nullptr),
                               g_attrConstSet[7] ? g_attrConst[7] : nullptr);
     // 诊断：确认 lime 传进来的 uv 是“帧子矩形归一化”还是“整图 0..1”/像素值
     {
@@ -881,9 +899,13 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
     bool colorFromArray = false;
     BuildVertexColor(count, 0, idxs.data(), mults, offs, &colorFromArray);
     LogAlpha567(texName, count, alphas, alphaFromArray, 0, idxs.data());
+    // [vkfix] indexed 路径同款折叠
+    const bool foldZeroMult = !colorFromArray && ConstMultAllZero();
+    g_vkfixDrawTotal++;
+    if (foldZeroMult) g_vkfixDrawFolded++;
     g_renderer->SetDrawColor ((g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f) *
                               (g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f),
-                              g_attrConstSet[6] ? g_attrConst[6] : nullptr,
+                              foldZeroMult ? nullptr : (g_attrConstSet[6] ? g_attrConst[6] : nullptr),
                               g_attrConstSet[7] ? g_attrConst[7] : nullptr);
     // 诊断：与 draw_arrays 同款，确认 indexed 路径的 uv 语义
     {
