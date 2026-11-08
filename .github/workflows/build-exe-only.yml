@@ -323,6 +323,7 @@ jobs:
         env:
           REPLICA_1105: ${{ inputs.replica_1105 }}
           FRONTEND_ONLY: ${{ inputs.frontend_only }}
+          ABLATE: ${{ inputs.ablate }}
         run: |
           $ErrorActionPreference = 'Stop'
           $buildStart = (Get-Date).ToUniversalTime()
@@ -330,6 +331,8 @@ jobs:
           $outDir = "export\release\windows"
           if ($env:REPLICA_1105 -eq 'true') {
             Write-Host 'REPLICA 11-05: keep assets as-is (11-05 compiled with full assets + PRELOAD_ALL)'
+          } elseif ($env:ABLATE -eq 'keep_assets') {
+            Write-Host 'ABLATE keep_assets: skip assets wipe (restore the full asset set)'
           } else {
           Get-ChildItem 'assets' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
             Get-ChildItem $_.FullName -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
