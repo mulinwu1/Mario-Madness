@@ -26,6 +26,10 @@ on:
         description: "提速：true = 只要出现第一条 TU 就记 frontend_s 并杀进程（分钟级实验）"
         required: false
         default: ""
+      replica_variant:
+        description: "复刻组单变量：no_opt / fork / no_preload（空=纯 11-05 复刻）"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -118,9 +122,12 @@ jobs:
         shell: pwsh
         env:
           REPLICA_1105: ${{ inputs.replica_1105 }}
+          REPLICA_VARIANT: ${{ inputs.replica_variant }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($env:REPLICA_1105 -eq 'true') {
+          $useFork = $true
+          if ($env:REPLICA_1105 -eq 'true' -and $env:REPLICA_VARIANT -ne 'fork') { $useFork = $false }
+          if (-not $useFork) {
             Write-Host 'REPLICA 11-05: skip haxelib dev; use haxelib openfl 9.2.0 as-is'
             $lines = @(haxelib path openfl)
             Write-Host "haxelib path openfl -> $($lines -join '; ')"
@@ -149,19 +156,24 @@ jobs:
           DISABLE_VK_PKT: ${{ inputs.disable_vk_pkt }}
           REPLICA_1105: ${{ inputs.replica_1105 }}
           REPLICA_VK_PKT: ${{ inputs.replica_vk_pkt }}
+          REPLICA_VARIANT: ${{ inputs.replica_variant }}
         run: |
           $ErrorActionPreference = 'Stop'
           $px = Get-Content Project.xml -Raw
+          $variant = $env:REPLICA_VARIANT
           if ($env:REPLICA_1105 -eq 'true') {
-            Write-Host 'REPLICA 11-05: add PRELOAD_ALL + angle defines (11-05 hxml), no --no-opt'
-            $px = $px -replace '</project>', "`t<haxedef name=`"PRELOAD_ALL`" />`n`t<haxedef name=`"angle`" />`n</project>"
+            # 复刻基线用 PRELOAD_ALL；no_preload 组把它换成 NO_PRELOAD_ALL（单变量）
+            $preloadDef = 'PRELOAD_ALL'
+            if ($variant -eq 'no_preload') { $preloadDef = 'NO_PRELOAD_ALL' }
+            Write-Host "REPLICA 11-05: add $preloadDef + angle defines (11-05 hxml), variant='$variant'"
+            $px = $px -replace '</project>', "`t<haxedef name=`"$preloadDef`" />`n`t<haxedef name=`"angle`" />`n</project>"
             if ($env:REPLICA_VK_PKT -eq 'true') {
               $px = $px -replace '</project>', "`t<haxedef name=`"openfl_vk_pkt`" />`n</project>"
               Write-Host 'REPLICA + vk_pkt: openfl_vk_pkt define added (single variable on top of replica)'
             }
             Set-Content -Path Project.xml -Value $px -NoNewline
             $rc = Get-Content Project.xml -Raw
-            if ($rc -notmatch '<haxedef name="PRELOAD_ALL"' -or $rc -notmatch '<haxedef name="angle"') { throw 'replica defines insert failed' }
+            if ($rc -notmatch ("<haxedef name=`"$preloadDef`"") -or $rc -notmatch '<haxedef name="angle"') { throw "replica defines insert failed ($preloadDef + angle)" }
             if ($env:REPLICA_VK_PKT -eq 'true' -and $rc -notmatch '<haxedef name="openfl_vk_pkt"') { throw 'replica vk_pkt define insert failed' }
           } elseif ($env:DISABLE_VK_PKT -eq 'true') {
             Write-Host 'BISECT PROBE: openfl_vk_pkt define intentionally skipped (fork classpath kept)'
@@ -184,7 +196,9 @@ jobs:
 
           # 内存实验 2/2：本轮显式关掉 haxe 优化器（--no-opt），降低编译器峰值内存；
           # 幂等插入，只影响 CI 里的这份 Project.xml，不改仓库文件
-          if ($env:REPLICA_1105 -eq 'true') {
+          $needNoOpt = $true
+          if ($env:REPLICA_1105 -eq 'true' -and $variant -ne 'no_opt') { $needNoOpt = $false }
+          if (-not $needNoOpt) {
             Write-Host 'REPLICA 11-05: skip --no-opt (11-05 did not use it)'
           } elseif ($check -match '--no-opt') {
             Write-Host 'Project.xml already has <haxeflag name="--no-opt" />'
@@ -195,7 +209,8 @@ jobs:
             Write-Host 'inserted <haxeflag name="--no-opt" /> (memory experiment)'
           }
           $final = Get-Content Project.xml -Raw
-          if ($final -notmatch 'no-opt' -and $env:REPLICA_1105 -ne 'true') { throw 'failed to insert --no-opt' }
+          if ($final -notmatch 'no-opt' -and $needNoOpt) { throw 'failed to insert --no-opt' }
+          Write-Host "project.xml variant='$variant' needNoOpt=$needNoOpt fork=$(if ($env:REPLICA_1105 -eq 'true') { if ($variant -eq 'fork') { 'YES' } else { 'NO' } } else { 'YES' })"
 
       # 有 artifact 就覆盖 haxelib 里的 ndll；没有就原地用 haxelib lime 自带的那份，
       # 并记录 VULKAN_LIME_NDLL 供打包步骤贴到 exe 旁边。
