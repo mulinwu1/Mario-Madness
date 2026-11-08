@@ -337,6 +337,7 @@ jobs:
           $prevCpu = 0.0
           $prevCpp = -1
           $prevObj = -1
+          $lowCpu = 0
           $flat = 0
           $peak = 0
           $peakCommit = 0
@@ -394,6 +395,15 @@ jobs:
                 Kill-Tree
                 break
               }
+            }
+            # 病态停滞：连续 3 分钟 cpp 仍为 0 且 haxe_cpu 增量 < 30s/分 => 低 CPU 横盘，直接杀
+            if ($cppCount -eq 0 -and $delta -lt 30) { $lowCpu++ } else { $lowCpu = 0 }
+            if ($lowCpu -ge 3) {
+              Set-Content -Path $Marker -Value "STALL_LOWCPU cpp=0 for $lowCpu samples with haxe_cpu delta<30s/min (elapsed=${elapsed}s mem=${mem}MB last_delta=${delta}s haxe_cpu=${cpu}s)"
+              Set-Content -Path (Join-Path $Wd 'frontend.txt') -Value ("frontend_s=STALL_LOWCPU`ngate=samples=3`nmem_MB=$mem`nhaxe_cpu_s=$cpu`ndelta_s=$delta")
+              Write-Host ("::notice::[frontend] pathological stall: cpp=0 and haxe_cpu delta=${delta}s/min for 3 samples -> killing")
+              Kill-Tree
+              break
             }
             # 硬护栏：haxe 堆超过 13500MB 就主动杀，记录 ABORT_MEM，不等它自己崩（每轮省 10 分钟）
             if ($mem -ne 'NA' -and [int]$mem -gt 13500) {
