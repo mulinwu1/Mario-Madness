@@ -53,28 +53,20 @@ jobs:
 
       - name: Install Haxe 4.2.5 and Neko
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path C:\haxe | Out-Null
           New-Item -ItemType Directory -Force -Path C:\neko | Out-Null
-          function Get-Zip([string]$url, [string]$out) {
-            for ($i = 1; $i -le 5; $i++) {
-              try {
-                Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
-                return
-              } catch {
-                Write-Host "download attempt $i failed: $($_.Exception.Message)"
-                if (Test-Path $out) { Remove-Item $out -Force }
-                if ($i -eq 5) { throw }
-                Start-Sleep -Seconds 20
-              }
-            }
-          }
+          # 2026-11-08: github.com release 资产 CDN 偶发 504；改走 gh(API) 下载，避开该网关
           if (-not (Test-Path C:\haxe\haxe.zip)) {
-            Get-Zip "https://github.com/HaxeFoundation/haxe/releases/download/4.2.5/haxe-4.2.5-win64.zip" "C:\haxe\haxe.zip"
+            gh release download 4.2.5 -R HaxeFoundation/haxe --pattern 'haxe-4.2.5-win64.zip' --dir C:\haxe --clobber
+            if (Test-Path C:\haxe\haxe-4.2.5-win64.zip) { Move-Item C:\haxe\haxe-4.2.5-win64.zip C:\haxe\haxe.zip -Force }
           }
           if (-not (Test-Path C:\neko\neko.zip)) {
-            Get-Zip "https://github.com/HaxeFoundation/neko/releases/download/v2-3-0/neko-2.3.0-win64.zip" "C:\neko\neko.zip"
+            gh release download v2-3-0 -R HaxeFoundation/neko --pattern 'neko-2.3.0-win64.zip' --dir C:\neko --clobber
+            if (Test-Path C:\neko\neko-2.3.0-win64.zip) { Move-Item C:\neko\neko-2.3.0-win64.zip C:\neko\neko.zip -Force }
           }
           $haxeDir = (Get-ChildItem C:\haxe -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'haxe.exe') } | Select-Object -First 1).FullName
           if (-not $haxeDir) { Expand-Archive -Path C:\haxe\haxe.zip -DestinationPath C:\haxe -Force }
