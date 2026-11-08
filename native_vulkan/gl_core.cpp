@@ -359,10 +359,14 @@ static float g_attrConst[16][4] = {{0}};
 static int g_attrConstN[16] = {0};   // 已写入的分量数
 static bool g_attrConstSet[16] = {false};
 
+static bool ResolveAttrSource(const AttribState& a, const unsigned char** p,
+                              size_t* base, size_t* bytes, int* stride);
+
 // 关键层逐笔取证：tex 5/6/7 是 B 链（HUD/标题）三条，黑帧时它们是否被画、
 // 画的时候 alpha 是多少、alpha 数组来自哪条 buffer —— 用日志区分
 // “alpha=0 变透明”与“根本没发绘制”。
-static void LogAlpha567(int texName, int count, const std::vector<float>& alphas, bool fromArray) {
+static void LogAlpha567(int texName, int count, const std::vector<float>& alphas, bool fromArray,
+                        int baseVertex, const unsigned int* indices) {
     if (texName != 5 && texName != 6 && texName != 7) return;
     static int s_log = 0;
     if (s_log >= 2400) return;
@@ -388,10 +392,35 @@ static void LogAlpha567(int texName, int count, const std::vector<float>& alphas
         size_t o = (size_t)a5.offset + (size_t)k * (size_t)astr;
         if (ab && (abytes == 0 || o + 4 <= abytes)) raw[k] = *(const float*)(ab + o);
     }
-    fprintf(stderr, "[alpha567] #%d tex=%d n=%d arr=%d en5=%d buf5=%d off5=%.0f str5=%d amin=%.3f amax=%.3f prog=%d blend=%d,%d,%d raw=[%.3f %.3f %.3f %.3f %.3f %.3f]\n",
+    // 按“本次绘制的真实顶点索引”重读 alpha：raw[] 是按 0,1,2... 读的，
+    // 若本笔 first/baseVertex != 0，raw[4]/raw[5]=0 就是读错了位置，不是真 alpha。
+    float rawIx[6] = {0, 0, 0, 0, 0, 0};
+    unsigned ix[3] = {0, 0, 0};
+    for (int k = 0; k < 3; k++) {
+        unsigned vi = indices ? indices[k] : (unsigned)(baseVertex + k);
+        ix[k] = vi;
+        size_t o = (size_t)a5.offset + (size_t)vi * (size_t)astr;
+        if (ab && (abytes == 0 || o + 4 <= abytes)) rawIx[k] = *(const float*)(ab + o);
+    }
+    // 第一顶点的 colorMultiplier（loc6 数组），这是“灰带是否来自顶点色”的直接证据
+    float col[4] = {1, 1, 1, 1};
+    {
+        const unsigned char* cb = nullptr; size_t cbytes = 0, cbase = 0; int cstr = 0;
+        if (ResolveAttrSource(g_attrs[6], &cb, &cbase, &cbytes, &cstr)) {
+            unsigned vi = indices ? indices[0] : (unsigned)baseVertex;
+            size_t o = cbase + (size_t)vi * (size_t)cstr;
+            if (cbytes == 0 || o + 16 <= cbytes) memcpy(col, cb + o, 16);
+        } else if (g_attrConstSet[6]) {
+            memcpy(col, g_attrConst[6], 16);
+        }
+    }
+    fprintf(stderr, "[alpha567] #%d tex=%d n=%d arr=%d en5=%d buf5=%d off5=%.0f str5=%d amin=%.3f amax=%.3f prog=%d blend=%d,%d,%d bv=%d ix=[%u %u %u] raw=[%.3f %.3f %.3f %.3f %.3f %.3f] rawIx=[%.3f %.3f %.3f] col=[%.3f %.3f %.3f %.3f]\n",
             s_log, texName, count, fromArray ? 1 : 0, a5.enabled ? 1 : 0, a5buf, a5.offset, astr,
             aMin, aMax, gl_shader_current_program (), g_blendEnabled ? 1 : 0, g_blendSrc, g_blendDst,
-            raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]);
+            baseVertex, ix[0], ix[1], ix[2],
+            raw[0], raw[1], raw[2], raw[3], raw[4], raw[5],
+            rawIx[0], rawIx[1], rawIx[2],
+            col[0], col[1], col[2], col[3]);
 }
 
 
@@ -432,6 +461,65 @@ static std::vector<float> BuildVertexAlpha(int count, int baseVertex, const unsi
     }
     *usedArray = (p != nullptr);
     return alphas;
+}
+
+// 解析一个顶点属性的数据源（与 BuildVertexAlpha 同一套 GL 语义）：
+// 设置指针时的 VBO（不是绘制时当前绑定的）、client 内存、stride 默认值。
+static bool ResolveAttrSource(const AttribState& a, const unsigned char** p,
+                              size_t* base, size_t* bytes, int* stride) {
+    *p = nullptr; *base = 0; *bytes = 0; *stride = 0;
+    if (!a.enabled || a.size < 1) return false;
+    int st = a.stride > 0 ? a.stride : 4;
+    if (a.client && a.clientPtr) {
+        *p = (const unsigned char*)a.clientPtr;
+        *stride = st;
+        return true;
+    }
+    int buf = a.buffer > 0 ? a.buffer : g_boundArrayBuffer;
+    if (buf > 0 && buf < (int)g_buffers.size() && !g_buffers[(size_t)buf].data.empty()) {
+        *p = g_buffers[(size_t)buf].data.data();
+        *bytes = g_buffers[(size_t)buf].data.size();
+        *base = (size_t)a.offset;
+        *stride = st;
+        return true;
+    }
+    return false;
+}
+
+// 逐顶点颜色调制：lime 把 colorMultiplier/colorOffset 放在 loc6/loc7 的顶点数组
+// （实测 idx=6 stride=16 off=24 buf=6，idx=7 stride=16 off=88 buf=6）。批处理路径
+// 之前完全不读这两条数组，VK 顶点色恒为 (1,1,1,1)/(0,0,0,0)，红色调制因此丢失。
+static void BuildVertexColor(int count, int baseVertex, const unsigned int* indices,
+                             std::vector<float>& mult, std::vector<float>& off,
+                             bool* usedArray) {
+    mult.assign((size_t)count * 4, 1.0f);
+    off.assign((size_t)count * 4, 0.0f);
+    // 常量属性回退值（glVertexAttrib4f 写入）
+    for (int k = 0; k < 4; k++) {
+        float m = g_attrConstSet[6] ? g_attrConst[6][k] : 1.0f;
+        float f = g_attrConstSet[7] ? g_attrConst[7][k] : 0.0f;
+        for (int i = 0; i < count; i++) {
+            mult[(size_t)i * 4 + k] = m;
+            off[(size_t)i * 4 + k] = f;
+        }
+    }
+    const unsigned char *p6, *p7;
+    size_t b6, b7, base6, base7;
+    int s6, s7;
+    bool ok6 = ResolveAttrSource(g_attrs[6], &p6, &base6, &b6, &s6);
+    bool ok7 = ResolveAttrSource(g_attrs[7], &p7, &base7, &b7, &s7);
+    *usedArray = (ok6 || ok7);
+    for (int i = 0; i < count; i++) {
+        unsigned vi = indices ? indices[i] : (unsigned)(baseVertex + i);
+        if (ok6) {
+            size_t o = base6 + (size_t)vi * (size_t)s6;
+            if (b6 == 0 || o + 16 <= b6) memcpy(&mult[(size_t)i * 4], p6 + o, 16);
+        }
+        if (ok7) {
+            size_t o = base7 + (size_t)vi * (size_t)s7;
+            if (b7 == 0 || o + 16 <= b7) memcpy(&off[(size_t)i * 4], p7 + o, 16);
+        }
+    }
 }
 
 int lime_gl_create_buffer() {
@@ -656,12 +744,15 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
     // 逐顶点 alpha（loc5 数组）；这是黑幕"几乎不可见"的唯一通道
     bool alphaFromArray = false;
     std::vector<float> alphas = BuildVertexAlpha(count, first, nullptr, &alphaFromArray);
-    LogAlpha567(texName, count, alphas, alphaFromArray);
-    if (!alphaFromArray) {
-        g_renderer->SetDrawColor ((g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f) *
-                                  (g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f),
-                                  nullptr, nullptr);
-    }
+    // 逐顶点颜色调制（loc6/loc7 数组）；这是顶部"红调制变灰"的唯一通道
+    std::vector<float> mults, offs;
+    bool colorFromArray = false;
+    BuildVertexColor(count, first, nullptr, mults, offs, &colorFromArray);
+    LogAlpha567(texName, count, alphas, alphaFromArray, first, nullptr);
+    g_renderer->SetDrawColor ((g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f) *
+                              (g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f),
+                              g_attrConstSet[6] ? g_attrConst[6] : nullptr,
+                              g_attrConstSet[7] ? g_attrConst[7] : nullptr);
     // 诊断：确认 lime 传进来的 uv 是“帧子矩形归一化”还是“整图 0..1”/像素值
     {
         static int s_uvdbg = 0;
@@ -682,16 +773,20 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
                 if (alphas[(size_t)i] > aMax) aMax = alphas[(size_t)i];
             }
             int tw = 0, th = 0; gl_vk_texture_size (texName, &tw, &th);
-            fprintf (stderr, "[gldraw] tex=%d size=%dx%d n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] pStride=%d pOff=%.0f uvBuf=%d uvStride=%d uvOff=%.0f pBufRaw=%d uBufRaw=%d posCli=%d uvCli=%d amin=%.3f amax=%.3f\n",
-                     texName, tw, th, count, minU, maxU, minV, maxV,
+            fprintf (stderr, "[gldraw] cur=%d tex=%d size=%dx%d n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] pStride=%d pOff=%.0f uvBuf=%d uvStride=%d uvOff=%.0f pBufRaw=%d uBufRaw=%d posCli=%d uvCli=%d amin=%.3f amax=%.3f col=[%.3f %.3f %.3f %.3f] coff=[%.3f %.3f %.3f %.3f]\n",
+                     gl_vk_current_target(), texName, tw, th, count, minU, maxU, minV, maxV,
                      minX, maxX, minY, maxY, strideP, g_attrs[0].offset,
                      uvBuf, strideU, g_attrs[uvIdx].offset,
                      g_attrs[0].buffer, g_attrs[uvIdx].buffer, posClient ? 1 : 0, uvClient ? 1 : 0,
-                     aMin, aMax);
+                     aMin, aMax,
+                     mults[0], mults[1], mults[2], mults[3],
+                     offs[0], offs[1], offs[2], offs[3]);
         }
         s_uvdbg++;
     }
-    g_renderer->DrawRaw(vkTex, out.data(), count, alphaFromArray ? alphas.data() : nullptr);
+    g_renderer->DrawRaw(vkTex, out.data(), count, alphaFromArray ? alphas.data() : nullptr,
+                        colorFromArray ? mults.data() : nullptr,
+                        colorFromArray ? offs.data() : nullptr);
 }
 
 void lime_gl_draw_elements(int mode, int count, int type, double offset) {
@@ -770,12 +865,14 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
     g_draws++;
     bool alphaFromArray = false;
     std::vector<float> alphas = BuildVertexAlpha(count, 0, idxs.data(), &alphaFromArray);
-    LogAlpha567(texName, count, alphas, alphaFromArray);
-    if (!alphaFromArray) {
-        g_renderer->SetDrawColor ((g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f) *
-                                  (g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f),
-                                  nullptr, nullptr);
-    }
+    std::vector<float> mults, offs;
+    bool colorFromArray = false;
+    BuildVertexColor(count, 0, idxs.data(), mults, offs, &colorFromArray);
+    LogAlpha567(texName, count, alphas, alphaFromArray, 0, idxs.data());
+    g_renderer->SetDrawColor ((g_attrConstSet[1] ? g_attrConst[1][0] : 1.0f) *
+                              (g_attrConstSet[5] ? g_attrConst[5][0] : 1.0f),
+                              g_attrConstSet[6] ? g_attrConst[6] : nullptr,
+                              g_attrConstSet[7] ? g_attrConst[7] : nullptr);
     // 诊断：与 draw_arrays 同款，确认 indexed 路径的 uv 语义
     {
         static int s_uvdbg2 = 0;
@@ -796,13 +893,15 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
                 if (alphas[(size_t)i] > aMax) aMax = alphas[(size_t)i];
             }
             int tw = 0, th = 0; gl_vk_texture_size (texName, &tw, &th);
-            fprintf (stderr, "[gldraw/ie] tex=%d size=%dx%d n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] pStride=%d pOff=%.0f uvBuf=%d uvStride=%d uvOff=%.0f pBufRaw=%d uBufRaw=%d posCli=%d uvCli=%d prog=%d blend=%d,%d,%d amin=%.3f amax=%.3f\n",
-                     texName, tw, th, count, minU, maxU, minV, maxV,
+            fprintf (stderr, "[gldraw/ie] cur=%d tex=%d size=%dx%d n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] pStride=%d pOff=%.0f uvBuf=%d uvStride=%d uvOff=%.0f pBufRaw=%d uBufRaw=%d posCli=%d uvCli=%d prog=%d blend=%d,%d,%d amin=%.3f amax=%.3f col=[%.3f %.3f %.3f %.3f] coff=[%.3f %.3f %.3f %.3f]\n",
+                     gl_vk_current_target(), texName, tw, th, count, minU, maxU, minV, maxV,
                      minX, maxX, minY, maxY, strideP, g_attrs[0].offset,
                      uvBuf, strideU, g_attrs[uvIdx].offset,
                      g_attrs[0].buffer, g_attrs[uvIdx].buffer, posClient ? 1 : 0, uvClient ? 1 : 0,
                      gl_shader_current_program (), g_blendEnabled ? 1 : 0, g_blendSrc, g_blendDst,
-                     aMin, aMax);
+                     aMin, aMax,
+                     mults[0], mults[1], mults[2], mults[3],
+                     offs[0], offs[1], offs[2], offs[3]);
             static int s_raw2 = 0;
             if (s_raw2 < 6 && !posClient && pBytes >= pBase0 + 32) {
                 const float* f = (const float*)(pp + pBase0);
@@ -842,7 +941,9 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
         }
         s_uvdbg2++;
     }
-    g_renderer->DrawRaw(vkTex, out.data(), count, alphaFromArray ? alphas.data() : nullptr);
+    g_renderer->DrawRaw(vkTex, out.data(), count, alphaFromArray ? alphas.data() : nullptr,
+                        colorFromArray ? mults.data() : nullptr,
+                        colorFromArray ? offs.data() : nullptr);
 }
 
 int lime_gl_get_error() {

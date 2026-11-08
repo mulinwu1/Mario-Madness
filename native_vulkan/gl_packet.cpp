@@ -613,6 +613,8 @@ struct TraceInfo {
     int vkId = -1;                            // 采样源的 Vk 图像 id（<1000 贴图 / >=1000 画布）
 };
 
+static uint32_t g_traceRtId = 0;   // 当前 trace 行的目标 rtId（ExecuteDraw 入口刷新）
+
 // 不占 draw 行预算的判定：canvas3x 这种"附加对账行"专用（仍然受帧号列表约束）。
 static bool TraceWantExtra () {
     int mx = 64;
@@ -658,9 +660,9 @@ static void TraceSkip (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& rec,
             }
         }
     }
-    fprintf(stderr, "[trace] f=%u prog=%u s=%u n=%d tex=%d %s px=no_readback verdict=%s\n",
-            (unsigned)g_rt.frameGen, (unsigned)w.program, (unsigned)w.seq, (int)w.count,
-            texName, posBuf, verdict);
+    fprintf(stderr, "[trace] f=%u cur=%u prog=%u s=%u n=%d tex=%d %s px=no_readback verdict=%s\n",
+            (unsigned)g_rt.frameGen, (unsigned)g_traceRtId, (unsigned)w.program, (unsigned)w.seq,
+            (int)w.count, texName, posBuf, verdict);
 }
 
 static void TracePrint (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& rec,
@@ -671,13 +673,13 @@ static void TracePrint (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& rec
     // sc_src：pkt=本笔画了有效裁剪框；default=本笔没带框，沿用 pass 打开时下发的那一次
     const char* scSrc = d.scissor.valid ? "pkt" : "default";
     fprintf(stderr,
-            "[trace] f=%u prog=%u s=%u n=%d tex=%d tsz=%dx%d "
+            "[trace] f=%u cur=%u prog=%u s=%u n=%d tex=%d tsz=%dx%d "
             "uv=[%.3f..%.3f, %.3f..%.3f] nuv=[%.4f..%.4f, %.4f..%.4f] "
             "pos=[%.1f..%.1f, %.1f..%.1f] norm=%d whole=%d "
-            "asrc=%s amin=%.3f amax=%.3f blend=%d(%u,%u) "
+            "asrc=%s amin=%.3f amax=%.3f blend=%d(%u,%u) bA=%u,%u op=%u,%u "
             "vp=%d,%d,%d,%d,%d sc=%d,%d,%d,%d,%d sc_src=%s "
             "depth=%d depthcmp=0x%x dwrite=%d px=no_readback verdict=%s img=%d\n",
-            (unsigned)g_rt.frameGen, (unsigned)w.program, (unsigned)w.seq, (int)w.count,
+            (unsigned)g_rt.frameGen, (unsigned)g_traceRtId, (unsigned)w.program, (unsigned)w.seq, (int)w.count,
             ti.texName, ti.tw, ti.th,
             ti.u0, ti.u1, ti.v0, ti.v1,
             ti.nu0, ti.nu1, ti.nv0, ti.nv1,
@@ -685,6 +687,8 @@ static void TracePrint (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& rec
             ti.pixelUv, whole ? 1 : 0,
             ti.asrc ? "arr" : "const", ti.amin, ti.amax,
             (int)d.state.blendEnabled, (unsigned)d.state.blendSrc, (unsigned)d.state.blendDst,
+            (unsigned)rec.blendSrcAlpha, (unsigned)rec.blendDstAlpha,
+            (unsigned)rec.blendEqRgb, (unsigned)rec.blendEqAlpha,
             (int)d.viewport.valid, (int)d.viewport.x, (int)d.viewport.y,
             (int)d.viewport.w, (int)d.viewport.h,
             (int)d.scissor.valid, (int)d.scissor.x, (int)d.scissor.y,
@@ -694,6 +698,7 @@ static void TracePrint (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& rec
 }
 
 static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& rec, uint32_t rtId) {
+    g_traceRtId = rtId;
     VkRenderer* r = gl_vk_get_renderer();
     if (!r) return false;
     // 清屏行（n=0）：pass 已在 BindRenderTarget 时打开，这里只做一次幂等对齐，

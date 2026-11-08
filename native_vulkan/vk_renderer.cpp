@@ -916,13 +916,13 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     vattr[5].format = VK_FORMAT_R32_SFLOAT;
     vattr[5].offset = 0;
     vattr[6].location = 6;
-    vattr[6].binding = 1;
+    vattr[6].binding = 0;                        // 颜色调制改读逐顶点数据（GL loc6 数组）
     vattr[6].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    vattr[6].offset = sizeof(float) * 1;
+    vattr[6].offset = sizeof(float) * 5;
     vattr[7].location = 7;
-    vattr[7].binding = 1;
+    vattr[7].binding = 0;                        // 同上：GL loc7 数组
     vattr[7].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    vattr[7].offset = sizeof(float) * 5;
+    vattr[7].offset = sizeof(float) * 9;
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     vi.vertexBindingDescriptionCount = 2;
     vi.pVertexBindingDescriptions = vbind;
@@ -1621,7 +1621,8 @@ void VkRenderer::DrawSprite(uint32_t texId, float x, float y, float w, float h,
     }
 }
 
-void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, const float* vertexAlpha) {
+void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, const float* vertexAlpha,
+                         const float* vertexMult, const float* vertexOff) {
     Impl& o = *impl;
     std::vector<float>* vertsPtr = nullptr;
     if (texId >= 1000) {
@@ -1786,10 +1787,15 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
         }
         static uint64_t s_logged = 0;
         if (s_logged < 6000 && (g_drawFrame <= 12 || spansWhole)) {
-            fprintf(stderr, "[vkdraw] f=%llu cur=%u tex=%u tsz=%.0fx%.0f n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] norm=%d whole=%d asrc=%s amin=%.3f amax=%.3f prog=%d\n",
+            // 顶点色直接证据：loc6/loc7 每顶点 4 float（无数组时取常量）
+            const float* cm = vertexMult ? vertexMult : g_drawMult;
+            const float* cf = vertexOff ? vertexOff : g_drawOff;
+            fprintf(stderr, "[vkdraw] f=%llu cur=%u tex=%u tsz=%.0fx%.0f n=%d uv=[%.3f..%.3f, %.3f..%.3f] pos=[%.1f..%.1f, %.1f..%.1f] norm=%d whole=%d asrc=%s amin=%.3f amax=%.3f prog=%d csrc=%s col=[%.3f %.3f %.3f %.3f] coff=[%.3f %.3f %.3f %.3f]\n",
                     (unsigned long long)g_drawFrame, o.currentTarget, texId, tw, th, vertexCount,
                     uMin, uMax, vMin, vMax, xMin, xMax, yMin, yMax,
-                    pixelUv ? 1 : 0, spansWhole ? 1 : 0, vertexAlpha ? "arr" : "const", aMin, aMax, vkProg);
+                    pixelUv ? 1 : 0, spansWhole ? 1 : 0, vertexAlpha ? "arr" : "const", aMin, aMax, vkProg,
+                    vertexMult ? "arr" : "const",
+                    cm[0], cm[1], cm[2], cm[3], cf[0], cf[1], cf[2], cf[3]);
             s_logged++;
         }
         // 按 program 只计数不逐条打：主菜单段的 prog 分布靠这里，不受 6000 条上限影响
@@ -1823,8 +1829,12 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
             if (u > 1.001f || u < -1.001f) u = tw > 0 ? u / tw : 1.0f;
             if (v > 1.001f || v < -1.001f) v = th > 0 ? v / th : 1.0f;
         }
+        // 每顶点颜色调制：loc6/loc7 的真实数据（来自 GL 的 loc6/loc7 顶点数组），
+        // 没有逐顶点数组时退回 SetDrawColor 的常量
+        const float* m = vertexMult ? (vertexMult + (size_t)i * 4) : g_drawMult;
+        const float* f = vertexOff ? (vertexOff + (size_t)i * 4) : g_drawOff;
         PushLimeVertex(*vertsPtr, px, py, u, v,
-                       vertexAlpha ? vertexAlpha[i] : g_drawAlpha, g_drawMult, g_drawOff);
+                       vertexAlpha ? vertexAlpha[i] : g_drawAlpha, m, f);
     }
 }
 
@@ -3665,6 +3675,17 @@ void VkRenderer::EndFrame() {
         o.uboPtr[12] = -1.0f;
         o.uboPtr[13] = -1.0f;
         o.uboPtr[15] = 1.0f;
+        // 颜色调制接线：std140 = mat4(0..63) / bool openfl_HasColorTransform(64)
+        // / vec2 openfl_TextureSize(72) / bool hasColorTransform(80) / bool hasTransform(84)。
+        // 打开 hasTransform+hasColorTransform 后片元才走 mult*color+offset；
+        // openfl_HasColorTransform 保持 0（loc2/loc3 未启用，真实数据走 loc6/loc7）。
+        // 顶点 mult/off 默认是 1/0，与改动前逐像素等价。
+        uint32_t* ub32 = (uint32_t*)o.uboPtr;
+        ub32[64 / 4] = 0;   // openfl_HasColorTransform = false
+        ub32[80 / 4] = 1;   // hasColorTransform = true
+        ub32[84 / 4] = 1;   // hasTransform = true
+        o.uboPtr[72 / 4] = (float)ext.width;
+        o.uboPtr[73 / 4] = (float)ext.height;
     }
 
     g_beginRP(o.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
