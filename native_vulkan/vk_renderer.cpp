@@ -96,6 +96,9 @@ struct RenderTarget {
     bool cleared = false;
     // 记录图像"真实"当前布局：创建=UNDEFINED，pass 结束=SRO，清除后=SRO。
     // 清除屏障的 oldLayout 必须按这个记录给，不能再写死（写死 SRO 对上 UNDEFINED 会崩 nvoglv64）。
+    // 批处理路径的"游戏要求清屏"：gl_vk_handle_clear 打标，EndFrame 改用 rpClear 并按此色清。
+    bool clearPending = false;
+    float pcR = 0, pcG = 0, pcB = 0, pcA = 0;
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
 };
 
@@ -1646,14 +1649,14 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
     }
     NoteSampled(texId);
     if (vertexCount <= 0) return;
-    // 后缓冲合成笔的 alpha（第十四轮采纳默认 0.77）：标题页一个视觉帧分两笔铺后缓冲，
-    // 批处理按纹理 id 排序 → 1001 先、1002 后，而两层 alpha 都是 255（同帧 RT 转储实测），
-    // 直接叠加只能二选一。原版形态 ≈ 0.70×1002 + 0.23×1001，等价于把后画的 1002 降到半透明。
-    // 只在"叠在已有层之上"（bbLoad=1）时生效，单层场景不受影响；VK_COMP_ALPHA=1 可关闭。
+    // 后缓冲合成笔的 alpha（第十四轮）：标题页一个视觉帧分两笔铺后缓冲，
+    // 批处理按纹理 id 排序 → 1001 先、1002 后。离屏画布现在按 GL 语义清成 (0,0,0,0)，
+    // 两层都带像素 alpha，正常混合即可，默认 1.0（不再需要均一降 alpha 的折中）。
+    // 保留 VK_COMP_ALPHA 作为调试旋钮：设 <1 时该笔按固定 alpha 叠。
     static float s_compAlpha = -1.0f;
     if (s_compAlpha < 0.0f) {
         const char* v = getenv("VK_COMP_ALPHA");
-        s_compAlpha = (v && v[0]) ? (float)atof(v) : 0.77f;
+        s_compAlpha = (v && v[0]) ? (float)atof(v) : 1.0f;
     }
     static std::vector<float> s_alphaBuf;
     if (s_compAlpha < 1.0f && o.currentTarget == 0 && o.bbLoad && texId == 1002) {
@@ -2124,6 +2127,20 @@ void VkRenderer::PresentTarget() {
 
 void VkRenderer::RequestPresent() {
     impl->presentReq = true;
+}
+
+// 批处理路径的离屏清屏：gl_vk_handle_clear 真的执行过 glClear 时打标，
+// EndFrame 里改用 loadOp=CLEAR 的 pass 并按这个颜色清（apitrace 实测原版每帧清 (0,0,0,0)）。
+void VkRenderer::RequestClear(uint32_t id, float r, float g, float b, float a) {
+    Impl& o = *impl;
+    if (id < 1000) return;
+    uint32_t ti = id - 1000;
+    if (ti >= o.targets.size() || !o.targets[ti].used) return;
+    o.targets[ti].clearPending = true;
+    o.targets[ti].pcR = r;
+    o.targets[ti].pcG = g;
+    o.targets[ti].pcB = b;
+    o.targets[ti].pcA = a;
 }
 
 // ---------------------------------------------------------------- packet 执行路径
@@ -3638,21 +3655,29 @@ void VkRenderer::EndFrame() {
         }
     }
     bool clearZero = false;
+    bool clearPendingUse = false;
     if (o.currentTarget >= 1000) {
         uint32_t ti = o.currentTarget - 1000;
         if (ti < o.targets.size() && o.targets[ti].used) {
-            // 预览开关 offscreen_loadop=clear：每个离屏 pass 都走 CLEAR 版 pass/fb，
-            // 清成 (0,0,0,0)，让自反馈链每帧从干净状态开始（默认 load = 现状）
-            if (vktuning::Get().offscreenLoadop == vktuning::LOADOP_CLEAR
-                && o.targets[ti].rpClear && o.targets[ti].fbClear) {
-                fb = o.targets[ti].fbClear;
-                rp = o.targets[ti].rpClear;
+            RenderTarget& rt = o.targets[ti];
+            if (rt.clearPending && rt.rpClear && rt.fbClear) {
+                // 游戏这一帧对这个目标发过 glClear（apitrace 实测：原版每帧都清 (0,0,0,0)）：
+                // 走 CLEAR pass，清屏色用它给的 rgba，清完再画，等价于 GL 的整幅替换。
+                fb = rt.fbClear;
+                rp = rt.rpClear;
+                clearPendingUse = true;
+            } else if (vktuning::Get().offscreenLoadop == vktuning::LOADOP_CLEAR
+                && rt.rpClear && rt.fbClear) {
+                // 预览开关 offscreen_loadop=clear：每个离屏 pass 都走 CLEAR 版 pass/fb，
+                // 清成 (0,0,0,0)，让自反馈链每帧从干净状态开始（默认 load = 现状）
+                fb = rt.fbClear;
+                rp = rt.rpClear;
                 clearZero = true;
             } else {
-                fb = o.targets[ti].fb;
-                rp = o.targets[ti].rp;
+                fb = rt.fb;
+                rp = rt.rp;
             }
-            ext = {(uint32_t)o.targets[ti].w, (uint32_t)o.targets[ti].h};
+            ext = {(uint32_t)rt.w, (uint32_t)rt.h};
         }
     }
 
@@ -3672,6 +3697,18 @@ void VkRenderer::EndFrame() {
         cv.color.float32[1] = 0.0f;
         cv.color.float32[2] = 0.0f;
         cv.color.float32[3] = 0.0f;
+    } else if (clearPendingUse) {
+        uint32_t ti = o.currentTarget - 1000;
+        cv.color.float32[0] = o.targets[ti].pcR;
+        cv.color.float32[1] = o.targets[ti].pcG;
+        cv.color.float32[2] = o.targets[ti].pcB;
+        cv.color.float32[3] = o.targets[ti].pcA;
+        o.targets[ti].clearPending = false;
+        o.targets[ti].cleared = true;
+        o.targets[ti].clearedFrame = g_drawFrame;
+        fprintf(stderr, "[vk] offscreen clear tgt=%u rgba=(%.2f,%.2f,%.2f,%.2f) f=%llu\n",
+                o.currentTarget, o.targets[ti].pcR, o.targets[ti].pcG,
+                o.targets[ti].pcB, o.targets[ti].pcA, (unsigned long long)g_drawFrame);
     } else {
         cv.color.float32[0] = o.clearR;
         cv.color.float32[1] = o.clearG;

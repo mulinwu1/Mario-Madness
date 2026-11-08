@@ -767,6 +767,9 @@ bool gl_vk_handle_clear () {
     if (g_currentTarget != 0) {
         // 离屏目标：帧已打开，这里只更新清屏色（不会重新 Acquire 交换链）
         r->BindRenderTarget (g_currentTarget, c[0], c[1], c[2], c[3]);
+        // 批处理路径必须显式打标，否则这条 glClear 会被当成普通绑定丢掉
+        // （apitrace 实测原版标题页 1436 次 glClearColor(0,0,0,0) + glClear，全靠它才有像素 alpha）
+        r->RequestClear (g_currentTarget, c[0], c[1], c[2], c[3]);
         return true;
     }
     if (!g_backbufferOpen) {

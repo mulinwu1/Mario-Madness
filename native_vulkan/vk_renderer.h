@@ -147,6 +147,8 @@ public:
     void PresentTarget();
     // 标记"下一个后缓冲提交是真实 flip"：只在真正的 swap 路径调用
     void RequestPresent();
+    // 批处理路径：游戏对本目标发过 glClear（颜色 rgba）。EndFrame 时改用 CLEAR pass 清屏。
+    void RequestClear(uint32_t id, float r, float g, float b, float a);
 
     // ---- packet 执行路径（只给 VK_PKT_EXEC=1 用；与批处理路径互斥）----
     // 进目标：开 render pass、绑 framebuffer、按当前 viewport/scissor 下发。
