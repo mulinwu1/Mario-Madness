@@ -3677,11 +3677,11 @@ void VkRenderer::EndFrame() {
         o.uboPtr[15] = 1.0f;
         // 颜色调制接线：std140 = mat4(0..63) / bool openfl_HasColorTransform(64)
         // / vec2 openfl_TextureSize(72) / bool hasColorTransform(80) / bool hasTransform(84)。
-        // 打开 hasTransform+hasColorTransform 后片元才走 mult*color+offset；
-        // openfl_HasColorTransform 保持 0（loc2/loc3 未启用，真实数据走 loc6/loc7）。
-        // 顶点 mult/off 默认是 1/0，与改动前逐像素等价。
+        // openfl_HasColorTransform 现在打开：顶点着色器只有在它为 true 时才把
+        // loc6/loc7（逐顶点 mult/off）写进 varying，之前保持 0 导致顶点色白接了。
+        // 无数组的笔在 BuildVertexColor 里已回退成 identity(1/0)，不会乘黑。
         uint32_t* ub32 = (uint32_t*)o.uboPtr;
-        ub32[64 / 4] = 0;   // openfl_HasColorTransform = false
+        ub32[64 / 4] = 1;   // openfl_HasColorTransform = true
         ub32[80 / 4] = 1;   // hasColorTransform = true
         ub32[84 / 4] = 1;   // hasTransform = true
         o.uboPtr[72 / 4] = (float)ext.width;

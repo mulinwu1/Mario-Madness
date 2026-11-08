@@ -509,6 +509,18 @@ static void BuildVertexColor(int count, int baseVertex, const unsigned int* indi
     bool ok6 = ResolveAttrSource(g_attrs[6], &p6, &base6, &b6, &s6);
     bool ok7 = ResolveAttrSource(g_attrs[7], &p7, &base7, &b7, &s7);
     *usedArray = (ok6 || ok7);
+    // 没走数组时，GL 的常量属性默认态是 (0,0,0,1)/(0,0,0,0)——它表示"这个 program 不读这条属性"。
+    // VK 侧现在统一走 colorTransform 分支，必须把这种默认态当 identity，否则那批 const 笔会被乘成全黑。
+    if (!ok6) {
+        bool zero = (!g_attrConstSet[6]) ||
+                    (g_attrConst[6][0] == 0.0f && g_attrConst[6][1] == 0.0f && g_attrConst[6][2] == 0.0f);
+        if (zero) for (size_t i = 0; i < mult.size(); i++) mult[i] = 1.0f;
+    }
+    if (!ok7) {
+        bool zero = (!g_attrConstSet[7]) ||
+                    (g_attrConst[7][0] == 0.0f && g_attrConst[7][1] == 0.0f && g_attrConst[7][2] == 0.0f);
+        if (zero) for (size_t i = 0; i < off.size(); i++) off[i] = 0.0f;
+    }
     for (int i = 0; i < count; i++) {
         unsigned vi = indices ? indices[i] : (unsigned)(baseVertex + i);
         if (ok6) {
