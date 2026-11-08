@@ -2558,7 +2558,10 @@ static void ClearOffscreenImage (VkCommandBuffer cmd, VkImage img, VkImageLayout
     VkClearColorValue cc{};
     cc.float32[0] = r; cc.float32[1] = g; cc.float32[2] = b; cc.float32[3] = a;
     VkImageSubresourceRange rng{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    // 崩点定位用：fprintf 是同步的，若 nvoglv64 在这条调用里 AV，日志只会停在 pre 这行。
+    fprintf(stderr, "[imgcmd] clear pre img=%p layout=%d\n", (void*)img, (int)bar.oldLayout);
     g_cmdClearColorImage(cmd, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &cc, 1, &rng);
+    fprintf(stderr, "[imgcmd] clear post\n");
 
     VkImageMemoryBarrier back = bar;
     back.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -2593,22 +2596,25 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
     // 只有"明确的 clear 包 + 离屏目标 + 开关未关"才真的清；普通绑定保持 LOAD 语义
     bool wantImageClear = colorClear && id >= 1000 && tv0.offscreenClear == vktuning::CLEAR_IMAGE;
     bool wantLoadClear = colorClear && id >= 1000 && tv0.offscreenClear == vktuning::CLEAR_LOADOP;
+    // 诊断路径：vkCmdClearColorImage（nvoglv64 上 0xc0000005，正式跑不用，仅 imgcmd 模式可达）
+    bool wantImgCmdClear = colorClear && id >= 1000 && tv0.offscreenClear == vktuning::CLEAR_IMGCMD;
     // 同目标重绑时的"真清除"：OpenFL 每次 glClear 都会再 Bind，之前这类 clear 全被丢弃，
     // 画布永远不清。独立开关，不依赖 offscreen_clear（避开 image 那条路径的崩溃绑定）。
     bool wantRebindClear = (clearMask & 1) && id >= 1000
                            && tv0.offscreenRebindClear == vktuning::ON;
+    // 要清就走"loadOp=CLEAR 的整幅 pass"（不碰 vkCmdClearColorImage）：同一 pass 内先清后画，
+    // 颜色取包里 rgb，等价于整幅替换，且不依赖任何图像布局记录。
+    bool wantPassClear = wantImageClear || wantLoadClear || wantRebindClear;
 
     // 同一目标重复绑定（同上）
     if (o.pktOpen && o.pktTarget == id) {
         o.clearR = r; o.clearG = g; o.clearB = b; o.clearA = a;
-        if (!wantImageClear && !wantLoadClear && !wantRebindClear) {
+        if (!wantPassClear && !wantImgCmdClear) {
             TraceClearLog(id, r, g, b, a, 0, "same_target_rebind", clearMask);
             return true;
         }
         // glClear 是整幅生效：先收尾当前 pass（旧内容本就要丢弃），再按 clear 语义重开
         PktEndTarget();
-        // 重绑清除走 image 路径（整幅替换）；loadop 模式已经由 rpClear 的 loadOp 负责
-        if (wantRebindClear && !wantLoadClear) wantImageClear = true;
     } else if (o.pktOpen) {
         PktEndTarget();
     }
@@ -2625,7 +2631,7 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
     if (id >= 1000) {
         ti = id - 1000;
         if (ti >= o.targets.size() || !o.targets[ti].used) return false;
-        if (wantLoadClear && o.targets[ti].rpClear && o.targets[ti].fbClear) {
+        if (wantPassClear && o.targets[ti].rpClear && o.targets[ti].fbClear) {
             fb = o.targets[ti].fbClear;
             rp = o.targets[ti].rpClear;
             usedClearPass = true;
@@ -2677,8 +2683,8 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
         o.uboPtr[15] = 1.0f;
     }
 
-    // image 路径：在 pass 之外把整幅目标清成 clear 包的颜色（layout 往返见 ClearOffscreenImage）
-    if (wantImageClear && !usedClearPass) {
+    // 诊断路径（imgcmd）：在 pass 之外把整幅目标清成 clear 包的颜色（layout 往返见 ClearOffscreenImage）
+    if (wantImgCmdClear && !usedClearPass) {
         ClearOffscreenImage(o.cmd, o.targets[ti].image, o.targets[ti].layout, r, g, b, a);
     }
 
@@ -2700,12 +2706,13 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
     } else if (usedClearPass) {
         o.targets[ti].cleared = true;
         o.targets[ti].clearedFrame = g_drawFrame;
-        TraceClearLog(id, r, g, b, a, 1, "clear_loadop", clearMask);
-    } else if (wantImageClear) {
+        const char* why = wantRebindClear ? "rebind_clear"
+                        : (wantLoadClear ? "clear_loadop" : "clear_image");
+        TraceClearLog(id, r, g, b, a, 1, why, clearMask);
+    } else if (wantImgCmdClear) {
         o.targets[ti].cleared = true;
         o.targets[ti].clearedFrame = g_drawFrame;
-        TraceClearLog(id, r, g, b, a, 1,
-                      wantRebindClear ? "rebind_clear" : "clear_image", clearMask);
+        TraceClearLog(id, r, g, b, a, 1, "clear_imagecmd", clearMask);
     } else {
         // 普通绑定（不是 clear 包）或 offscreen_clear=off：LOAD pass 保留上一 pass 内容
         TraceClearLog(id, r, g, b, a, 0, "rp_load_ignores_clear", clearMask);
@@ -3021,7 +3028,7 @@ uint32_t VkRenderer::CreateRenderTarget(int w, int h) {
     auto createFB2 = (PFN_vkCreateFramebuffer)g_gipa(o.inst, "vkCreateFramebuffer");
     createFB2(o.dev, &fci, nullptr, &t.fb);
 
-    // 第二套 pass/fb：loadOp=CLEAR（只有 offscreen_clear=loadop 才用；默认 image 路径不碰）
+    // 第二套 pass/fb：loadOp=CLEAR（所有"要清"的场景都用它：image/loadop/rebind_clear）
     {
         VkAttachmentDescription attClear = att;
         attClear.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;

@@ -22,10 +22,11 @@ enum { KEEP = -1, OFF = 0, ON = 1 };
 // viewport / scissor 策略：0 = 按记录逐笔（默认），1 = 按 target 全幅
 enum { POLICY_RECORDED = 0, POLICY_FULL_TARGET = 1 };
 // 离屏目标（id>=1000）的 clear 路径：
-//   image  = 在 render pass 外做 vkCmdClearColorImage（默认；只在收到 clear 包时执行）
-//   loadop = 用 loadOp=CLEAR 的第二个 render pass 建 pass
+//   image  = 用 loadOp=CLEAR 的第二个 render pass 整幅清（收到 clear 包时执行）
+//   loadop = 同上（历史名保留，A/B 时与 image 等价）
 //   off    = 保持旧行为（LOAD pass 忽略 clear）
-enum { CLEAR_IMAGE = 0, CLEAR_LOADOP = 1, CLEAR_OFF = 2 };
+//   imgcmd = vkCmdClearColorImage 路径（仅诊断用：nvoglv64 上会 0xc0000005，勿在正式跑用）
+enum { CLEAR_IMAGE = 0, CLEAR_LOADOP = 1, CLEAR_OFF = 2, CLEAR_IMGCMD = 3 };
 
 struct SizeRule {
     int maxDim;   // 适用上限：max(w,h) <= maxDim 时命中（mode 的含义与上面两套枚举一致）

@@ -88,6 +88,7 @@ static int ParseOffscreenClear (const char* v) {
     if (!strcmp (v, "image")) return CLEAR_IMAGE;
     if (!strcmp (v, "loadop")) return CLEAR_LOADOP;
     if (!strcmp (v, "off") || !strcmp (v, "none")) return CLEAR_OFF;
+    if (!strcmp (v, "imgcmd")) return CLEAR_IMGCMD;
     return -1;
 }
 
@@ -292,7 +293,10 @@ static const char* PolicyName (int m) {
 }
 
 static const char* OffscreenClearName (int m) {
-    return m == CLEAR_LOADOP ? "loadop" : (m == CLEAR_OFF ? "off" : "image");
+    if (m == CLEAR_LOADOP) return "loadop";
+    if (m == CLEAR_OFF) return "off";
+    if (m == CLEAR_IMGCMD) return "imgcmd";
+    return "image";
 }
 
 static const char* TriName (int m) {
