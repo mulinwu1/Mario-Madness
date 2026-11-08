@@ -33,6 +33,8 @@ static void SetDefaults () {
     g_v.scissorPolicy = POLICY_RECORDED;
     // image 路径会让 nvoglv64.dll 崩溃（0xc0000005），先默认 off；屏障修好后验证不崩再切回 image
     g_v.offscreenClear = CLEAR_OFF;
+    // 同目标重绑的"真清除"默认打开：这是修复画布永不清的病灶路径，且不依赖 offscreen_clear
+    g_v.offscreenRebindClear = ON;
     g_v.mipGenerate = 0;
 }
 
@@ -203,6 +205,10 @@ static void Apply (char* key, char* val) {
     } else if (!strcmp (key, "offscreen_clear")) {
         int m = ParseOffscreenClear (val);
         if (m < 0) AddBad (key, val); else g_v.offscreenClear = m;
+    } else if (!strcmp (key, "offscreen_rebind_clear")) {
+        int m = ParseOnOff (val);
+        if (m == -2 || m == KEEP) AddBad (key, val);
+        else g_v.offscreenRebindClear = (m == ON) ? ON : OFF;
     } else {
         // 未知键不报错（允许留着其他分支的调参），但记进 [vk] tuning 的 unknown=
         AddBad (key, val);
@@ -322,7 +328,7 @@ void LogEffective () {
     fprintf (stderr,
              "[vk] tuning src=%s texture.filter=%s texture.filter.by_size=%s texture.filter.by_glname=%s "
              "texture.wrap=%s texture.wrap.by_size=%s blend=%s depth.test=%s depth.write=%s stencil.test=%s "
-             "viewport=%s scissor=%s offscreen_clear=%s mip=%s unknown=%s\n",
+             "viewport=%s scissor=%s offscreen_clear=%s offscreen_rebind_clear=%s mip=%s unknown=%s\n",
              g_src,
              FilterName (v.filterDefault), sizeRules[0] ? sizeRules : "-", names[0] ? names : "-",
              WrapName (v.wrapDefault), wrapRules[0] ? wrapRules : "-",
@@ -330,6 +336,7 @@ void LogEffective () {
              TriName (v.depthTest), TriName (v.depthWrite), TriName (v.stencilTest),
              PolicyName (v.viewportPolicy), PolicyName (v.scissorPolicy),
              OffscreenClearName (v.offscreenClear),
+             v.offscreenRebindClear == ON ? "on" : "off",
              v.mipGenerate ? "on" : "off",
              g_bad[0] ? g_bad : "-");
 }

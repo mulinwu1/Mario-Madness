@@ -610,6 +610,7 @@ struct TraceInfo {
     float x0 = 0, x1 = 0, y0 = 0, y1 = 0;
     int asrc = 0;                             // 0=const 1=arr
     float amin = 1.0f, amax = 1.0f;
+    int vkId = -1;                            // 采样源的 Vk 图像 id（<1000 贴图 / >=1000 画布）
 };
 
 // 不占 draw 行预算的判定：canvas3x 这种"附加对账行"专用（仍然受帧号列表约束）。
@@ -675,7 +676,7 @@ static void TracePrint (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& rec
             "pos=[%.1f..%.1f, %.1f..%.1f] norm=%d whole=%d "
             "asrc=%s amin=%.3f amax=%.3f blend=%d(%u,%u) "
             "vp=%d,%d,%d,%d,%d sc=%d,%d,%d,%d,%d sc_src=%s "
-            "depth=%d depthcmp=0x%x dwrite=%d px=no_readback verdict=%s\n",
+            "depth=%d depthcmp=0x%x dwrite=%d px=no_readback verdict=%s img=%d\n",
             (unsigned)g_rt.frameGen, (unsigned)w.program, (unsigned)w.seq, (int)w.count,
             ti.texName, ti.tw, ti.th,
             ti.u0, ti.u1, ti.v0, ti.v1,
@@ -689,7 +690,7 @@ static void TracePrint (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& rec
             (int)d.scissor.valid, (int)d.scissor.x, (int)d.scissor.y,
             (int)d.scissor.w, (int)d.scissor.h,
             scSrc, (int)d.state.depthTest, (unsigned)rec.depthFunc, (int)d.state.depthWrite,
-            verdict);
+            verdict, ti.vkId);
 }
 
 static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& rec, uint32_t rtId) {
@@ -961,6 +962,7 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
     ti.x0 = xMin; ti.x1 = xMax; ti.y0 = yMin; ti.y1 = yMax;
     ti.asrc = (alphaIdx >= 0) ? 1 : 0;
     ti.amin = aMin; ti.amax = aMax;
+    ti.vkId = (int)vkTex;
 
     // 兜底：正常流程里 pass 在 BindRenderTarget 时就开了；这里按 packet 里的目标
     // 再对齐一次（同目标幂等不重清，换目标会先把上一笔 pass 收尾再开新的）。

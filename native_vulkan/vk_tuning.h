@@ -54,6 +54,8 @@ struct Values {
     int scissorPolicy;
 
     int offscreenClear;   // CLEAR_IMAGE / CLEAR_LOADOP / CLEAR_OFF
+    // 同目标重绑时收到带颜色位的 clear，是否真的执行（0=保持旧行为跳过，1=执行，默认 1）
+    int offscreenRebindClear;   // ON / OFF
 
     int mipGenerate;   // 预留：纹理只分配 1 级 mip，打开不会凭空生成 level
 };

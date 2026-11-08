@@ -93,6 +93,9 @@ struct RenderTarget {
     // 取证用：最近一次"clear 真的执行"的帧号 + 独立有效标志（别拿 0 当哨兵）
     uint64_t clearedFrame = 0;
     bool cleared = false;
+    // 记录图像"真实"当前布局：创建=UNDEFINED，pass 结束=SRO，清除后=SRO。
+    // 清除屏障的 oldLayout 必须按这个记录给，不能再写死（写死 SRO 对上 UNDEFINED 会崩 nvoglv64）。
+    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
 };
 
 // 取证用：当前挂着但未提交的顶点总数（顶点 = 15 floats）
@@ -193,9 +196,8 @@ struct VkRenderer::Impl {
     uint32_t currentTarget = 0;
     // 最后一次真正收到顶点并提交的离屏目标（present 选源用）
     uint32_t lastGeomTarget = 0;
-    // 取证转储：本帧被采样过的纹理/目标 id（去重），按 gl_packet 的 frameGen 分桶
+    // 取证转储：整帧（从开跑到目标帧收尾）被采样过的纹理/目标 id（去重，只增不清）
     std::vector<uint32_t> sampled;
-    uint64_t sampleGen = ~0ull;
     bool dumpDone = false;
     uint32_t frameImageIndex = 0;
     bool frameOpen = false;
@@ -2527,26 +2529,30 @@ static bool TraceClearWant () {
 }
 
 // 离屏目标 clear（image 路径）：在 render pass 之外整幅清色。
-// 为什么不会破坏"保留语义"：只有收到明确的 clear 包（colorClear=true）才调用；
-// 普通绑定/同目标复用仍走 LOAD pass，上一 pass 的内容照旧保留。
-// 清屏本身要丢弃旧内容，但旧布局必须按"真实状态"写：离屏目标创建时
-// initialLayout、每个 pass 的 finalLayout 都是 SHADER_READ_ONLY_OPTIMAL。
-// 用 UNDEFINED 等于告诉驱动"内容可丢"，驱动会整图 discard/重整，
-// 实测 image 态会直接 0xc0000005（nvoglv64.dll）。所以旧布局用
-// SHADER_READ_ONLY_OPTIMAL + SHADER_READ，而不是 UNDEFINED。
-static void ClearOffscreenImage (VkCommandBuffer cmd, VkImage img,
+// 为什么不会破坏"保留语义"：只有收到明确的 clear 包（colorClear=true）或
+// offscreen_rebind_clear 打开的"同目标重绑 clear"才调用；普通绑定仍走 LOAD pass。
+// 旧布局必须按记录的真实状态给（见 RenderTarget::layout）：创建时是 UNDEFINED
+// （srcAccess=0 / TOP_OF_PIPE），pass 结束后是 SHADER_READ_ONLY_OPTIMAL
+// （srcAccess=SHADER_READ / FRAGMENT_SHADER）。以前写死 SRO，第一次 clear 撞上
+// UNDEFINED 会直接 0xc0000005（nvoglv64.dll）。
+static void ClearOffscreenImage (VkCommandBuffer cmd, VkImage img, VkImageLayout& layout,
                                  float r, float g, float b, float a) {
     if (!g_cmdBarrier || !g_cmdClearColorImage || !img) return;
+    // oldLayout 按记录的真实布局给：UNDEFINED 时 srcAccess=0 + TOP_OF_PIPE（驱动不读旧内容）；
+    // 其余（正常是 SHADER_READ_ONLY_OPTIMAL）按 shader read 过渡。写死任何一种都会崩 nvoglv64。
+    bool fromUndefined = (layout == VK_IMAGE_LAYOUT_UNDEFINED);
     VkImageMemoryBarrier bar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    bar.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    bar.oldLayout = layout;
     bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bar.image = img;
     bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    bar.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    bar.srcAccessMask = fromUndefined ? 0 : VK_ACCESS_SHADER_READ_BIT;
     bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    g_cmdBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    g_cmdBarrier(cmd,
+                 fromUndefined ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                  0, 1, nullptr, 0, nullptr, 1, &bar);
 
     VkClearColorValue cc{};
@@ -2561,6 +2567,7 @@ static void ClearOffscreenImage (VkCommandBuffer cmd, VkImage img,
     back.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     g_cmdBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
                  0, 1, nullptr, 0, nullptr, 1, &back);
+    layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;   // 清完回到可采样布局
 }
 
 static void TraceClearLog (uint32_t id, float r, float g, float b, float a,
@@ -2586,16 +2593,22 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
     // 只有"明确的 clear 包 + 离屏目标 + 开关未关"才真的清；普通绑定保持 LOAD 语义
     bool wantImageClear = colorClear && id >= 1000 && tv0.offscreenClear == vktuning::CLEAR_IMAGE;
     bool wantLoadClear = colorClear && id >= 1000 && tv0.offscreenClear == vktuning::CLEAR_LOADOP;
+    // 同目标重绑时的"真清除"：OpenFL 每次 glClear 都会再 Bind，之前这类 clear 全被丢弃，
+    // 画布永远不清。独立开关，不依赖 offscreen_clear（避开 image 那条路径的崩溃绑定）。
+    bool wantRebindClear = (clearMask & 1) && id >= 1000
+                           && tv0.offscreenRebindClear == vktuning::ON;
 
-    // 同一目标重复绑定（OpenFL 每次 glClear 都会再 Bind）：普通情况只更新清屏色
+    // 同一目标重复绑定（同上）
     if (o.pktOpen && o.pktTarget == id) {
         o.clearR = r; o.clearG = g; o.clearB = b; o.clearA = a;
-        if (!wantImageClear && !wantLoadClear) {
+        if (!wantImageClear && !wantLoadClear && !wantRebindClear) {
             TraceClearLog(id, r, g, b, a, 0, "same_target_rebind", clearMask);
             return true;
         }
         // glClear 是整幅生效：先收尾当前 pass（旧内容本就要丢弃），再按 clear 语义重开
         PktEndTarget();
+        // 重绑清除走 image 路径（整幅替换）；loadop 模式已经由 rpClear 的 loadOp 负责
+        if (wantRebindClear && !wantLoadClear) wantImageClear = true;
     } else if (o.pktOpen) {
         PktEndTarget();
     }
@@ -2666,7 +2679,7 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
 
     // image 路径：在 pass 之外把整幅目标清成 clear 包的颜色（layout 往返见 ClearOffscreenImage）
     if (wantImageClear && !usedClearPass) {
-        ClearOffscreenImage(o.cmd, o.targets[ti].image, r, g, b, a);
+        ClearOffscreenImage(o.cmd, o.targets[ti].image, o.targets[ti].layout, r, g, b, a);
     }
 
     VkClearValue cv{};
@@ -2691,7 +2704,8 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
     } else if (wantImageClear) {
         o.targets[ti].cleared = true;
         o.targets[ti].clearedFrame = g_drawFrame;
-        TraceClearLog(id, r, g, b, a, 1, "clear_image", clearMask);
+        TraceClearLog(id, r, g, b, a, 1,
+                      wantRebindClear ? "rebind_clear" : "clear_image", clearMask);
     } else {
         // 普通绑定（不是 clear 包）或 offscreen_clear=off：LOAD pass 保留上一 pass 内容
         TraceClearLog(id, r, g, b, a, 0, "rp_load_ignores_clear", clearMask);
@@ -2844,6 +2858,12 @@ void VkRenderer::PktEndTarget() {
     uint64_t draws = o.pktDraws;
     g_endRP(o.cmd);
     g_endCB(o.cmd);
+    // pass 的 finalLayout 固定是 SRO；结束后图像的"真实布局"就是 SRO（给清除屏障用）
+    if (t >= 1000) {
+        uint32_t ti = t - 1000;
+        if (ti < o.targets.size() && o.targets[ti].used)
+            o.targets[ti].layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
     si.pCommandBuffers = &o.cmd;
@@ -2870,8 +2890,9 @@ void VkRenderer::PktEndTarget() {
     fprintf(stderr, "[pkt] end target=%u draws=%llu present=%d img=%u\n",
             t, (unsigned long long)draws, present ? 1 : 0, o.frameImageIndex);
     o.pktOpen = false;
-    // 取证转储：一帧的最后一笔是后缓冲 pass（t==0）时，GPU 已 idle，正好读回本帧采样过的纹理
-    if (t == 0) MaybeDumpTextures((uint64_t)lime::pkt::SnapshotFrameGen());
+    // 取证转储：只在"真正 present 的那一笔"（帧末）读回，避免在一帧中间的 t==0 提前转、
+    // 把后续采样（id<1000 的源贴图）漏掉。present=1 时 GPU 已 idle，正好读回。
+    if (present) MaybeDumpTextures((uint64_t)lime::pkt::SnapshotFrameGen());
 }
 
 bool VkRenderer::PktComposite(uint32_t srcTargetId) {
@@ -3091,6 +3112,8 @@ struct TexDumpCfg {
     std::string dir;
     uint64_t frame = 0;  // VK_DUMP_FRAME
     bool frameSet = false;  // false = 第一有机会的帧就转
+    std::vector<uint32_t> ids;  // VK_DUMP_IDS=5,6,7,13（显式清单，绕过自动判定）
+    bool idsSet = false;
 };
 
 static TexDumpCfg& TexDumpConfig () {
@@ -3107,6 +3130,20 @@ static TexDumpCfg& TexDumpConfig () {
                 c.frame = (uint64_t)strtoull(f, nullptr, 10);
                 c.frameSet = true;
             }
+            const char* s = getenv("VK_DUMP_IDS");
+            if (s && s[0]) {
+                c.idsSet = true;
+                const char* p = s;
+                while (*p) {
+                    while (*p && (*p == ',' || *p == ' ' || *p == '\t')) p++;
+                    if (!*p) break;
+                    char* e = nullptr;
+                    unsigned long v = strtoul(p, &e, 10);
+                    if (e == p) break;
+                    if (v > 0) c.ids.push_back((uint32_t)v);
+                    p = e;
+                }
+            }
         }
     }
     return c;
@@ -3115,15 +3152,10 @@ static TexDumpCfg& TexDumpConfig () {
 void VkRenderer::NoteSampled(uint32_t texId) {
     if (!TexDumpConfig().on || texId == 0) return;
     Impl& o = *impl;
-    // 帧号口径与 trace 的 f= 一致：packet 模式用 gl_packet 的 frameGen，批处理用 g_drawFrame
-    uint64_t gen = lime::pkt::ExecActive() ? (uint64_t)lime::pkt::SnapshotFrameGen()
-                                           : (uint64_t)g_drawFrame;
-    if (gen != o.sampleGen) {
-        o.sampled.clear();
-        o.sampleGen = gen;
-    }
+    // 只增不清：一帧里所有被采样过的纹理/目标都保留（id 去重）。
+    // 之前按 frameGen 分桶清空，导致一帧 6 张只抓到最后一个 epoch 的 2 张。
     for (size_t i = 0; i < o.sampled.size(); i++) {
-        if (o.sampled[i] == texId) return;   // 同一张纹理按 id 去重
+        if (o.sampled[i] == texId) return;
     }
     o.sampled.push_back(texId);
 }
@@ -3132,16 +3164,20 @@ bool VkRenderer::MaybeDumpTextures(uint64_t frameHint) {
     TexDumpCfg& cfg = TexDumpConfig();
     if (!cfg.on) return false;
     Impl& o = *impl;
-    if (o.dumpDone || o.sampled.empty()) return false;
-    // 命中：显式指定的帧号。优先看 sampleGen（采样发生在哪一帧，批处理路径的 g_drawFrame
-    // 是在 EndFrame 收尾时才自增的，直接用 frameHint 会差一帧）
-    if (cfg.frameSet) {
-        bool hit = ((uint64_t)o.sampleGen == cfg.frame) || (frameHint == cfg.frame);
-        if (!hit && lime::pkt::ExecActive())
-            hit = ((uint64_t)lime::pkt::SnapshotFrameGen() == cfg.frame);
-        if (!hit) return false;   // 没命中就等下一帧，dumpDone 不置位
-    }
+    if (o.dumpDone) return false;
+    // 命中口径：给 VK_DUMP_FRAME 就等"当前帧 >= 目标帧"的第一次收尾；只给 VK_DUMP_IDS
+    // 就在第一次收尾直接转；都没给就第一帧收尾转。不再要求 sampleGen/frameHint 同时相等
+    // （旧口径会让 f300/f420/f480 整帧漏掉）。宁可空采一次，也不跳过目标帧。
+    if (cfg.frameSet && frameHint < cfg.frame) return false;
     o.dumpDone = true;
+
+    // 转储清单：显式 ids 优先，否则用累积的 sampled（只增不清，整帧所有采样都保留）
+    std::vector<uint32_t> ids;
+    if (cfg.idsSet) ids = cfg.ids;
+    else ids = o.sampled;
+    if (ids.empty())
+        fprintf(stderr, "[dump] empty frame=%llu idset=%d dir=%s\n",
+                (unsigned long long)frameHint, cfg.idsSet ? 1 : 0, cfg.dir.c_str());
 
 #if defined(_WIN32)
     _mkdir(cfg.dir.c_str());
@@ -3157,8 +3193,8 @@ bool VkRenderer::MaybeDumpTextures(uint64_t frameHint) {
     uint32_t dumped = 0, skipped = 0;
     uint64_t dumpedBytes = 0;
 
-    for (size_t k = 0; k < o.sampled.size(); k++) {
-        uint32_t id = o.sampled[k];
+    for (size_t k = 0; k < ids.size(); k++) {
+        uint32_t id = ids[k];
         VkImage img = VK_NULL_HANDLE;
         int w = 0, h = 0;
         TexSlot* ts = nullptr;       // 贴图才有 CPU 创建时 mean 可对账
@@ -3179,7 +3215,7 @@ bool VkRenderer::MaybeDumpTextures(uint64_t frameHint) {
         int th = h > 4096 ? 4096 : h;
         bool trunc = (tw != w || th != h);
         size_t bytes = (size_t)tw * th * 4;
-        if (dumpedBytes + (uint64_t)bytes > (uint64_t)1024 * 1024 * 1024) {
+        if (dumpedBytes + (uint64_t)bytes > (uint64_t)2 * 1024 * 1024 * 1024) {
             fprintf(stderr, "[dump] skip id=%u bytes=%zu reason=budget used=%llu\n",
                     id, bytes, (unsigned long long)dumpedBytes);
             skipped++;
@@ -3322,9 +3358,9 @@ bool VkRenderer::MaybeDumpTextures(uint64_t frameHint) {
     }
 
     if (man) fclose(man);
-    fprintf(stderr, "[dump] done frame=%llu dumped=%u skipped=%u bytes=%llu dir=%s sampled=%zu\n",
+    fprintf(stderr, "[dump] done frame=%llu dumped=%u skipped=%u bytes=%llu dir=%s idset=%d n=%zu\n",
             (unsigned long long)frameHint, dumped, skipped, (unsigned long long)dumpedBytes,
-            cfg.dir.c_str(), o.sampled.size());
+            cfg.dir.c_str(), cfg.idsSet ? 1 : 0, ids.size());
     return dumped > 0;
 }
 
@@ -3783,8 +3819,10 @@ void VkRenderer::EndFrame() {
         }
     }
 
-    // 取证转储（批处理路径；packet 路径在 PktEndTarget 里触发）：提交+waitIdle 之后读回
-    MaybeDumpTextures(g_drawFrame);
+    // 取证转储（批处理路径；packet 路径在 PktEndTarget 里触发）：提交+waitIdle 之后读回。
+    // 帧号口径与 trace 的 f= 一致：packet 模式用 frameGen，批处理才用 g_drawFrame。
+    MaybeDumpTextures(lime::pkt::ExecActive() ? (uint64_t)lime::pkt::SnapshotFrameGen()
+                                              : (uint64_t)g_drawFrame);
 
     o.frameOpen = false;
     g_bbLastTex = 0;
