@@ -57,11 +57,24 @@ jobs:
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path C:\haxe | Out-Null
           New-Item -ItemType Directory -Force -Path C:\neko | Out-Null
+          function Get-Zip([string]$url, [string]$out) {
+            for ($i = 1; $i -le 5; $i++) {
+              try {
+                Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
+                return
+              } catch {
+                Write-Host "download attempt $i failed: $($_.Exception.Message)"
+                if (Test-Path $out) { Remove-Item $out -Force }
+                if ($i -eq 5) { throw }
+                Start-Sleep -Seconds 20
+              }
+            }
+          }
           if (-not (Test-Path C:\haxe\haxe.zip)) {
-            Invoke-WebRequest -Uri "https://github.com/HaxeFoundation/haxe/releases/download/4.2.5/haxe-4.2.5-win64.zip" -OutFile C:\haxe\haxe.zip -UseBasicParsing
+            Get-Zip "https://github.com/HaxeFoundation/haxe/releases/download/4.2.5/haxe-4.2.5-win64.zip" "C:\haxe\haxe.zip"
           }
           if (-not (Test-Path C:\neko\neko.zip)) {
-            Invoke-WebRequest -Uri "https://github.com/HaxeFoundation/neko/releases/download/v2-3-0/neko-2.3.0-win64.zip" -OutFile C:\neko\neko.zip -UseBasicParsing
+            Get-Zip "https://github.com/HaxeFoundation/neko/releases/download/v2-3-0/neko-2.3.0-win64.zip" "C:\neko\neko.zip"
           }
           $haxeDir = (Get-ChildItem C:\haxe -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'haxe.exe') } | Select-Object -First 1).FullName
           if (-not $haxeDir) { Expand-Archive -Path C:\haxe\haxe.zip -DestinationPath C:\haxe -Force }
