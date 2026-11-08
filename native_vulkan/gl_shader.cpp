@@ -2784,7 +2784,7 @@ void lime_gl_link_program (int program) {
 
 		static int s_dumps = 0;
 
-		if (s_dumps < 4) {
+		if (s_dumps < 8) {
 
 			s_dumps++;
 
@@ -3080,6 +3080,87 @@ static uint32_t ElementBase (const UniformInfo& uniform, int element) {
 
 }
 
+// 诊断用：gl_core.cpp 里的采样槽镜像（返回当前绑定到该单元的纹理名）
+int SnapshotTexBound (int unit);
+
+// 诊断：prog 5/6/7 每写一次 uniform，打印该 program 全部 uniform 的当前值；
+// 每个 program 只打前 20 次，避免刷屏。只读，不影响渲染。
+static void MaybeLogUniformValues (Program* program) {
+
+	if (!program || program->id < 5 || program->id > 7) return;
+
+	static std::map<int, int> s_unifvalCounts;
+	int& prints = s_unifvalCounts[program->id];
+	if (prints >= 20) return;
+	prints++;
+
+	for (size_t i = 0; i < program->uniforms.size (); i++) {
+
+		const UniformInfo& u = program->uniforms[i];
+		uint32_t base = ElementBase (u, 0);
+		char val[220];
+
+		if (u.kind == BASE_SAMPLER) {
+
+			snprintf (val, sizeof (val), "unit=%d tex=%d", u.textureUnit, SnapshotTexBound (u.textureUnit));
+
+		} else if (u.kind == 0 && u.columns > 1) {
+
+			uint32_t stride = u.matrixStride ? u.matrixStride : 16u;
+			float m[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			int k = 0;
+
+			for (int c = 0; c < u.columns && k < 4; c++) {
+
+				for (int r = 0; r < u.components && k < 4; r++) {
+
+					uint32_t dst = u.rowMajor
+						? base + (uint32_t) r * stride + (uint32_t) c * 4u
+						: base + (uint32_t) c * stride + (uint32_t) r * 4u;
+
+					if (dst + 4u <= program->uniformData.size ()) {
+						m[k] = *(const float*) (program->uniformData.data () + dst);
+					}
+					k++;
+
+				}
+
+			}
+
+			snprintf (val, sizeof (val), "mat(%g %g %g %g)", m[0], m[1], m[2], m[3]);
+
+		} else {
+
+			int n = u.components;
+			if (n < 1) n = 1;
+			if (n > 4) n = 4;
+			if (base + (uint32_t) n * 4u > program->uniformData.size ()) n = 0;
+
+			std::string tmp;
+			for (int j = 0; j < n; j++) {
+
+				char one[48];
+				const uint8_t* p = program->uniformData.data () + base + (uint32_t) j * 4u;
+
+				if (u.kind == 0) snprintf (one, sizeof (one), "%g", (double) *(const float*) p);
+				else if (u.kind == 2) snprintf (one, sizeof (one), "%u", *(const uint32_t*) p);
+				else snprintf (one, sizeof (one), "%d", *(const int*) p);
+
+				if (j) tmp += " ";
+				tmp += one;
+
+			}
+
+			snprintf (val, sizeof (val), "%s", tmp.empty () ? "?" : tmp.c_str ());
+
+		}
+
+		fprintf (stderr, "[gl_shader] unifval prog=%d name=%s val=%s\n", program->id, u.name.c_str (), val);
+
+	}
+
+}
+
 static bool WriteScalars (int location, const void* values, int components) {
 
 	Program* program = FindProgram (g_currentProgram);
@@ -3092,6 +3173,7 @@ static bool WriteScalars (int location, const void* values, int components) {
 		if (components != 1) return false;
 		uniform->textureUnit = *(const int*) values;
 		program->uniformDirty = true;
+		MaybeLogUniformValues (program);
 		return true;
 
 	}
@@ -3102,6 +3184,7 @@ static bool WriteScalars (int location, const void* values, int components) {
 
 	memcpy (program->uniformData.data () + base, values, bytes);
 	program->uniformDirty = true;
+	MaybeLogUniformValues (program);
 	return true;
 
 }
@@ -3186,6 +3269,7 @@ static void WriteMatrices (int location, int count, bool transpose, const float*
 	}
 
 	program->uniformDirty = true;
+	MaybeLogUniformValues (program);
 
 }
 
