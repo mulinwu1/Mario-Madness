@@ -10,6 +10,10 @@ on:
         description: "（可选）build-lime-vulkan 的 run id；留空则不打 artifact，直接用 haxelib lime 自带 ndll"
         required: false
         default: ""
+      disable_vk_pkt:
+        description: "二分实验：true = 不插入 openfl_vk_pkt 定义（fork 类路径保留），用于定位 13.9GB OOM 来源"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -120,10 +124,14 @@ jobs:
       # 幂等插入，重复跑不会叠加。
       - name: Enable openfl_vk_pkt in Project.xml
         shell: pwsh
+        env:
+          DISABLE_VK_PKT: ${{ inputs.disable_vk_pkt }}
         run: |
           $ErrorActionPreference = 'Stop'
           $px = Get-Content Project.xml -Raw
-          if ($px -match 'openfl_vk_pkt') {
+          if ($env:DISABLE_VK_PKT -eq 'true') {
+            Write-Host 'BISECT PROBE: openfl_vk_pkt define intentionally skipped (fork classpath kept)'
+          } elseif ($px -match 'openfl_vk_pkt') {
             Write-Host 'Project.xml already has openfl_vk_pkt'
           } else {
             $px = $px -replace '</project>', "`t<haxedef name=`"openfl_vk_pkt`" />`n</project>"
@@ -131,7 +139,7 @@ jobs:
             Write-Host 'inserted <haxedef name="openfl_vk_pkt" />'
           }
           $check = Get-Content Project.xml -Raw
-          if ($check -notmatch '<haxedef name="openfl_vk_pkt"') { throw 'failed to enable openfl_vk_pkt in Project.xml' }
+          if ($check -notmatch '<haxedef name="openfl_vk_pkt"' -and $env:DISABLE_VK_PKT -ne 'true') { throw 'failed to enable openfl_vk_pkt in Project.xml' }
 
           # 内存实验 1/2：analyzer-optimize 是已知的内存翻倍项。源侧核查结论：
           # lime 8.0.2 (HXProject/ProjectXMLParser/Platform) 与仓库 Project.xml 都没有它，
@@ -323,6 +331,12 @@ jobs:
             if ($mem -ne 'NA' -and [int]$mem -gt $peak) { $peak = [int]$mem }
             if ($commitMB -gt $peakCommit) { $peakCommit = $commitMB }
             Set-Content -Path (Join-Path $Wd 'peak_mem.txt') -Value ("peak_haxe_mem_MB=$peak`npeak_commit_MB=$peakCommit`ncommit_limit_MB=$limitMB`nelapsed_s=$elapsed`nhaxe_cpu_s=$cpu")
+            # 硬护栏：haxe 堆超过 13500MB 就主动杀，记录 ABORT_MEM，不等它自己崩（每轮省 10 分钟）
+            if ($mem -ne 'NA' -and [int]$mem -gt 13500) {
+              Set-Content -Path $Marker -Value "ABORT_MEM mem=${mem}MB elapsed=${elapsed}s cpp=$cppCount obj=$objCount haxe_cpu=${cpu}s"
+              Kill-Tree
+              break
+            }
             if ($delta -le 0 -and $cppCount -eq $prevCpp -and $objCount -eq $prevObj) { $flat++ } else { $flat = 0 }
             $prevCpp = $cppCount
             $prevObj = $objCount
