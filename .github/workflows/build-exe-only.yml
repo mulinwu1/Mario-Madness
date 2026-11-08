@@ -293,24 +293,34 @@ jobs:
           Write-Host 'lime source dirs:'
           Get-ChildItem 'C:\lime-src\src\lime' -Directory -ErrorAction SilentlyContinue | Select-Object -First 8 -ExpandProperty Name | ForEach-Object { Write-Host "  $_" }
 
-      # -v 证据：12 次 ShaderMacro.build 里只有 source/YCBUEndingShader.hx:7 没有 Exiting。
-      # 单变量：把它回滚到 11-06 那次 "GLSL ES 1.00 兼容" 改动之前的版本（CI 侧覆盖，不改仓库）。
-      - name: Ablate - restore YCBUEndingShader.hx (ablate=revert_ycbu)
-        if: ${{ contains(inputs.ablate, 'revert_ycbu') }}
+      # -v 证据：ShaderMacro.build 最后一个 "Calling" 没有 "Exiting"，指向 11-06 那批 ES 1.00 改过的 shader。
+      # revert_ycbu = 只回滚 YCBUEndingShader；revert_shaders = 三个文件全部回滚到改前版本。
+      - name: Ablate - restore 11-06 shaders (revert_ycbu / revert_shaders)
+        if: ${{ contains(inputs.ablate, 'revert_ycbu') || contains(inputs.ablate, 'revert_shaders') }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          ABLATE: ${{ inputs.ablate }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $p = 'source\YCBUEndingShader.hx'
-          Write-Host "before: size=$((Get-Item $p).Length) lines=$((Get-Content $p).Count)"
-          # 43e1f769 是 YCBUEndingShader 改动(b319f7a9)的父提交，即 11-06 之前的原样
-          $b64 = gh api "repos/$env:REPO/contents/source/YCBUEndingShader.hx?ref=43e1f769bb9eaa577e447a7b37ae556e54cd9677" --jq '.content'
-          $txt = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($b64 -replace "`r?`n", '')))
-          Set-Content -Path $p -Value $txt -NoNewline
-          Write-Host "after:  size=$((Get-Item $p).Length) lines=$((Get-Content $p).Count)"
-          if ((Get-Content $p -Raw) -match 'ES 1\.00') { Write-Host 'WARN: restored file still mentions ES 1.00 (revert may be a no-op)' }
+          $all = @(
+            @{ p = 'source\YCBUEndingShader.hx'; ref = '43e1f769bb9eaa577e447a7b37ae556e54cd9677' },
+            @{ p = 'source\OldTVShader.hx';      ref = 'afcdbab9135128ad857f0d2981dcb1e0ff70747a' },
+            @{ p = 'source\VCRMario85.hx';       ref = '6a016b547ddf088272c363a9fcd5d994f38ddac7' }
+          )
+          $targets = $all
+          if (-not $env:ABLATE.Contains('revert_shaders')) { $targets = @($all[0]) }
+          foreach ($t in $targets) {
+            $p = $t.p
+            $rel = $p -replace '\\', '/'
+            Write-Host "before: $p size=$((Get-Item $p).Length)"
+            $b64 = gh api "repos/$env:REPO/contents/$rel`?ref=$($t.ref)" --jq '.content'
+            $txt = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($b64 -replace "`r?`n", '')))
+            Set-Content -Path $p -Value $txt -NoNewline
+            Write-Host "after:  $p size=$((Get-Item $p).Length) lines=$((Get-Content $p).Count)"
+            if ((Get-Content $p -Raw) -match 'ES 1\.00') { Write-Host "WARN: $p still mentions ES 1.00 (revert may be a no-op)" }
+          }
 
       # discord_rpc 的 native 源码 haxelib 包里缺失，需要手工补齐（与既有构建一致）
       - name: Patch discord_rpc native sources
@@ -459,8 +469,16 @@ jobs:
             $os = Get-CimInstance Win32_OperatingSystem
             $commitMB = [int][math]::Round(($os.TotalVirtualMemorySize - $os.FreeVirtualMemory) / 1KB)
             $limitMB = [int][math]::Round($os.TotalVirtualMemorySize / 1KB)
-            Write-Host ("::notice::[hb] elapsed=${elapsed}s haxe_cpu=${cpu}s (+${delta}) mem=${mem}MB commit=${commitMB}MB/${limitMB}MB cpp=${cppCount} files=${cppMB}MB obj=${objCount}")
-            Add-Content -Path $HbLog -Value ("[hb] elapsed=${elapsed}s haxe_cpu=${cpu}s (+${delta}) mem=${mem}MB commit=${commitMB}MB/${limitMB}MB cpp=${cppCount} files=${cppMB}MB obj=${objCount}")
+            # 心跳追加"当前进度"：build.log 最后一个非空行（截断 100 字符），把内存爬升对到具体模块
+            $blPath = Join-Path $Wd 'build.log'
+            $lastLine = ''
+            if (Test-Path $blPath) {
+              $tail = @(Get-Content $blPath -Tail 10 -ErrorAction SilentlyContinue)
+              for ($ti = $tail.Count - 1; $ti -ge 0; $ti--) { if ($tail[$ti].Trim() -ne '') { $lastLine = $tail[$ti].Trim(); break } }
+            }
+            if ($lastLine.Length -gt 100) { $lastLine = $lastLine.Substring(0, 100) }
+            Write-Host ("::notice::[hb] elapsed=${elapsed}s haxe_cpu=${cpu}s (+${delta}) mem=${mem}MB commit=${commitMB}MB/${limitMB}MB cpp=${cppCount} files=${cppMB}MB obj=${objCount} last=$lastLine")
+            Add-Content -Path $HbLog -Value ("[hb] elapsed=${elapsed}s haxe_cpu=${cpu}s (+${delta}) mem=${mem}MB commit=${commitMB}MB/${limitMB}MB cpp=${cppCount} files=${cppMB}MB obj=${objCount} last=$lastLine")
             if ($mem -ne 'NA' -and [int]$mem -gt $peak) { $peak = [int]$mem }
             if ($commitMB -gt $peakCommit) { $peakCommit = $commitMB }
             Set-Content -Path (Join-Path $Wd 'peak_mem.txt') -Value ("peak_haxe_mem_MB=$peak`npeak_commit_MB=$peakCommit`ncommit_limit_MB=$limitMB`nelapsed_s=$elapsed`nhaxe_cpu_s=$cpu")
