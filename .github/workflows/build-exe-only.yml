@@ -293,6 +293,25 @@ jobs:
           Write-Host 'lime source dirs:'
           Get-ChildItem 'C:\lime-src\src\lime' -Directory -ErrorAction SilentlyContinue | Select-Object -First 8 -ExpandProperty Name | ForEach-Object { Write-Host "  $_" }
 
+      # -v 证据：12 次 ShaderMacro.build 里只有 source/YCBUEndingShader.hx:7 没有 Exiting。
+      # 单变量：把它回滚到 11-06 那次 "GLSL ES 1.00 兼容" 改动之前的版本（CI 侧覆盖，不改仓库）。
+      - name: Ablate - restore YCBUEndingShader.hx (ablate=revert_ycbu)
+        if: ${{ contains(inputs.ablate, 'revert_ycbu') }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $p = 'source\YCBUEndingShader.hx'
+          Write-Host "before: size=$((Get-Item $p).Length) lines=$((Get-Content $p).Count)"
+          # 43e1f769 是 YCBUEndingShader 改动(b319f7a9)的父提交，即 11-06 之前的原样
+          $b64 = gh api "repos/$env:REPO/contents/source/YCBUEndingShader.hx?ref=43e1f769bb9eaa577e447a7b37ae556e54cd9677" --jq '.content'
+          $txt = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($b64 -replace "`r?`n", '')))
+          Set-Content -Path $p -Value $txt -NoNewline
+          Write-Host "after:  size=$((Get-Item $p).Length) lines=$((Get-Content $p).Count)"
+          if ((Get-Content $p -Raw) -match 'ES 1\.00') { Write-Host 'WARN: restored file still mentions ES 1.00 (revert may be a no-op)' }
+
       # discord_rpc 的 native 源码 haxelib 包里缺失，需要手工补齐（与既有构建一致）
       - name: Patch discord_rpc native sources
         shell: pwsh
