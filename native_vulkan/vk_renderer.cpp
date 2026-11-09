@@ -3543,6 +3543,14 @@ void VkRenderer::EndFrame() {
         memcpy(dst + totalVerts * 15, v.data(), v.size() * sizeof(float));
         // 同一张贴图里可能混着不同 GL program 的笔：按 program 连续段拆 range，
         // 这样每段能绑自己的管线；没有逐顶点 program 信息时整段按 0（退回固定管线）。
+        // 诊断 VK_PROGPIPE_DBG=1：标签数与顶点数对不上时整段退化成 prog=0，
+        // 着色器就永远绑不上。先把差值打出来，指认是哪一批漏了 push。
+        static int s_mismatch = 0;
+        if (pv && pv->size() != vc && s_mismatch < 12) {
+            s_mismatch++;
+            fprintf(stderr, "[progpipe] mismatch id=%u verts=%zu tags=%zu\n",
+                    id, vc, pv->size());
+        }
         if (pv && pv->size() == vc) {
             size_t start = 0;
             for (size_t k = 1; k <= vc; k++) {
