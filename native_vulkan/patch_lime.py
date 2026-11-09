@@ -304,6 +304,27 @@ if os.path.exists(extint):
             print("patched ExternalInterface.cpp: lime_window_get_scale -> 1.0")
         else:
             print("WARN: lime_window_get_scale anchor not found in ExternalInterface.cpp")
+
+    # 诊断：lime_window_get_width 打印 Window::GetWidth() vs SDL_GetWindowSize
+    if "vulkan_width_diag" not in s:
+        w_anchor = "\tint lime_window_get_width (value window) {\n\n\t\tWindow* targetWindow = (Window*)val_data (window);\n\t\treturn targetWindow->GetWidth ();"
+        w_fix = (
+            "\tint lime_window_get_width (value window) {\n\n"
+            "\t\tWindow* targetWindow = (Window*)val_data (window);\n"
+            "\t\tint w = targetWindow->GetWidth ();\n"
+            "\t\tint sw = 0, sh = 0;\n"
+            "\t\t// vulkan_width_diag: compare Window::GetWidth vs SDL_GetWindowSize\n"
+            "\t\tfprintf (stderr, \"[width] Window::GetWidth()=%d\\n\", w);\n"
+            "\t\treturn w;"
+        )
+        if w_anchor in s:
+            s = s.replace(w_anchor, w_fix, 1)
+            print("patched ExternalInterface.cpp: lime_window_get_width diagnostic")
+        else:
+            print("WARN: lime_window_get_width anchor not found")
+    else:
+        print("ExternalInterface.cpp width diag already present")
+    open(extint, "w", encoding="utf-8").write(s)
 else:
     print("WARN: ExternalInterface.cpp not found")
 
