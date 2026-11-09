@@ -328,6 +328,42 @@ if os.path.exists(extint):
 else:
     print("WARN: ExternalInterface.cpp not found")
 
+# 8) 治本：resize 事件用 SDL_GetWindowSize（逻辑 1280）代替 event->window.data1（drawable 1034）
+app = os.path.join(LIME, "project", "src", "backend", "sdl", "SDLApplication.cpp")
+if os.path.exists(app):
+    s = open(app, encoding="utf-8").read()
+    if "vulkan_resize_fix" in s:
+        print("SDLApplication.cpp already patched")
+    else:
+        r_anchor = (
+            "\t\t\t\tcase SDL_WINDOWEVENT_SIZE_CHANGED:\n\n"
+            "\t\t\t\t\twindowEvent.type = WINDOW_RESIZE;\n"
+            "\t\t\t\t\twindowEvent.width = event->window.data1;\n"
+            "\t\t\t\t\twindowEvent.height = event->window.data2;\n"
+            "\t\t\t\t\tbreak;"
+        )
+        r_fix = (
+            "\t\t\t\tcase SDL_WINDOWEVENT_SIZE_CHANGED:\n\n"
+            "\t\t\t\t\twindowEvent.type = WINDOW_RESIZE;\n"
+            "\t\t\t\t\t// vulkan_resize_fix: use SDL_GetWindowSize (logical) not event data (drawable px)\n"
+            "\t\t\t\t\t{\n"
+            "\t\t\t\t\t\tSDL_Window* _sw = SDL_GetWindowFromID (event->window.windowID);\n"
+            "\t\t\t\t\t\tint _ww = event->window.data1, _wh = event->window.data2;\n"
+            "\t\t\t\t\t\tif (_sw) SDL_GetWindowSize (_sw, &_ww, &_wh);\n"
+            "\t\t\t\t\t\twindowEvent.width = _ww;\n"
+            "\t\t\t\t\t\twindowEvent.height = _wh;\n"
+            "\t\t\t\t\t}\n"
+            "\t\t\t\t\tbreak;"
+        )
+        if r_anchor in s:
+            s = s.replace(r_anchor, r_fix, 1)
+            open(app, "w", encoding="utf-8").write(s)
+            print("patched SDLApplication.cpp: resize event uses SDL_GetWindowSize")
+        else:
+            print("WARN: resize anchor not found in SDLApplication.cpp")
+else:
+    print("WARN: SDLApplication.cpp not found")
+
 # 6) 诊断：GetWidth/GetHeight 打印 SDL_GetWindowSize vs SDL_GL_GetDrawableSize 实际值
 if os.path.exists(sdl):
     s = open(sdl, encoding="utf-8").read()
