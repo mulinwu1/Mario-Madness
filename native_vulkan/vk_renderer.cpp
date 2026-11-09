@@ -3939,9 +3939,20 @@ void VkRenderer::EndFrame() {
                         sp = o.textures[r.id - 1].sampler;
                     }
                     if (vw != VK_NULL_HANDLE) {
-                        lime::gl_shader_upload_uniforms((int)r.prog);
+                        bool okU = lime::gl_shader_upload_uniforms((int)r.prog);
                         // 本工程 14 个片元着色器的采样器都叫 bitmap（源码与 trace 均已核对）
-                        lime::gl_shader_write_sampler((int)r.prog, off, "bitmap", vw, sp);
+                        bool okS = lime::gl_shader_write_sampler((int)r.prog, off, "bitmap", vw, sp);
+                        // 一次性诊断：把两条返回值和关键尺寸打出来，区分"描述符没通"与"顶点塌陷"
+                        static unsigned char s_rep[256][2] = {{0}};
+                        int pg = (int)r.prog;
+                        if (pg > 0 && pg < 256 && !s_rep[pg][off ? 1 : 0]) {
+                            s_rep[pg][off ? 1 : 0] = 1;
+                            fprintf(stderr,
+                                    "[progpipe] state prog=%d off=%d upload=%d sampler=%d "
+                                    "id=%u view=%p smp=%p\n",
+                                    pg, off ? 1 : 0, okU ? 1 : 0, okS ? 1 : 0,
+                                    r.id, (void*)vw, (void*)sp);
+                        }
                         if (pp != boundPipe) {
                             g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pp);
                             boundPipe = pp;
