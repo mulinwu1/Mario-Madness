@@ -113,10 +113,13 @@ jobs:
           $targets = @(Get-ChildItem "$limeRoot\ndll" -Recurse -Filter 'lime.ndll' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
           foreach ($t in $targets) {
             Copy-Item $src $t -Force
-            Write-Host "patched: $t"
+            $shimDst = Join-Path (Split-Path $t -Parent) 'lime_glslang.dll'
+            Copy-Item $shim $shimDst -Force
+            Write-Host "patched: $t + lime_glslang.dll"
           }
           $primary = "$limeRoot\ndll\Windows64\lime.ndll"
           Copy-Item $src $primary -Force
+          Copy-Item $shim (Join-Path (Split-Path $primary -Parent) 'lime_glslang.dll') -Force
           if (-not (Test-Path $primary)) { throw "failed to place $primary" }
           Write-Host "haxelib lime ndll sha256: $((Get-FileHash $primary -Algorithm SHA256).Hash)"
           Write-Host "artifact ndll sha256:     $((Get-FileHash $src -Algorithm SHA256).Hash)"
