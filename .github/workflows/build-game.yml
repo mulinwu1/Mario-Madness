@@ -226,6 +226,12 @@ jobs:
             Write-Host "hxcpp compile cache enabled on $total file group(s)"
           }
 
+      # Temporary diagnostic: trace the openfl/lime size chain (logging only, no behavior change)
+      - name: Patch Haxe size-chain debug logs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .github/scripts/patch_haxe_debug.ps1
       # Vulkan: fix menu squeezed left. haxelib official lime NativeWindow.hx sets
       # parent.__scale = lime_window_get_scale(), which under Vulkan returns 0.808
       # (SDL_GL_GetDrawableSize gives swapchain px 1034 / logical 1280), squeezing
