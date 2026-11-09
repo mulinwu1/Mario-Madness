@@ -3921,9 +3921,13 @@ void VkRenderer::EndFrame() {
                 }
             }
             if (s_useProg && r.prog > 0) {
-                VkPipeline pp = lime::gl_shader_pipeline((int)r.prog, false);
+                // 同一个 program 在两个阶段用两套管线：画到离屏目标（currentTarget>=1000）
+                // 和画到屏幕（0）。Vulkan 要求管线创建时的 render pass 与当前绑定的一致，
+                // 否则行为未定义（实测表现为整屏全黑）。三个调用必须共用同一个 off。
+                const bool off = (o.currentTarget >= 1000);
+                VkPipeline pp = lime::gl_shader_pipeline((int)r.prog, off);
                 VkPipelineLayout pl = lime::gl_shader_pipeline_layout((int)r.prog);
-                VkDescriptorSet ds = lime::gl_shader_descriptor_set((int)r.prog, false);
+                VkDescriptorSet ds = lime::gl_shader_descriptor_set((int)r.prog, off);
                 if (pp != VK_NULL_HANDLE && pl != VK_NULL_HANDLE && ds != VK_NULL_HANDLE) {
                     VkImageView vw = VK_NULL_HANDLE;
                     VkSampler sp = VK_NULL_HANDLE;
@@ -3936,8 +3940,8 @@ void VkRenderer::EndFrame() {
                     }
                     if (vw != VK_NULL_HANDLE) {
                         lime::gl_shader_upload_uniforms((int)r.prog);
-                        // 本工程 14 个片元着色器的采样器都叫 bitmap（源码已逐一核对）
-                        lime::gl_shader_write_sampler((int)r.prog, false, "bitmap", vw, sp);
+                        // 本工程 14 个片元着色器的采样器都叫 bitmap（源码与 trace 均已核对）
+                        lime::gl_shader_write_sampler((int)r.prog, off, "bitmap", vw, sp);
                         if (pp != boundPipe) {
                             g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pp);
                             boundPipe = pp;
