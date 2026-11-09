@@ -356,6 +356,24 @@ if os.path.exists(nw):
             "\t\t\treturn @:privateAccess NativeCFFI.lime_window_get_height(__backend.handle);\n"
             "\t\treturn __height;\n\t}"
         )
+        # 同时修 resize()：用实时查询覆盖 __width/__height，不信任事件传来的 drawable 尺寸
+        r_anchor = "\tpublic function resize(width:Int, height:Int):Void\n\t{\n\t\t__backend.resize(width, height);\n\n\t\t__width = width;\n\t\t__height = height;\n\t}"
+        r_fix = (
+            "\tpublic function resize(width:Int, height:Int):Void\n\t{\n"
+            "\t\t__backend.resize(width, height);\n\n"
+            "\t\t// vulkan_width_live: use live SDL size, not event-provided drawable px\n"
+            "\t\tif (__backend != null && __backend.handle != null) {\n"
+            "\t\t\t__width = @:privateAccess NativeCFFI.lime_window_get_width(__backend.handle);\n"
+            "\t\t\t__height = @:privateAccess NativeCFFI.lime_window_get_height(__backend.handle);\n"
+            "\t\t} else {\n"
+            "\t\t\t__width = width;\n\t\t\t__height = height;\n\t\t}\n\t}"
+        )
+        if r_anchor in s:
+            s = s.replace(r_anchor, r_fix, 1)
+            print("patched Window.hx: resize() uses live size")
+        else:
+            print("WARN: resize anchor not found in Window.hx")
+
         ok = True
         # 先加 import（如果没有）
         imp_anchor = "import lime.app.Application;"
