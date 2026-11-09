@@ -261,6 +261,18 @@ if os.path.exists(sdl):
         else:
             print("WARN: ContextFlip anchor not found")
 
+        # GetScale() 用 SDL_GL_GetDrawableSize / window.width 算 DPI 缩放。
+        # Vulkan 后端下 SDL_GL_GetDrawableSize 返回交换链物理像素（≠ 逻辑宽度），
+        # 导致 scale=0.808 → openfl __resize() 的 openfl_dpi_aware 分支把 stageWidth
+        # 压成 1034（= 1280*0.808）→ flixel 按 1034 排版 → 菜单挤在左侧。
+        # Vulkan 激活时固定返回 1.0，让 stageWidth = window.width。
+        scale_anchor = "double SDLWindow::GetScale () {"
+        scale_inject = "double SDLWindow::GetScale () {\n\n\t\tif (gl_vk_active ()) return 1.0;"
+        if scale_anchor in s:
+            s = s.replace(scale_anchor, scale_inject, 1)
+        else:
+            print("WARN: GetScale anchor not found")
+
         open(sdl, "w", encoding="utf-8").write(s)
         print("patched SDLWindow.cpp for vulkan")
 else:
