@@ -67,6 +67,9 @@ struct TexSlot {
     size_t bytes = 0;
     bool used = false;
     std::vector<float> verts;
+    // 逐顶点对应的 GL program id（与 verts 一一对应，每个顶点一条）：
+    // 批处理按纹理合并顶点，不同 program 的笔不能共用一条管线，靠它拆段。
+    std::vector<uint16_t> progs;
     // 取证：创建时 CPU 数据按 stride=97 采样的 mean/nb（与 [vk] texmean 同口径），
     // 供转储自校验；updates>0 时基线已失效（texSubImage2D 改过内容）
     float createMean = 0.0f;
@@ -88,6 +91,9 @@ struct RenderTarget {
     int w = 0, h = 0;
     bool used = false;
     std::vector<float> verts;
+    // 逐顶点对应的 GL program id（与 verts 一一对应，每个顶点一条）：
+    // 批处理按纹理合并顶点，不同 program 的笔不能共用一条管线，靠它拆段。
+    std::vector<uint16_t> progs;
     // 取证用：创建帧号 / 最后一次"真的有顶点"的提交帧号（0 = 从未写过）
     uint64_t createdFrame = 0;
     uint64_t lastWriteFrame = 0;
@@ -1631,6 +1637,7 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
                          const float* vertexMult, const float* vertexOff) {
     Impl& o = *impl;
     std::vector<float>* vertsPtr = nullptr;
+    std::vector<uint16_t>* progsPtr = nullptr;
     if (texId >= 1000) {
         uint32_t ti = texId - 1000;
         if (ti >= o.targets.size() || !o.targets[ti].used) return;
@@ -1641,11 +1648,13 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
             return;
         }
         vertsPtr = &o.targets[ti].verts;
+        progsPtr = &o.targets[ti].progs;
     } else {
         if (texId == 0 || texId > o.textures.size()) return;
         TexSlot& t = o.textures[texId - 1];
         if (!t.used) return;
         vertsPtr = &t.verts;
+        progsPtr = &t.progs;
     }
     NoteSampled(texId);
     if (vertexCount <= 0) return;
@@ -1877,6 +1886,7 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
         const float* f = vertexOff ? (vertexOff + (size_t)i * 4) : g_drawOff;
         PushLimeVertex(*vertsPtr, px, py, u, v,
                        vertexAlpha ? vertexAlpha[i] : g_drawAlpha, m, f);
+        progsPtr->push_back((uint16_t)((vkProg > 0 && vkProg < 65535) ? vkProg : 0));
     }
 }
 
@@ -3478,18 +3488,31 @@ void VkRenderer::EndFrame() {
     }
 
     float* dst = o.vbPtr;
-    struct DrawRange { VkDescriptorSet set; size_t first; size_t count; };
+    struct DrawRange { VkDescriptorSet set; size_t first; size_t count; uint16_t prog; };
     std::vector<DrawRange> ranges;
     size_t totalVerts = 0;
 
     // 取证：按提交实际拼出的批次顺序记录源 id（贴图 1..N，离屏 1000+槽位）
     std::vector<uint32_t> batchIds;
-    auto pushBatch = [&](std::vector<float>& v, VkDescriptorSet set, uint32_t id) {
+    auto pushBatch = [&](std::vector<float>& v, const std::vector<uint16_t>* pv,
+                         VkDescriptorSet set, uint32_t id) {
         if (v.empty()) return;
         size_t vc = v.size() / 15;
         if (totalVerts + vc > (size_t)MAX_SPRITES * 6) return;
         memcpy(dst + totalVerts * 15, v.data(), v.size() * sizeof(float));
-        ranges.push_back({set, totalVerts, vc});
+        // 同一张贴图里可能混着不同 GL program 的笔：按 program 连续段拆 range，
+        // 这样每段能绑自己的管线；没有逐顶点 program 信息时整段按 0（退回固定管线）。
+        if (pv && pv->size() == vc) {
+            size_t start = 0;
+            for (size_t k = 1; k <= vc; k++) {
+                if (k == vc || (*pv)[k] != (*pv)[start]) {
+                    ranges.push_back({set, totalVerts + start, k - start, (*pv)[start]});
+                    start = k;
+                }
+            }
+        } else {
+            ranges.push_back({set, totalVerts, vc, 0});
+        }
         totalVerts += vc;
         batchIds.push_back(id);
     };
@@ -3511,17 +3534,17 @@ void VkRenderer::EndFrame() {
         return strstr(buf, key) != nullptr;
     };
     if (s_11first && o.textures.size() > 10 && o.textures[10].used) {
-        pushBatch(o.textures[10].verts, o.textures[10].set, 11);
+        pushBatch(o.textures[10].verts, &o.textures[10].progs, o.textures[10].set, 11);
     }
     for (size_t i = 0; i < o.textures.size(); i++) {
         if (s_11first && i == 10) continue;
         if (!o.textures[i].used) continue;
         uint32_t id = (uint32_t)(i + 1);
         if (skipped(id)) continue;
-        pushBatch(o.textures[i].verts, o.textures[i].set, id);
+        pushBatch(o.textures[i].verts, &o.textures[i].progs, o.textures[i].set, id);
     }
     for (size_t i = 0; i < o.targets.size(); i++) {
-        if (o.targets[i].used) pushBatch(o.targets[i].verts, o.targets[i].set, (uint32_t)(1000 + i));
+        if (o.targets[i].used) pushBatch(o.targets[i].verts, &o.targets[i].progs, o.targets[i].set, (uint32_t)(1000 + i));
     }
 
     // 取证：VK_TAG_PRESENT=1 时在屏幕角落画一块白色小方块，标记本次后缓冲合成
@@ -3546,7 +3569,7 @@ void VkRenderer::EndFrame() {
             PushLimeVertex(q, x0, y0, 0.0f, 0.0f);
             PushLimeVertex(q, x0 + 30.0f, H, 1.0f, 1.0f);
             PushLimeVertex(q, x0, H, 0.0f, 1.0f);
-            pushBatch(q, o.textures[7].set, 8);
+            pushBatch(q, nullptr, o.textures[7].set, 8);
         }
     }
 
@@ -3814,9 +3837,33 @@ void VkRenderer::EndFrame() {
         VkBuffer vbufs[2] = {o.vb, o.attrBuf};
         VkDeviceSize voffs[2] = {0, 0};
         g_bindVB(o.cmd, 0, 2, vbufs, voffs);
+        // VK_PROGPIPE_USE=1：按每段的 GL program 绑它自己的管线；取不到就退回固定管线。
+        // 默认关（0）时行为与之前逐字一致。这是让游戏 shader 真正参与绘制的开关。
+        static int s_useProg = -1;
+        if (s_useProg < 0) {
+            const char* e = getenv("VK_PROGPIPE_USE");
+            s_useProg = (e && e[0] == '1') ? 1 : 0;
+        }
+        VkPipeline boundPipe = o.pipeline;
+        static uint64_t s_progSw = 0;
         for (auto& r : ranges) {
+            if (s_useProg && r.prog > 0) {
+                VkPipeline pp = lime::gl_shader_pipeline((int)r.prog, false);
+                if (pp != VK_NULL_HANDLE && pp != boundPipe) {
+                    g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pp);
+                    boundPipe = pp;
+                    s_progSw++;
+                }
+            } else if (boundPipe != o.pipeline) {
+                g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeline);
+                boundPipe = o.pipeline;
+            }
             g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeLayout, 0, 1, &r.set, 0, nullptr);
             g_cmdDraw(o.cmd, (uint32_t)r.count, 1, (uint32_t)r.first, 0);
+        }
+        if (s_useProg && (g_drawFrame % 120) == 1) {
+            fprintf(stderr, "[progpipe] use switches=%llu ranges=%zu f=%llu\n",
+                    (unsigned long long)s_progSw, ranges.size(), (unsigned long long)g_drawFrame);
         }
     }
     g_endRP(o.cmd);
