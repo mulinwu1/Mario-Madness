@@ -3952,6 +3952,49 @@ void VkRenderer::EndFrame() {
         }
         bool vpFlipped = false;
         for (auto& r : ranges) {
+            // 诊断（VK_DRAWLOG_FRAME=<n>，默认关）：只在该 draw frame 逐笔打印
+            // prog / 贴图 / 顶点像素范围 / 程序 UBO 里的 openfl_Matrix 实际值，
+            // 用于区分"顶点被压扁"与"矩阵被写错"。只读，不影响渲染。
+            {
+                static long long s_dlFrame = -2;
+                if (s_dlFrame == -2) {
+                    const char* e = getenv("VK_DRAWLOG_FRAME");
+                    s_dlFrame = (e && e[0]) ? atoll(e) : -1;
+                }
+                if (s_dlFrame >= 0 && (long long)g_drawFrame == s_dlFrame) {
+                    const uint8_t* ub = nullptr;
+                    uint32_t usz = 0;
+                    float m00 = 0, m01 = 0, m10 = 0, m11 = 0, mtx = 0, mty = 0, mw = 0;
+                    if (r.prog > 0 && lime::gl_shader_uniform_block((int)r.prog, &ub, &usz)
+                            && ub && usz >= 64) {
+                        const float* f = (const float*)ub;
+                        m00 = f[0]; m01 = f[1]; m10 = f[4]; m11 = f[5];
+                        mtx = f[12]; mty = f[13]; mw = f[15];
+                    }
+                    float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+                    if (r.count > 0 && o.vbPtr) {
+                        const float* vp = o.vbPtr + r.first * 15;
+                        x0 = x1 = vp[0];
+                        y0 = y1 = vp[1];
+                        for (size_t k = 1; k < r.count; k++) {
+                            const float* q = vp + k * 15;
+                            if (q[0] < x0) x0 = q[0];
+                            if (q[0] > x1) x1 = q[0];
+                            if (q[1] < y0) y0 = q[1];
+                            if (q[1] > y1) y1 = q[1];
+                        }
+                    }
+                    fprintf(stderr,
+                            "[drawlog] f=%llu tgt=%u prog=%u id=%u first=%zu n=%zu "
+                            "pos=[%.1f..%.1f, %.1f..%.1f] m00=%.7f m01=%.7f m10=%.7f m11=%.7f "
+                            "tx=%.4f ty=%.4f w=%.4f cx=[%.3f..%.3f] wcalc=[%.3f..%.3f]\n",
+                            (unsigned long long)g_drawFrame, (unsigned)o.currentTarget,
+                            (unsigned)r.prog, r.id, r.first, r.count,
+                            x0, x1, y0, y1, m00, m01, m10, m11, mtx, mty, mw,
+                            m00 * x0 + m10 * y0 + mtx, m00 * x1 + m10 * y1 + mtx,
+                            mtx * x0 + mty * y0 + mw, mtx * x1 + mty * y1 + mw);
+                }
+            }
             if (s_progDbg) {
                 static unsigned char s_seenProg[256] = {0};
                 static int s_seenNull = 0;
