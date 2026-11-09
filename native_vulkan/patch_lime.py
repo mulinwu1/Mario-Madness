@@ -350,6 +350,8 @@ if os.path.exists(app):
             "\t\t\t\t\t\tSDL_Window* _sw = SDL_GetWindowFromID (event->window.windowID);\n"
             "\t\t\t\t\t\tint _ww = event->window.data1, _wh = event->window.data2;\n"
             "\t\t\t\t\t\tif (_sw) SDL_GetWindowSize (_sw, &_ww, &_wh);\n"
+            "\t\t\t\t\t\tfprintf (stderr, \"[resize] data=%dx%d SDL_GetWindowSize=%dx%d sw=%p\\n\",\n"
+            "\t\t\t\t\t\t\tevent->window.data1, event->window.data2, _ww, _wh, (void*)_sw);\n"
             "\t\t\t\t\t\twindowEvent.width = _ww;\n"
             "\t\t\t\t\t\twindowEvent.height = _wh;\n"
             "\t\t\t\t\t}\n"
