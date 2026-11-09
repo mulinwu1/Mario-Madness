@@ -4179,9 +4179,17 @@ void VkRenderer::EndFrame() {
                         o.frameImageIndex, g_bbLastTex, totalVerts, o.bbLoad ? 1 : 0);
             }
             // 过渡态保护：窗口动画缩放时，交换链尺寸可能还停在旧值。
-            // 这时上屏会把旧尺寸内容画在窗口一角、露出黑边（进主菜单必现，约 9 帧）。
-            // 尺寸不一致的这一帧不上屏，并标记重建，等尺寸对齐再恢复。
-            bool sizeOK = ((int)o.extent.width == o.width && (int)o.extent.height == o.height);
+            // 注意 o.width/o.height 只在 Init 赋一次，改分辨率后会过期，必须现取窗口
+            // 客户区尺寸比较（否则永久判定不一致 → 永不 present → 黑屏，实测过）。
+            int winW = o.width, winH = o.height;
+            if (o.nativeWindow) {
+                RECT rc;
+                if (GetClientRect((HWND)o.nativeWindow, &rc)) {
+                    winW = (int)(rc.right - rc.left);
+                    winH = (int)(rc.bottom - rc.top);
+                }
+            }
+            bool sizeOK = ((int)o.extent.width == winW && (int)o.extent.height == winH);
             VkResult pr = VK_SUCCESS;
             if (sizeOK) {
                 VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
