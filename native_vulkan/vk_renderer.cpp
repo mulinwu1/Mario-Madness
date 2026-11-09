@@ -4134,11 +4134,27 @@ void VkRenderer::EndFrame() {
                         (unsigned long long)s_pres, (unsigned long long)g_drawFrame,
                         o.frameImageIndex, g_bbLastTex, totalVerts, o.bbLoad ? 1 : 0);
             }
-            VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-            pi.swapchainCount = 1;
-            pi.pSwapchains = &o.swapchain;
-            pi.pImageIndices = &o.frameImageIndex;
-            VkResult pr = g_present(o.queue, &pi);
+            // 过渡态保护：窗口动画缩放时，交换链尺寸可能还停在旧值。
+            // 这时上屏会把旧尺寸内容画在窗口一角、露出黑边（进主菜单必现，约 9 帧）。
+            // 尺寸不一致的这一帧不上屏，并标记重建，等尺寸对齐再恢复。
+            bool sizeOK = ((int)o.extent.width == o.width && (int)o.extent.height == o.height);
+            VkResult pr = VK_SUCCESS;
+            if (sizeOK) {
+                VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+                pi.swapchainCount = 1;
+                pi.pSwapchains = &o.swapchain;
+                pi.pImageIndices = &o.frameImageIndex;
+                pr = g_present(o.queue, &pi);
+            } else {
+                o.swapDirty = true;
+                static uint64_t s_skip = 0;
+                if (s_skip < 40) {
+                    s_skip++;
+                    fprintf(stderr, "[vk] present skip swap=%ux%u win=%dx%d f=%llu\n",
+                            o.extent.width, o.extent.height, o.width, o.height,
+                            (unsigned long long)g_drawFrame);
+                }
+            }
             static uint64_t s_badPres = 0;
             if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
                 // 交换链已过期：标记脏，下一帧开帧前重建（这是后缓冲冻结的唯一根因）
