@@ -1385,6 +1385,7 @@ uint32_t VkRenderer::CreateTextureOnce(int w, int h, const unsigned char* rgba) 
         t.h = h;
         t.used = true;
         t.verts.clear();
+        t.progs.clear();   // 必须与 verts 同步清空，否则 prog 标签逐帧累积、长度对不上
         return i + 1;
     }
     return 0;
@@ -4113,6 +4114,6 @@ void VkRenderer::EndFrame() {
 
     o.frameOpen = false;
     g_bbLastTex = 0;
-    for (auto& t : o.textures) t.verts.clear();
-    for (auto& t : o.targets) t.verts.clear();
+    for (auto& t : o.textures) { t.verts.clear(); t.progs.clear(); }
+    for (auto& t : o.targets) { t.verts.clear(); t.progs.clear(); }
 }
