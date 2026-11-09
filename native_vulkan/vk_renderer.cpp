@@ -3886,7 +3886,28 @@ void VkRenderer::EndFrame() {
         }
         VkPipeline boundPipe = o.pipeline;
         static uint64_t s_progSw = 0;
+        // 诊断（VK_PROGPIPE_DBG=1）：分别确认"段里有没有记下 prog"与"管线取不取得到"
+        static int s_progDbg = -1;
+        if (s_progDbg < 0) {
+            const char* e = getenv("VK_PROGPIPE_DBG");
+            s_progDbg = (e && e[0] == '1') ? 1 : 0;
+        }
         for (auto& r : ranges) {
+            if (s_progDbg) {
+                static unsigned char s_seenProg[256] = {0};
+                static int s_seenNull = 0;
+                int pg = (int)r.prog;
+                if (pg > 0 && pg < 256 && !s_seenProg[pg]) {
+                    s_seenProg[pg] = 1;
+                    VkPipeline p = lime::gl_shader_pipeline(pg, false);
+                    fprintf(stderr, "[progpipe] dbg prog=%d pipe=%s\n", pg,
+                            p == VK_NULL_HANDLE ? "null" : "ok");
+                }
+                if (pg == 0 && s_seenNull < 3) {
+                    s_seenNull++;
+                    fprintf(stderr, "[progpipe] dbg range-without-prog count=%zu\n", ranges.size());
+                }
+            }
             if (s_useProg && r.prog > 0) {
                 VkPipeline pp = lime::gl_shader_pipeline((int)r.prog, false);
                 if (pp != VK_NULL_HANDLE && pp != boundPipe) {
