@@ -649,7 +649,27 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     swci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     swci.preTransform = caps.currentTransform;
     swci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    swci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    // 呈现模式：原版游戏初始化时调 wglSwapIntervalEXT(0)（apitrace 第 1651 行），要的是不锁帧。
+    // 固定 FIFO 会把帧率钉在 60Hz，和游戏实际帧时间对不上就出现"一抖一抖"的规律卡顿。
+    // 优先 MAILBOX（不锁帧、不撕裂），不支持回退 FIFO；VK_PRESENT_MODE=fifo 可强制回旧行为。
+    swci.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+    {
+        auto getPresentModes = (PFN_vkGetPhysicalDeviceSurfacePresentModesKHR)
+                o.gipa(o.inst, "vkGetPhysicalDeviceSurfacePresentModesKHR");
+        uint32_t pmc = 0;
+        bool hasMailbox = false;
+        if (getPresentModes) {
+            getPresentModes(o.phys, o.surf, &pmc, nullptr);
+            std::vector<VkPresentModeKHR> pms(pmc);
+            if (pmc) getPresentModes(o.phys, o.surf, &pmc, pms.data());
+            for (uint32_t i = 0; i < pmc; i++) if (pms[i] == VK_PRESENT_MODE_MAILBOX_KHR) hasMailbox = true;
+        }
+        const char* want = getenv("VK_PRESENT_MODE");
+        if ((want && want[0] == 'f') || !hasMailbox) swci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        fprintf(stderr, "[vk] presentMode=%s (mailbox_available=%d)\n",
+                swci.presentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "fifo",
+                hasMailbox ? 1 : 0);
+    }
     swci.clipped = VK_TRUE;
     if (createSwap(o.dev, &swci, nullptr, &o.swapchain) != VK_SUCCESS) { o.lastError = "swapchain failed"; return false; }
 
@@ -1984,7 +2004,27 @@ bool VkRenderer::RecreateSwapchain() {
     swci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     swci.preTransform = caps.currentTransform;
     swci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    swci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    // 呈现模式：原版游戏初始化时调 wglSwapIntervalEXT(0)（apitrace 第 1651 行），要的是不锁帧。
+    // 固定 FIFO 会把帧率钉在 60Hz，和游戏实际帧时间对不上就出现"一抖一抖"的规律卡顿。
+    // 优先 MAILBOX（不锁帧、不撕裂），不支持回退 FIFO；VK_PRESENT_MODE=fifo 可强制回旧行为。
+    swci.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+    {
+        auto getPresentModes = (PFN_vkGetPhysicalDeviceSurfacePresentModesKHR)
+                o.gipa(o.inst, "vkGetPhysicalDeviceSurfacePresentModesKHR");
+        uint32_t pmc = 0;
+        bool hasMailbox = false;
+        if (getPresentModes) {
+            getPresentModes(o.phys, o.surf, &pmc, nullptr);
+            std::vector<VkPresentModeKHR> pms(pmc);
+            if (pmc) getPresentModes(o.phys, o.surf, &pmc, pms.data());
+            for (uint32_t i = 0; i < pmc; i++) if (pms[i] == VK_PRESENT_MODE_MAILBOX_KHR) hasMailbox = true;
+        }
+        const char* want = getenv("VK_PRESENT_MODE");
+        if ((want && want[0] == 'f') || !hasMailbox) swci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        fprintf(stderr, "[vk] presentMode=%s (mailbox_available=%d)\n",
+                swci.presentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "fifo",
+                hasMailbox ? 1 : 0);
+    }
     swci.clipped = VK_TRUE;
     VkResult cr = createSwap(o.dev, &swci, nullptr, &o.swapchain);
     if (cr != VK_SUCCESS) {
