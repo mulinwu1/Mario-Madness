@@ -172,7 +172,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: hxcpp-cache
-          key: hxcpp-cc-${{ runner.os }}-haxe${{ env.HAXE_VERSION }}-lime${{ env.LIME_VERSION }}-hxcpp${{ env.HXCPP_VERSION }}-${{ hashFiles('source/**', 'Project.xml') }}-v3
+          key: hxcpp-cc-${{ runner.os }}-haxe${{ env.HAXE_VERSION }}-lime${{ env.LIME_VERSION }}-hxcpp${{ env.HXCPP_VERSION }}-${{ hashFiles('source/**', 'Project.xml') }}-v4
           restore-keys: |
             hxcpp-cc-${{ runner.os }}-haxe${{ env.HAXE_VERSION }}-lime${{ env.LIME_VERSION }}-hxcpp${{ env.HXCPP_VERSION }}-
 
@@ -182,7 +182,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: export\release\windows
-          key: mario-obj-v3-${{ runner.os }}-haxe${{ env.HAXE_VERSION }}-lime${{ env.LIME_VERSION }}-hxcpp${{ env.HXCPP_VERSION }}-${{ hashFiles('source/**', 'Project.xml') }}
+          key: mario-obj-v4-${{ runner.os }}-haxe${{ env.HAXE_VERSION }}-lime${{ env.LIME_VERSION }}-hxcpp${{ env.HXCPP_VERSION }}-${{ hashFiles('source/**', 'Project.xml') }}
 
       # hxcpp 只给声明了 <cache value="true"/> 的 file group 用编译缓存；hxcpp 自带的 std 组已开，
       # 游戏自己的 app 组在 lime 的 hxcpp 模板里没开 → 补上，否则 HXCPP_COMPILE_CACHE 对游戏源码完全无效
