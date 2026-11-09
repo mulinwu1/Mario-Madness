@@ -1,5 +1,6 @@
 ﻿#include "gl_shader.h"
 #include "gl_compat.h"
+#include "gl_state.h"
 
 #include <glslang/Include/glslang_c_interface.h>
 #include <glslang/Public/resource_limits_c.h>
@@ -2070,6 +2071,17 @@ static bool CreatePipelineSlot (Program* p, PipelineSlot* slot, const GLShaderVe
 	viewportState.scissorCount = 1;
 	viewportState.pScissors = &scissor;
 
+	// viewport/scissor 必须是动态状态：program 管线只在第一次见到该 program 时创建，
+	// 而创建时窗口多半还是 921x691；窗口 resize 到 1280x720 后，若沿用写死的
+	// 921x691 viewport，每一笔 progpipe 都会把整幅图按 921/1280=0.72 缩小，
+	// 经离屏 ping-pong（1004→1005→1004）两三次后就会缩成"菜单挤在左侧约 1/4"。
+	// vk_renderer.cpp 每个 pass 已经按 GL 侧 glViewport/glScissor 调了
+	// vkCmdSetViewport/vkCmdSetScissor，这里只要把它们声明成动态即可生效。
+	VkDynamicState dynStates[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+	VkPipelineDynamicStateCreateInfo dynamicState{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+	dynamicState.dynamicStateCount = 2;
+	dynamicState.pDynamicStates = dynStates;
+
 	VkPipelineRasterizationStateCreateInfo rasterization{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
 	rasterization.polygonMode = VK_POLYGON_MODE_FILL;
 	rasterization.cullMode = VK_CULL_MODE_NONE;
@@ -2116,6 +2128,7 @@ static bool CreatePipelineSlot (Program* p, PipelineSlot* slot, const GLShaderVe
 	pipelineInfo.pMultisampleState = &multisample;
 	pipelineInfo.pDepthStencilState = &depthStencil;
 	pipelineInfo.pColorBlendState = &colorBlend;
+	pipelineInfo.pDynamicState = &dynamicState;
 	pipelineInfo.layout = pipelineLayout;
 	pipelineInfo.renderPass = renderPass;
 	pipelineInfo.subpass = 0;
@@ -3482,7 +3495,23 @@ void lime_gl_uniform_matrix3x4fv (int location, int count, bool transpose, doubl
 
 void lime_gl_uniform_matrix4fv (int location, int count, bool transpose, double _value) {
 
-	WriteMatrices (location, count, transpose, (const float*) (uintptr_t) _value, 4, 4);
+	float* mat = (float*) (uintptr_t) _value;
+	// openfl 的投影矩阵 = createOrtho(0, stageWidth, 0, stageHeight)。
+	// Vulkan 后端下 stageWidth 因 SDL_GL_GetDrawableSize 的 DPI 因子被压成 1034（=1280*0.808）。
+	// 仅在窗口已放大到 1280（menu）时把投影修正回 1280x720；标题页（viewport=921）不碰。
+	if (mat && !transpose && count == 1) {
+		float a = mat[0];
+		if (a > 0.001920f && a < 0.001948f) {   // 精确匹配 2/1034=0.0019342，不含 2/921=0.0021716
+			int vp[4] = {0,0,0,0};
+			lime::glstate::GetViewportBox(vp);
+			if (vp[2] >= 1200) {                // menu: viewport=1280
+				mat[0] = 2.0f / 1280.0f;
+				mat[5] = -2.0f / 720.0f;
+			}
+			// title: viewport=921, 不改
+		}
+	}
+	WriteMatrices (location, count, transpose, mat, 4, 4);
 
 }
 
