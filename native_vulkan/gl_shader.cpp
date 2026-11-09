@@ -3119,6 +3119,41 @@ static void MaybeLogUniformValues (Program* program) {
 
 	if (!program || program->id < 1 || program->id > 7) return;
 
+	// 诊断（VK_UNIFLOG=1，默认关）：采样打印游戏自定义 uniform 的真实值
+	// （glitchAmount / time / resolution / dim / Directions / Quality / Size …）。
+	// 与上面 500 次上限无关：上限在标题页就被吃满，菜单阶段看不到真实值。
+	// 只读，不改变任何行为。
+	{
+		static int s_ulOn = -1;
+		if (s_ulOn < 0) {
+			const char* e = getenv("VK_UNIFLOG");
+			s_ulOn = (e && e[0] == '1') ? 1 : 0;
+		}
+		if (s_ulOn) {
+			static long long s_ulTick = 0;
+			static int s_ulPrints = 0;
+			s_ulTick++;
+			if ((s_ulTick % 1000) == 0 && s_ulPrints < 400) {
+				s_ulPrints++;
+				fprintf(stderr, "[uniflog] prog=%d", program->id);
+				for (size_t i = 0; i < program->uniforms.size (); i++) {
+					const UniformInfo& u = program->uniforms[i];
+					if (u.kind != 0 || u.columns > 1) continue;
+					if (u.name.compare (0, 7, "openfl_") == 0) continue;
+					uint32_t base = ElementBase (u, 0);
+					int n = u.components > 0 ? u.components : 1;
+					if (base + (uint32_t) n * 4u > program->uniformData.size ()) continue;
+					fprintf(stderr, " %s=", u.name.c_str ());
+					for (int j = 0; j < n; j++) {
+						const float v = *(const float*) (program->uniformData.data () + base + (uint32_t) j * 4u);
+						fprintf(stderr, j ? ",%g" : "%g", v);
+					}
+				}
+				fprintf(stderr, "\n");
+			}
+		}
+	}
+
 	static std::map<int, int> s_unifvalCounts;
 	int& prints = s_unifvalCounts[program->id];
 	if (prints >= 500) return;
