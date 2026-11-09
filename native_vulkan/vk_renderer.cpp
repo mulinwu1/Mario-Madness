@@ -3953,7 +3953,26 @@ void VkRenderer::EndFrame() {
                     fprintf(stderr, "[progpipe] dbg range-without-prog count=%zu\n", ranges.size());
                 }
             }
-            if (s_useProg && r.prog > 0) {
+            // 二分工具（VK_PROGPIPE_SKIP=2,3,6）：列出的 prog 强制退回兜底管线，
+            // 用于定位"哪个 prog 的离屏笔把场景画没了"。不设 = 全部走自定义。
+            static unsigned char s_skipProgs[256] = {0};
+            static int s_skipInit = 0;
+            if (!s_skipInit) {
+                s_skipInit = 1;
+                const char* e = getenv("VK_PROGPIPE_SKIP");
+                if (e && *e) {
+                    unsigned cur = 0; bool has = false;
+                    for (const char* p = e; ; p++) {
+                        if (*p >= '0' && *p <= '9') { cur = cur * 10u + (unsigned)(*p - '0'); has = true; }
+                        else {
+                            if (has && cur < 256) s_skipProgs[cur] = 1;
+                            cur = 0; has = false;
+                            if (!*p) break;
+                        }
+                    }
+                }
+            }
+            if (s_useProg && r.prog > 0 && !s_skipProgs[r.prog]) {
                 // 同一个 program 在两个阶段用两套管线：画到离屏目标（currentTarget>=1000）
                 // 和画到屏幕（0）。Vulkan 要求管线创建时的 render pass 与当前绑定的一致，
                 // 否则行为未定义（实测表现为整屏全黑）。三个调用必须共用同一个 off。
