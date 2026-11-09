@@ -286,3 +286,24 @@ if os.path.exists(sdl):
 else:
     print("WARN: SDLWindow.cpp not found")
 
+# 5) 治本：lime_window_get_scale 是 openfl 取 window.scale 的唯一 CFFI 入口。
+# Vulkan 后端下 SDL_GL_GetDrawableSize 返回交换链物理像素（≠ 逻辑宽度），
+# 导致 GetScale()=0.808 → __scale=0.808 → stageWidth=1034 → 菜单挤左侧。
+# 固定返回 1.0，让 stageWidth = window.width = 1280。
+extint = os.path.join(LIME, "project", "src", "ExternalInterface.cpp")
+if os.path.exists(extint):
+    s = open(extint, encoding="utf-8").read()
+    if "vulkan_scale_fix" in s:
+        print("ExternalInterface.cpp already patched")
+    else:
+        scale_anchor = "\tdouble lime_window_get_scale (value window) {\n\n\t\tWindow* targetWindow = (Window*)val_data (window);\n\t\treturn targetWindow->GetScale ();"
+        scale_fix = "\tdouble lime_window_get_scale (value window) {\n\n\t\t// vulkan_scale_fix: return 1.0 (GetScale uses drawable/window px ratio)\n\t\treturn 1.0;"
+        if scale_anchor in s:
+            s = s.replace(scale_anchor, scale_fix, 1)
+            open(extint, "w", encoding="utf-8").write(s)
+            print("patched ExternalInterface.cpp: lime_window_get_scale -> 1.0")
+        else:
+            print("WARN: lime_window_get_scale anchor not found in ExternalInterface.cpp")
+else:
+    print("WARN: ExternalInterface.cpp not found")
+
