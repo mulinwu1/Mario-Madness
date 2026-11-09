@@ -3781,6 +3781,13 @@ void VkRenderer::EndFrame() {
                         o.vbPtr[45], o.vbPtr[46], o.vbPtr[58], o.vbPtr[59],
                         o.vbPtr[60], o.vbPtr[61], o.vbPtr[73], o.vbPtr[74],
                         o.vbPtr[75], o.vbPtr[76], o.vbPtr[88], o.vbPtr[89]);
+                // 第二个四边形（顶点 6..11）：上屏合成有两个 range，只打前 6 个顶点会漏掉主体
+                if (totalVerts >= 12) {
+                    fprintf(stderr, "[vk] v6b=(%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f) | (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f)\n",
+                            o.vbPtr[90], o.vbPtr[91], o.vbPtr[105], o.vbPtr[106],
+                            o.vbPtr[120], o.vbPtr[121], o.vbPtr[135], o.vbPtr[136],
+                            o.vbPtr[150], o.vbPtr[151], o.vbPtr[165], o.vbPtr[166]);
+                }
             }
         }
     }
