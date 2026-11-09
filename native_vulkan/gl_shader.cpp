@@ -2435,7 +2435,22 @@ int gl_shader_sampler_binding (int program, const char* name) {
 	if (!p || !name) return -1;
 
 	UniformInfo* uniform = FindUniform (p, StripArraySuffix (name));
-	if (!uniform || uniform->kind != BASE_SAMPLER) return -1;
+	if (!uniform || uniform->kind != BASE_SAMPLER) {
+		// 诊断：按名字查不到时，把这个 program 真正登记了哪些 uniform 打出来，
+		// 用于确认是"没扫描到"还是"名字不一致"。
+		static unsigned char s_dumped[256] = {0};
+		if (program >= 0 && program < 256 && !s_dumped[program]) {
+			s_dumped[program] = 1;
+			fprintf (stderr, "[gl_shader] unames prog=%d count=%zu:\n",
+				program, p->uniforms.size ());
+			for (size_t i = 0; i < p->uniforms.size (); i++) {
+				fprintf (stderr, "    [%zu] '%s' kind=%d binding=%d unit=%d\n", i,
+					p->uniforms[i].name.c_str (), p->uniforms[i].kind,
+					p->uniforms[i].binding, p->uniforms[i].textureUnit);
+			}
+		}
+		return -1;
+	}
 	return uniform->binding;
 
 }
