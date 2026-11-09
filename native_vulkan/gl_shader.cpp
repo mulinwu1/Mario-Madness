@@ -3482,18 +3482,7 @@ void lime_gl_uniform_matrix3x4fv (int location, int count, bool transpose, doubl
 
 void lime_gl_uniform_matrix4fv (int location, int count, bool transpose, double _value) {
 
-	float* mat = (float*) (uintptr_t) _value;
-	// openfl 的投影矩阵首元素 = 2/stageWidth。Vulkan 后端下
-	// SDL_GL_GetDrawableSize 返回交换链物理像素（1034），导致 stageWidth=1034。
-	// 实际窗口是 1280，修正首元素让投影匹配逻辑宽度。
-	if (mat && !transpose && count == 1) {
-		float a = mat[0];
-		if (a > 0.0018f && a < 0.0020f) {        // ≈ 2/1034 (menu)
-			mat[0] = 2.0f / 1280.0f;
-			mat[5] = -2.0f / 720.0f;
-		}
-	}
-	WriteMatrices (location, count, transpose, mat, 4, 4);
+	WriteMatrices (location, count, transpose, (const float*) (uintptr_t) _value, 4, 4);
 
 }
 
