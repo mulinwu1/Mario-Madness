@@ -3948,8 +3948,12 @@ void VkRenderer::EndFrame() {
                     }
                     if (vw != VK_NULL_HANDLE) {
                         bool okU = lime::gl_shader_upload_uniforms((int)r.prog);
-                        // 本工程 14 个片元着色器的采样器都叫 bitmap（源码与 trace 均已核对）
+                        // 采样器名字不统一：8 属性那批叫 bitmap，5 属性那批（上屏用）叫
+                        // openfl_Texture。两个都试，先命中的那个生效。
                         bool okS = lime::gl_shader_write_sampler((int)r.prog, off, "bitmap", vw, sp);
+                        if (!okS) {
+                            okS = lime::gl_shader_write_sampler((int)r.prog, off, "openfl_Texture", vw, sp);
+                        }
                         // 一次性诊断：把两条返回值和关键尺寸打出来，区分"描述符没通"与"顶点塌陷"
                         static unsigned char s_rep[256][2] = {{0}};
                         int pg = (int)r.prog;
