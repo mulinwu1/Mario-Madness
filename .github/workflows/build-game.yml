@@ -91,16 +91,18 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $src = (Resolve-Path "lime-vulkan-artifact\lime.ndll").Path
+          $src = (Get-ChildItem "lime-vulkan-artifact" -Recurse -Filter 'lime.ndll' -File | Select-Object -First 1).FullName
+          if (-not $src) { throw "lime.ndll not found in artifact" }
           $txt = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($src))
           if (([regex]::Matches($txt,'vkCreateInstance')).Count -lt 1) {
             throw "artifact lime-vulkan-ndll is not a Vulkan build (no vkCreateInstance)"
           }
           Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_LIME_NDLL=$src"
           # glslang 的 shim dll：lime.ndll 通过 import lib 调它，运行时必须和 ndll 同目录
-          $shim = (Resolve-Path "lime-vulkan-artifact\lime_glslang.dll" -ErrorAction SilentlyContinue)
+          $shim = Get-ChildItem "lime-vulkan-artifact" -Recurse -Filter 'lime_glslang.dll' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($shim) { $shim = $shim.FullName }
           if (-not $shim) { throw "artifact lime-vulkan-ndll missing lime_glslang.dll" }
-          Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_LIME_SHIM=$($shim.Path)"
+          Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_LIME_SHIM=$shim"
           # 缓存里若残留 lime dev 指向别的 runner 上的 C:\lime-src，会让 lime 直接找不到库
           $devFile = "$env:USERPROFILE\haxelib\.dev\lime"
           if (Test-Path $devFile) { Write-Host "removing stale lime dev entry"; Remove-Item $devFile -Force }
