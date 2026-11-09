@@ -1897,6 +1897,15 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
             if (u > 1.001f || u < -1.001f) u = tw > 0 ? u / tw : 1.0f;
             if (v > 1.001f || v < -1.001f) v = th > 0 ? v / th : 1.0f;
         }
+        // 走到游戏自己的管线时，离屏结果送进后缓冲后整屏是上下颠倒的（GL 原点左下、
+        // Vulkan Y 向下）。负高度视口改不动它（实测完全无变化），说明翻转发生在"采样"
+        // 这一步，所以在最终上屏那一笔把 V 翻转回来。
+        static int s_flipV = -1;
+        if (s_flipV < 0) {
+            const char* e = getenv("VK_PROGPIPE_USE");
+            s_flipV = (e && e[0] == '1') ? 1 : 0;
+        }
+        if (s_flipV && o.currentTarget == 0 && texId >= 1000) v = 1.0f - v;
         // 每顶点颜色调制：loc6/loc7 的真实数据（来自 GL 的 loc6/loc7 顶点数组），
         // 没有逐顶点数组时退回 SetDrawColor 的常量
         static const float kIdentityMult[4] = {1.0f, 1.0f, 1.0f, 1.0f};
