@@ -1,5 +1,6 @@
 // AUTO-GENERATED stubs for lime GL functions not implemented in gl_core.cpp
 #include "gl_compat.h"
+#include "gl_state.h"   // GetViewportBox：glGetIntegerv 的尺寸查询要用
 
 namespace lime {
 
@@ -94,7 +95,35 @@ void lime_gl_get_framebuffer_attachment_parameteriv (int target, int attachment,
 int lime_gl_get_integer (int pname) { return 0; }
 void lime_gl_get_integer64v (int pname, double params) {}
 void lime_gl_get_integer64i_v (int pname, int index, double params) {}
-void lime_gl_get_integerv (int pname, double params) {}
+// 游戏/openfl 会用 glGetIntegerv 查视口与绘图缓冲尺寸来定布局宽度。
+// 空桩会让它拿到 0/旧值 → resize 后 UI 仍按旧宽度排版（实测 921 vs 1280）。
+// 这里把 GL_VIEWPORT 与 GL_DRAWING_BUFFER_* 用当前 GL 视口值填上。
+void lime_gl_get_integerv (int pname, double params) {
+    int* out = (int*)(uintptr_t)params;
+    if (!out) return;
+    int box[4] = {0, 0, 0, 0};
+    glstate::GetViewportBox (box);
+    switch (pname) {
+        case 0x0BA2:   // GL_VIEWPORT
+            out[0] = box[0]; out[1] = box[1]; out[2] = box[2]; out[3] = box[3];
+            break;
+        case 0x0D66:   // GL_DRAWING_BUFFER_WIDTH
+            out[0] = box[2] > 0 ? box[2] : 0;
+            break;
+        case 0x0D67:   // GL_DRAWING_BUFFER_HEIGHT
+            out[0] = box[3] > 0 ? box[3] : 0;
+            break;
+        case 0x0D33:   // GL_MAX_TEXTURE_SIZE
+            out[0] = 16384;
+            break;
+        case 0x8869:   // GL_MAX_VERTEX_ATTRIBS
+            out[0] = 16;
+            break;
+        default:
+            out[0] = 0;
+            break;
+    }
+}
 void lime_gl_get_integeri_v (int pname, int index, double params) {}
 void lime_gl_get_internalformativ (int target, int internalformat, int pname, int bufSize, double params) {}
 void lime_gl_get_program_binary (int program, int binaryFormat, value bytes) {}
