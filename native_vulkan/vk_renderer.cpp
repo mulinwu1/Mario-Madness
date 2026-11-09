@@ -3934,6 +3934,14 @@ void VkRenderer::EndFrame() {
                     if (r.id >= 1000) {
                         uint32_t ti = r.id - 1000;
                         if (ti < o.targets.size() && o.targets[ti].used) vw = o.targets[ti].view;
+                        // 离屏目标没有自己的 sampler，借一个已用贴图槽的（都为空时留 0，
+                        // 由 gl_shader_write_sampler 内部回退到默认采样器）
+                        for (size_t k = 0; k < o.textures.size(); k++) {
+                            if (o.textures[k].used && o.textures[k].sampler) {
+                                sp = o.textures[k].sampler;
+                                break;
+                            }
+                        }
                     } else if (r.id > 0 && (size_t)r.id <= o.textures.size()) {
                         vw = o.textures[r.id - 1].view;
                         sp = o.textures[r.id - 1].sampler;
@@ -3949,9 +3957,10 @@ void VkRenderer::EndFrame() {
                             s_rep[pg][off ? 1 : 0] = 1;
                             fprintf(stderr,
                                     "[progpipe] state prog=%d off=%d upload=%d sampler=%d "
-                                    "id=%u view=%p smp=%p\n",
+                                    "id=%u view=%p smp=%p bind=%d\n",
                                     pg, off ? 1 : 0, okU ? 1 : 0, okS ? 1 : 0,
-                                    r.id, (void*)vw, (void*)sp);
+                                    r.id, (void*)vw, (void*)sp,
+                                    lime::gl_shader_sampler_binding(pg, "bitmap"));
                         }
                         if (pp != boundPipe) {
                             g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pp);
