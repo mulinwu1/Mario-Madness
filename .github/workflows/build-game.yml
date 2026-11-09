@@ -226,6 +226,28 @@ jobs:
             Write-Host "hxcpp compile cache enabled on $total file group(s)"
           }
 
+      # Vulkan: fix menu squeezed left. haxelib official lime NativeWindow.hx sets
+      # parent.__scale = lime_window_get_scale(), which under Vulkan returns 0.808
+      # (SDL_GL_GetDrawableSize gives swapchain px 1034 / logical 1280), squeezing
+      # stageWidth to 1034. Force 1.0 so width stays logical 1280.
+      - name: Patch lime NativeWindow __scale=1.0
+        shell: pwsh
+        run: |
+          $nw = "$env:USERPROFILE\haxelib\lime\8,0,2\src\lime\_internal\backend\native\NativeWindow.hx"
+          if (-not (Test-Path $nw)) { throw "NativeWindow.hx not found: $nw" }
+          $s = Get-Content $nw -Raw
+          if ($s -match 'parent\.__scale\s*=\s*1\.0;') {
+            Write-Host "NativeWindow.hx already __scale=1.0"
+          } else {
+            $s = $s.Replace('parent.__scale = NativeCFFI.lime_window_get_scale(handle);', 'parent.__scale = 1.0; // Vulkan: force logical scale')
+            if ($s -match 'parent\.__scale\s*=\s*1\.0;') {
+              [IO.File]::WriteAllText($nw, $s)
+              Write-Host "patched NativeWindow.hx: __scale=1.0"
+            } else {
+              throw "anchor not found in NativeWindow.hx"
+            }
+          }
+
       - name: Build game
         shell: pwsh
         run: |
