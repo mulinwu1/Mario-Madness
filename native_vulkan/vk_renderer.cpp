@@ -1759,8 +1759,26 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
         static signed char s_built[256] = {0};
         if (s_built[vkProg] == 0) {
             if (lime::gl_shader_program_has_attribute (vkProg, 5)) {
-                s_built[vkProg] = -2;
-                fprintf(stderr, "[progpipe] build prog=%d skipped reason=hasLoc5\n", vkProg);
+                // 带 loc5（alpha）的 program：原版 trace 里 loc5 是独立缓冲 stride=4，
+                // 而我们的顶点是 60 字节交错布局（pos4 / alpha / mult4 / off4 / uv2），
+                // 直接按 offset 16 映射即可，不需要第二条绑定。
+                static const lime::GLShaderVertexAttribute s_vattrs5[5] = {
+                    {0, 0, 109 /* R32G32B32A32_SFLOAT */, 0},
+                    {5, 0, 100 /* R32_SFLOAT */, 16},
+                    {6, 0, 109, 20},
+                    {7, 0, 109, 36},
+                    {4, 0, 103 /* R32G32_SFLOAT */, 52},
+                };
+                lime::GLShaderVertexLayout layout5{0, 60, s_vattrs5, 5};
+                bool ok5 = lime::gl_shader_build_pipeline (vkProg, &layout5, false);
+                VkPipeline pipe5 = ok5 ? lime::gl_shader_pipeline (vkProg, false) : VK_NULL_HANDLE;
+                s_built[vkProg] = ok5 ? 1 : -1;
+                if (ok5 && pipe5) {
+                    g_probePipeline = pipe5;
+                    g_probeProgram = vkProg;
+                }
+                fprintf(stderr, "[progpipe] build prog=%d attrs=%d loc5=1 ok=%d pipeline=%p\n",
+                        vkProg, lime::gl_shader_attribute_count (vkProg), ok5 ? 1 : 0, (void*) pipe5);
             } else {
                 static const lime::GLShaderVertexAttribute s_vattrs[5] = {
                     {0, 0, 103 /* R32G32_SFLOAT */, 0},
