@@ -3108,7 +3108,7 @@ static void MaybeLogUniformValues (Program* program) {
 
 	static std::map<int, int> s_unifvalCounts;
 	int& prints = s_unifvalCounts[program->id];
-	if (prints >= 20) return;
+	if (prints >= 500) return;
 	prints++;
 
 	for (size_t i = 0; i < program->uniforms.size (); i++) {
