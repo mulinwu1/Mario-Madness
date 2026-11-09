@@ -210,6 +210,12 @@ struct VkRenderer::Impl {
     void* statPtr = nullptr;
     size_t statBytes = 0;
     std::vector<RenderTarget> targets;
+    // 批处理提交顺序：GL 里每笔绘制是立即执行的，而顶点按纹理分桶收集后
+    // 若按纹理 id 升序提交，后画的整屏层会被压到先画的层下面（主菜单的
+    // 静态噪声层就是这么被背景盖掉的）。这里按 GL 提交顺序记录每一笔的
+    // 源 id / 该源顶点数组里的起始顶点 / 顶点数，EndFrame 严格照此顺序提交。
+    struct FrameSeg { uint32_t id; size_t off; size_t count; };
+    std::vector<FrameSeg> segs;
     uint32_t currentTarget = 0;
     // 最后一次真正收到顶点并提交的离屏目标（present 选源用）
     uint32_t lastGeomTarget = 0;
@@ -1680,9 +1686,11 @@ void VkRenderer::DrawSprite(uint32_t texId, float x, float y, float w, float h,
     float qy[6] = {y - hh, y - hh, y + hh, y - hh, y + hh, y + hh};
     float qu[6] = {u0, u1, u1, u0, u1, u0};
     float qv[6] = {v0, v0, v1, v0, v1, v1};
+    size_t segOff = vertsPtr->size() / 15;
     for (int i = 0; i < 6; i++) {
         PushLimeVertex(*vertsPtr, qx[i], qy[i], qu[i], qv[i]);
     }
+    o.segs.push_back({texId, segOff, 6});
 }
 
 void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, const float* vertexAlpha,
@@ -1906,6 +1914,7 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
     }
 
     vertsPtr->reserve(vertsPtr->size() + (size_t)vertexCount * 15);
+    size_t segOff = vertsPtr->size() / 15;
     for (int i = 0; i < vertexCount; i++) {
         float px = verts[i * 4 + 0];
         float py = verts[i * 4 + 1];
@@ -1948,6 +1957,7 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
                        vertexAlpha ? vertexAlpha[i] : g_drawAlpha, m, f);
         progsPtr->push_back((uint16_t)((vkProg > 0 && vkProg < 65535) ? vkProg : 0));
     }
+    o.segs.push_back({texId, segOff, (size_t)vertexCount});
 }
 
 void VkRenderer::BeginFrame(float r, float g, float b, float a) {
@@ -3575,38 +3585,39 @@ void VkRenderer::EndFrame() {
 
     // 取证：按提交实际拼出的批次顺序记录源 id（贴图 1..N，离屏 1000+槽位）
     std::vector<uint32_t> batchIds;
-    auto pushBatch = [&](std::vector<float>& v, const std::vector<uint16_t>* pv,
-                         VkDescriptorSet set, uint32_t id) {
-        if (v.empty()) return;
-        size_t vc = v.size() / 15;
-        if (totalVerts + vc > (size_t)MAX_SPRITES * 6) return;
-        memcpy(dst + totalVerts * 15, v.data(), v.size() * sizeof(float));
-        // 同一张贴图里可能混着不同 GL program 的笔：按 program 连续段拆 range，
-        // 这样每段能绑自己的管线；没有逐顶点 program 信息时整段按 0（退回固定管线）。
-        // 诊断 VK_PROGPIPE_DBG=1：标签数与顶点数对不上时整段退化成 prog=0，
-        // 着色器就永远绑不上。先把差值打出来，指认是哪一批漏了 push。
+    // 提交一段顶点：src 指向该段在源顶点数组里的第一个顶点，cnt 为顶点数。
+    // 同一张贴图里可能混着不同 GL program 的笔：按 program 连续段拆 range，
+    // 这样每段能绑自己的管线；没有逐顶点 program 信息时整段按 0（退回固定管线）。
+    // 诊断 VK_PROGPIPE_DBG=1：标签数与顶点数对不上时整段退化成 prog=0，
+    // 着色器就永远绑不上。先把差值打出来，指认是哪一批漏了 push。
+    auto pushSeg = [&](const float* src, size_t cnt, const std::vector<uint16_t>* pv,
+                       size_t pvOff, VkDescriptorSet set, uint32_t id) {
+        if (!src || cnt == 0) return;
+        if (totalVerts + cnt > (size_t)MAX_SPRITES * 6) return;
+        memcpy(dst + totalVerts * 15, src, cnt * 15 * sizeof(float));
+        bool tagsOk = pv && (pvOff + cnt) <= pv->size();
         static int s_mismatch = 0;
-        if (pv && pv->size() != vc && s_mismatch < 12) {
+        if (pv && !tagsOk && s_mismatch < 12) {
             s_mismatch++;
-            fprintf(stderr, "[progpipe] mismatch id=%u verts=%zu tags=%zu\n",
-                    id, vc, pv->size());
+            fprintf(stderr, "[progpipe] mismatch id=%u verts=%zu tags=%zu off=%zu\n",
+                    id, cnt, pv->size(), pvOff);
         }
-        if (pv && pv->size() == vc) {
+        if (tagsOk) {
             size_t start = 0;
-            for (size_t k = 1; k <= vc; k++) {
-                if (k == vc || (*pv)[k] != (*pv)[start]) {
-                    ranges.push_back({set, totalVerts + start, k - start, (*pv)[start], id});
+            for (size_t k = 1; k <= cnt; k++) {
+                if (k == cnt || (*pv)[pvOff + k] != (*pv)[pvOff + start]) {
+                    ranges.push_back({set, totalVerts + start, k - start, (*pv)[pvOff + start], id});
                     start = k;
                 }
             }
         } else {
-            ranges.push_back({set, totalVerts, vc, 0, id});
+            ranges.push_back({set, totalVerts, cnt, 0, id});
         }
-        totalVerts += vc;
+        totalVerts += cnt;
         batchIds.push_back(id);
     };
-    // 实验 VK_ORDER_11FIRST=1（默认关）：3× 全屏源（贴图 11）改为最先画，
-    // 而不是按 id 升序被放到最后盖住其它所有层。用于判定“黑帧=贴图 11 全屏覆盖”。
+    // 实验 VK_ORDER_11FIRST=1（默认关）：3× 全屏源（贴图 11）改为最先画。
+    // 保留仅作诊断；正常路径已按 GL 提交顺序提交，不再需要它纠正层序。
     static int s_11first = -1;
     if (s_11first < 0) {
         const char* v = getenv("VK_ORDER_11FIRST");
@@ -3622,18 +3633,28 @@ void VkRenderer::EndFrame() {
         snprintf(key, sizeof(key), ",%u,", id);
         return strstr(buf, key) != nullptr;
     };
-    if (s_11first && o.textures.size() > 10 && o.textures[10].used) {
-        pushBatch(o.textures[10].verts, &o.textures[10].progs, o.textures[10].set, 11);
-    }
-    for (size_t i = 0; i < o.textures.size(); i++) {
-        if (s_11first && i == 10) continue;
-        if (!o.textures[i].used) continue;
-        uint32_t id = (uint32_t)(i + 1);
-        if (skipped(id)) continue;
-        pushBatch(o.textures[i].verts, &o.textures[i].progs, o.textures[i].set, id);
-    }
-    for (size_t i = 0; i < o.targets.size(); i++) {
-        if (o.targets[i].used) pushBatch(o.targets[i].verts, &o.targets[i].progs, o.targets[i].set, (uint32_t)(1000 + i));
+    // 按 GL 提交顺序把每段发出去（顺序错了会把整屏层叠关系画反）
+    auto pushOneSeg = [&](const Impl::FrameSeg& s) {
+        if (s.count == 0 || skipped(s.id)) return;
+        if (s.id >= 1000) {
+            uint32_t ti = s.id - 1000;
+            if (ti >= o.targets.size() || !o.targets[ti].used) return;
+            const std::vector<float>& v = o.targets[ti].verts;
+            if ((s.off + s.count) * 15 > v.size()) return;
+            pushSeg(v.data() + s.off * 15, s.count, &o.targets[ti].progs, s.off,
+                    o.targets[ti].set, s.id);
+        } else {
+            if (s.id == 0 || s.id > o.textures.size()) return;
+            TexSlot& t = o.textures[s.id - 1];
+            if (!t.used) return;
+            if ((s.off + s.count) * 15 > t.verts.size()) return;
+            pushSeg(t.verts.data() + s.off * 15, s.count, &t.progs, s.off, t.set, s.id);
+        }
+    };
+    if (s_11first) for (auto& s : o.segs) if (s.id == 11) pushOneSeg(s);
+    for (auto& s : o.segs) {
+        if (s_11first && s.id == 11) continue;
+        pushOneSeg(s);
     }
 
     // 取证：VK_TAG_PRESENT=1 时在屏幕角落画一块白色小方块，标记本次后缓冲合成
@@ -3658,7 +3679,7 @@ void VkRenderer::EndFrame() {
             PushLimeVertex(q, x0, y0, 0.0f, 0.0f);
             PushLimeVertex(q, x0 + 30.0f, H, 1.0f, 1.0f);
             PushLimeVertex(q, x0, H, 0.0f, 1.0f);
-            pushBatch(q, nullptr, o.textures[7].set, 8);
+            pushSeg(q.data(), 6, nullptr, 0, o.textures[7].set, 8);
         }
     }
 
@@ -3971,8 +3992,11 @@ void VkRenderer::EndFrame() {
                         mtx = f[12]; mty = f[13]; mw = f[15];
                     }
                     float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+                    float a0 = 0, cm[4] = {0, 0, 0, 0}, cf[4] = {0, 0, 0, 0};
                     if (r.count > 0 && o.vbPtr) {
                         const float* vp = o.vbPtr + r.first * 15;
+                        a0 = vp[4];
+                        for (int k = 0; k < 4; k++) { cm[k] = vp[5 + k]; cf[k] = vp[9 + k]; }
                         x0 = x1 = vp[0];
                         y0 = y1 = vp[1];
                         for (size_t k = 1; k < r.count; k++) {
@@ -3986,12 +4010,14 @@ void VkRenderer::EndFrame() {
                     fprintf(stderr,
                             "[drawlog] f=%llu tgt=%u prog=%u id=%u first=%zu n=%zu "
                             "pos=[%.1f..%.1f, %.1f..%.1f] m00=%.7f m01=%.7f m10=%.7f m11=%.7f "
-                            "tx=%.4f ty=%.4f w=%.4f cx=[%.3f..%.3f] wcalc=[%.3f..%.3f]\n",
+                            "tx=%.4f ty=%.4f w=%.4f cx=[%.3f..%.3f] wcalc=[%.3f..%.3f] "
+                            "a0=%.3f cm=[%.3f %.3f %.3f %.3f] cf=[%.3f %.3f %.3f %.3f]\n",
                             (unsigned long long)g_drawFrame, (unsigned)o.currentTarget,
                             (unsigned)r.prog, r.id, r.first, r.count,
                             x0, x1, y0, y1, m00, m01, m10, m11, mtx, mty, mw,
                             m00 * x0 + m10 * y0 + mtx, m00 * x1 + m10 * y1 + mtx,
-                            mtx * x0 + mty * y0 + mw, mtx * x1 + mty * y1 + mw);
+                            mtx * x0 + mty * y0 + mw, mtx * x1 + mty * y1 + mw,
+                            a0, cm[0], cm[1], cm[2], cm[3], cf[0], cf[1], cf[2], cf[3]);
                 }
             }
             if (s_progDbg) {
@@ -4281,4 +4307,5 @@ void VkRenderer::EndFrame() {
     g_bbLastTex = 0;
     for (auto& t : o.textures) { t.verts.clear(); t.progs.clear(); }
     for (auto& t : o.targets) { t.verts.clear(); t.progs.clear(); }
+    o.segs.clear();
 }
