@@ -267,7 +267,15 @@ if os.path.exists(sdl):
         # 压成 1034（= 1280*0.808）→ flixel 按 1034 排版 → 菜单挤在左侧。
         # Vulkan 激活时固定返回 1.0，让 stageWidth = window.width。
         scale_anchor = "double SDLWindow::GetScale () {"
-        scale_inject = "double SDLWindow::GetScale () {\n\n\t\treturn 1.0;  // vulkan: SDL_GL_GetDrawableSize returns swapchain px, not logical width"
+        scale_inject = (
+            "double SDLWindow::GetScale () {\n\n"
+            "\t\tint _dbgW = 0, _dbgH = 0;\n"
+            "\t\tint _dbgWW = 0, _dbgWH = 0;\n"
+            "\t\tSDL_GL_GetDrawableSize (sdlWindow, &_dbgW, &_dbgH);\n"
+            "\t\tSDL_GetWindowSize (sdlWindow, &_dbgWW, &_dbgWH);\n"
+            "\t\tfprintf (stderr, \"[scale] drawable=%dx%d window=%dx%d ratio=%.4f\\n\",\n"
+            "\t\t\t_dbgW, _dbgH, _dbgWW, _dbgWH, _dbgWW > 0 ? double(_dbgW)/_dbgWW : 0.0);\n"
+        )
         if scale_anchor in s:
             s = s.replace(scale_anchor, scale_inject, 1)
         else:
