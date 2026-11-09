@@ -1718,6 +1718,32 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
     }
     NoteSampled(texId);
     if (vertexCount <= 0) return;
+    // 诊断（VK_COLORLOG="from-to"，默认关）：按帧范围打印每笔实际使用的顶点色/alpha，
+    // 用于定位 colorTransform 在哪一类精灵上丢失（例如主菜单静态噪声层不上色）。
+    {
+        static long long s_cf = -3, s_ct = -3;
+        if (s_cf == -3) {
+            const char* e = getenv("VK_COLORLOG");
+            s_cf = -1; s_ct = -1;
+            if (e && e[0]) {
+                long long a = 0, b = 0;
+                if (sscanf(e, "%lld-%lld", &a, &b) == 2) { s_cf = a; s_ct = b; }
+                else { s_cf = atoll(e); s_ct = 0x7fffffffffffffffLL; }
+            }
+        }
+        if (s_cf >= 0 && (long long)g_drawFrame >= s_cf && (long long)g_drawFrame <= s_ct) {
+            const float* cm0 = vertexMult ? vertexMult : g_drawMult;
+            const float* cf0 = vertexOff ? vertexOff : g_drawOff;
+            float a0 = vertexAlpha ? vertexAlpha[0] : g_drawAlpha;
+            fprintf(stderr,
+                    "[colorlog] f=%llu cur=%u tex=%u n=%d prog=%d csrc=%s a=%.3f "
+                    "col=[%.3f %.3f %.3f %.3f] off=[%.3f %.3f %.3f %.3f]\n",
+                    (unsigned long long)g_drawFrame, (unsigned)o.currentTarget, texId,
+                    vertexCount, lime::gl_shader_current_program(),
+                    vertexMult ? "arr" : "const", a0,
+                    cm0[0], cm0[1], cm0[2], cm0[3], cf0[0], cf0[1], cf0[2], cf0[3]);
+        }
+    }
     // 后缓冲合成笔的 alpha（第十四轮）：标题页一个视觉帧分两笔铺后缓冲，
     // 批处理按纹理 id 排序 → 1001 先、1002 后。离屏画布现在按 GL 语义清成 (0,0,0,0)，
     // 两层都带像素 alpha，正常混合即可，默认 1.0（不再需要均一降 alpha 的折中）。
@@ -3972,16 +3998,22 @@ void VkRenderer::EndFrame() {
             s_progDbg = (e && e[0] == '1') ? 1 : 0;
         }
         for (auto& r : ranges) {
-            // 诊断（VK_DRAWLOG_FRAME=<n>，默认关）：只在该 draw frame 逐笔打印
-            // prog / 贴图 / 顶点像素范围 / 程序 UBO 里的 openfl_Matrix 实际值，
+            // 诊断（VK_DRAWLOG_FRAME=<n> 或 "<from>-<to>"，默认关）：逐笔打印
+            // prog / 贴图 / 顶点像素范围 / 程序 UBO 里的 openfl_Matrix 实际值 / 顶点色，
             // 用于区分"顶点被压扁"与"矩阵被写错"。只读，不影响渲染。
             {
-                static long long s_dlFrame = -2;
+                static long long s_dlFrame = -2, s_dlEnd = -2;
                 if (s_dlFrame == -2) {
                     const char* e = getenv("VK_DRAWLOG_FRAME");
-                    s_dlFrame = (e && e[0]) ? atoll(e) : -1;
+                    s_dlFrame = -1; s_dlEnd = -1;
+                    if (e && e[0]) {
+                        long long a = 0, b = 0;
+                        if (sscanf(e, "%lld-%lld", &a, &b) == 2) { s_dlFrame = a; s_dlEnd = b; }
+                        else { s_dlFrame = atoll(e); s_dlEnd = s_dlFrame; }
+                    }
                 }
-                if (s_dlFrame >= 0 && (long long)g_drawFrame == s_dlFrame) {
+                if (s_dlFrame >= 0 && (long long)g_drawFrame >= s_dlFrame
+                        && (long long)g_drawFrame <= s_dlEnd) {
                     const uint8_t* ub = nullptr;
                     uint32_t usz = 0;
                     float m00 = 0, m01 = 0, m10 = 0, m11 = 0, mtx = 0, mty = 0, mw = 0;
