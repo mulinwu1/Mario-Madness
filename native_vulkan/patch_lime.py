@@ -344,9 +344,8 @@ if os.path.exists(nw):
         w_fix = (
             "\t@:noCompletion private inline function get_width():Int\n\t{\n"
             "\t\t// vulkan_width_live: return live SDL size, not cached __width\n"
-            "\t\t// (resize event passes drawable px 1034, not logical 1280)\n"
             "\t\tif (__backend != null && __backend.handle != null)\n"
-            "\t\t\treturn NativeCFFI.lime_window_get_width(__backend.handle);\n"
+            "\t\t\treturn @:privateAccess NativeCFFI.lime_window_get_width(__backend.handle);\n"
             "\t\treturn __width;\n\t}"
         )
         h_anchor = "\t@:noCompletion private inline function get_height():Int\n\t{\n\t\treturn __height;\n\t}"
@@ -354,7 +353,7 @@ if os.path.exists(nw):
             "\t@:noCompletion private inline function get_height():Int\n\t{\n"
             "\t\t// vulkan_width_live: return live SDL size\n"
             "\t\tif (__backend != null && __backend.handle != null)\n"
-            "\t\t\treturn NativeCFFI.lime_window_get_height(__backend.handle);\n"
+            "\t\t\treturn @:privateAccess NativeCFFI.lime_window_get_height(__backend.handle);\n"
             "\t\treturn __height;\n\t}"
         )
         ok = True
