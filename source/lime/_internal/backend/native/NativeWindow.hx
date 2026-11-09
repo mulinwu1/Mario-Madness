@@ -124,7 +124,9 @@ class NativeWindow
 			parent.id = NativeCFFI.lime_window_get_id(handle);
 		}
 
-		parent.__scale = NativeCFFI.lime_window_get_scale(handle);
+		// Vulkan backend fix: GetScale() returns drawable/logical ratio (0.808 on DPI displays),
+		// causing stageWidth=1034 instead of 1280. Force scale=1.0 so width is always logical.
+		parent.__scale = 1.0;
 
 		var context = new RenderContext();
 		context.window = parent;
