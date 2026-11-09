@@ -3104,7 +3104,7 @@ int SnapshotTexBound (int unit);
 // 每个 program 只打前 20 次，避免刷屏。只读，不影响渲染。
 static void MaybeLogUniformValues (Program* program) {
 
-	if (!program || program->id < 5 || program->id > 7) return;
+	if (!program || program->id < 1 || program->id > 7) return;
 
 	static std::map<int, int> s_unifvalCounts;
 	int& prints = s_unifvalCounts[program->id];
