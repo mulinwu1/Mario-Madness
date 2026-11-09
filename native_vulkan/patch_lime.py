@@ -307,3 +307,26 @@ if os.path.exists(extint):
 else:
     print("WARN: ExternalInterface.cpp not found")
 
+# 6) 诊断：GetWidth/GetHeight 打印 SDL_GetWindowSize vs SDL_GL_GetDrawableSize 实际值
+if os.path.exists(sdl):
+    s = open(sdl, encoding="utf-8").read()
+    if "vulkan_size_diag" in s:
+        print("SDLWindow.cpp size diag already added")
+    else:
+        w_anchor = "\tint SDLWindow::GetWidth () {\n\n\t\tint width;\n\t\tint height;\n\n\t\tSDL_GetWindowSize (sdlWindow, &width, &height);\n\n\t\treturn width;"
+        w_fix = (
+            "\tint SDLWindow::GetWidth () {\n\n"
+            "\t\tint width;\n\t\tint height;\n"
+            "\t\tint dw = 0, dh = 0;\n"
+            "\t\tSDL_GetWindowSize (sdlWindow, &width, &height);\n"
+            "\t\tSDL_GL_GetDrawableSize (sdlWindow, &dw, &dh);\n"
+            "\t\tfprintf (stderr, \"[size] GetWidth: SDL_GetWindowSize=%dx%d drawable=%dx%d\\n\", width, height, dw, dh);\n"
+            "\t\treturn width;"
+        )
+        if w_anchor in s:
+            s = s.replace(w_anchor, w_fix, 1)
+            open(sdl, "w", encoding="utf-8").write(s)
+            print("patched SDLWindow.cpp: GetWidth size diagnostic")
+        else:
+            print("WARN: GetWidth anchor not found in SDLWindow.cpp")
+
