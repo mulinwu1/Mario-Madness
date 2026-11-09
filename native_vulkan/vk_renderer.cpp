@@ -3904,6 +3904,7 @@ void VkRenderer::EndFrame() {
             const char* e = getenv("VK_PROGPIPE_DBG");
             s_progDbg = (e && e[0] == '1') ? 1 : 0;
         }
+        bool vpFlipped = false;
         for (auto& r : ranges) {
             if (s_progDbg) {
                 static unsigned char s_seenProg[256] = {0};
@@ -3966,6 +3967,14 @@ void VkRenderer::EndFrame() {
                                     r.id, (void*)vw, (void*)sp,
                                     lime::gl_shader_sampler_binding(pg, "bitmap"));
                         }
+                        // 游戏自己的顶点着色器用的是 GL 约定（原点左下、Y 向上），
+                        // Vulkan 的 NDC 是 Y 向下。用负高度视口抵消，否则整屏上下颠倒。
+                        if (!vpFlipped) {
+                            VkViewport f{0.0f, (float)ext.height, (float)ext.width,
+                                         -(float)ext.height, 0.0f, 1.0f};
+                            g_setViewport(o.cmd, 0, 1, &f);
+                            vpFlipped = true;
+                        }
                         if (pp != boundPipe) {
                             g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pp);
                             boundPipe = pp;
@@ -3984,7 +3993,12 @@ void VkRenderer::EndFrame() {
                 boundPipe = o.pipeline;
             }
             if (boundLayout != o.pipeLayout) {
-                boundLayout = o.pipeLayout;
+                if (vpFlipped) {
+                VkViewport n{0.0f, 0.0f, (float)ext.width, (float)ext.height, 0.0f, 1.0f};
+                g_setViewport(o.cmd, 0, 1, &n);
+                vpFlipped = false;
+            }
+            boundLayout = o.pipeLayout;
             }
             g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeLayout, 0, 1, &r.set, 0, nullptr);
             g_cmdDraw(o.cmd, (uint32_t)r.count, 1, (uint32_t)r.first, 0);
