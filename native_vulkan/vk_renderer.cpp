@@ -3972,7 +3972,9 @@ void VkRenderer::EndFrame() {
                     }
                 }
             }
-            if (s_useProg && r.prog > 0 && !s_skipProgs[r.prog]) {
+            // prog2（1×1 全屏填充笔）暂固定走兜底：它的自定义管线会把不透明黑盖到内容上
+            // （提交序按纹理槽号，tex10 在 tex3 之后），SKIP=2 实测场景即恢复（黑 89%→75.7%）。
+            if (s_useProg && r.prog > 0 && r.prog != 2 && !s_skipProgs[r.prog]) {
                 // 同一个 program 在两个阶段用两套管线：画到离屏目标（currentTarget>=1000）
                 // 和画到屏幕（0）。Vulkan 要求管线创建时的 render pass 与当前绑定的一致，
                 // 否则行为未定义（实测表现为整屏全黑）。三个调用必须共用同一个 off。
