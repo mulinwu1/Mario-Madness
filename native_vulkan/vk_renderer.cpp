@@ -1098,12 +1098,36 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     o.textures.resize(MAX_TEXTURES);
 
     // 接线（本轮只接不选）：把设备上下文交给 gl_shader，让它能自己建管线。
-    // 注册本身不进入任何 draw 路径；离屏 render pass 本轮不注册（不做离屏管线）。
+    // 离屏管线必须有离屏 render pass：建一条与目标兼容的（R8G8B8A8、单附件、单 subpass，
+    // 兼容性只看格式/样本数/附件数，loadOp 与 finalLayout 不参与比较），否则
+    // gl_shader_build_pipeline(prog, layout, true) 会全部失败，滤镜链退回兜底。
     {
+        VkRenderPass offRP = VK_NULL_HANDLE;
+        VkAttachmentDescription att{};
+        att.format = VK_FORMAT_R8G8B8A8_UNORM;
+        att.samples = VK_SAMPLE_COUNT_1_BIT;
+        att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        att.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkAttachmentReference ref{};
+        ref.attachment = 0;
+        ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        VkSubpassDescription sub{};
+        sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        sub.colorAttachmentCount = 1;
+        sub.pColorAttachments = &ref;
+        VkRenderPassCreateInfo orpci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+        orpci.attachmentCount = 1;
+        orpci.pAttachments = &att;
+        orpci.subpassCount = 1;
+        orpci.pSubpasses = &sub;
+        createRP(o.dev, &orpci, nullptr, &offRP);
+
         lime::GLShaderVkContext ctx{};
         ctx.device = o.dev;
         ctx.backbufferRenderPass = o.renderPass;
-        ctx.offscreenRenderPass = VK_NULL_HANDLE;
+        ctx.offscreenRenderPass = offRP;
         ctx.backbufferFormat = o.colorFormat;
         ctx.offscreenFormat = VK_FORMAT_R8G8B8A8_UNORM;
         ctx.viewportWidth = o.extent.width;
