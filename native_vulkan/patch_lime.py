@@ -331,42 +331,55 @@ if os.path.exists(sdl):
             print("WARN: GetWidth anchor not found in SDLWindow.cpp")
 
 
-# 7) 治本：NativeWindow.hx 的 get_width()/get_height() 返回缓存的 __width/__height，
+# 7) 治本：lime/ui/Window.hx 的 get_width()/get_height() 返回缓存的 __width/__height，
 #    而 resize 事件传的是 drawable 尺寸（1034）而非逻辑宽度（1280）。
-#    改成每次调 lime_window_get_width/height（→ SDL_GetWindowSize → 逻辑尺寸）。
-nw = os.path.join(LIME, "src", "lime", "_internal", "backend", "native", "NativeWindow.hx")
+#    改成每次调 NativeCFFI.lime_window_get_width/height（→ SDL_GetWindowSize → 逻辑尺寸）。
+nw = os.path.join(LIME, "src", "lime", "ui", "Window.hx")
 if os.path.exists(nw):
     s = open(nw, encoding="utf-8").read()
     if "vulkan_width_live" in s:
-        print("NativeWindow.hx already patched")
+        print("Window.hx already patched")
     else:
         w_anchor = "\t@:noCompletion private inline function get_width():Int\n\t{\n\t\treturn __width;\n\t}"
         w_fix = (
             "\t@:noCompletion private inline function get_width():Int\n\t{\n"
             "\t\t// vulkan_width_live: return live SDL size, not cached __width\n"
             "\t\t// (resize event passes drawable px 1034, not logical 1280)\n"
-            "\t\treturn NativeCFFI.lime_window_get_width(handle);\n\t}"
+            "\t\tif (__backend != null && __backend.handle != null)\n"
+            "\t\t\treturn NativeCFFI.lime_window_get_width(__backend.handle);\n"
+            "\t\treturn __width;\n\t}"
         )
         h_anchor = "\t@:noCompletion private inline function get_height():Int\n\t{\n\t\treturn __height;\n\t}"
         h_fix = (
             "\t@:noCompletion private inline function get_height():Int\n\t{\n"
             "\t\t// vulkan_width_live: return live SDL size\n"
-            "\t\treturn NativeCFFI.lime_window_get_height(handle);\n\t}"
+            "\t\tif (__backend != null && __backend.handle != null)\n"
+            "\t\t\treturn NativeCFFI.lime_window_get_height(__backend.handle);\n"
+            "\t\treturn __height;\n\t}"
         )
         ok = True
+        # 先加 import（如果没有）
+        imp_anchor = "import lime.app.Application;"
+        imp_add = "import lime.app.Application;\nimport lime._internal.backend.native.NativeCFFI;"
+        if "import lime._internal.backend.native.NativeCFFI" not in s:
+            if imp_anchor in s:
+                s = s.replace(imp_anchor, imp_add, 1)
+                print("patched Window.hx: added NativeCFFI import")
+            else:
+                print("WARN: import anchor not found in Window.hx"); ok = False
         if w_anchor in s:
             s = s.replace(w_anchor, w_fix, 1)
-            print("patched NativeWindow.hx: get_width -> live query")
+            print("patched Window.hx: get_width -> live query")
         else:
-            print("WARN: get_width anchor not found in NativeWindow.hx"); ok = False
+            print("WARN: get_width anchor not found in Window.hx"); ok = False
         if h_anchor in s:
             s = s.replace(h_anchor, h_fix, 1)
-            print("patched NativeWindow.hx: get_height -> live query")
+            print("patched Window.hx: get_height -> live query")
         else:
-            print("WARN: get_height anchor not found in NativeWindow.hx"); ok = False
+            print("WARN: get_height anchor not found in Window.hx"); ok = False
         if ok:
             open(nw, "w", encoding="utf-8").write(s)
         else:
-            print("NativeWindow.hx NOT patched (anchor mismatch)")
+            print("Window.hx NOT patched (anchor mismatch)")
 else:
-    print("WARN: NativeWindow.hx not found at", nw)
+    print("WARN: Window.hx not found at", nw)
