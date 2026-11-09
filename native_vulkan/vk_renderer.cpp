@@ -3528,7 +3528,8 @@ void VkRenderer::EndFrame() {
     }
 
     float* dst = o.vbPtr;
-    struct DrawRange { VkDescriptorSet set; size_t first; size_t count; uint16_t prog; };
+    // id = 本段采样源的批次号（1..N 贴图，1000+ 离屏槽位）：接自定义管线时要按它取 view/sampler
+    struct DrawRange { VkDescriptorSet set; size_t first; size_t count; uint16_t prog; uint32_t id; };
     std::vector<DrawRange> ranges;
     size_t totalVerts = 0;
 
@@ -3546,12 +3547,12 @@ void VkRenderer::EndFrame() {
             size_t start = 0;
             for (size_t k = 1; k <= vc; k++) {
                 if (k == vc || (*pv)[k] != (*pv)[start]) {
-                    ranges.push_back({set, totalVerts + start, k - start, (*pv)[start]});
+                    ranges.push_back({set, totalVerts + start, k - start, (*pv)[start], id});
                     start = k;
                 }
             }
         } else {
-            ranges.push_back({set, totalVerts, vc, 0});
+            ranges.push_back({set, totalVerts, vc, 0, id});
         }
         totalVerts += vc;
         batchIds.push_back(id);
@@ -3885,7 +3886,9 @@ void VkRenderer::EndFrame() {
             s_useProg = (e && e[0] == '1') ? 1 : 0;
         }
         VkPipeline boundPipe = o.pipeline;
+        VkPipelineLayout boundLayout = o.pipeLayout;
         static uint64_t s_progSw = 0;
+        static uint64_t s_progDS = 0;
         // 诊断（VK_PROGPIPE_DBG=1）：分别确认"段里有没有记下 prog"与"管线取不取得到"
         static int s_progDbg = -1;
         if (s_progDbg < 0) {
@@ -3910,21 +3913,49 @@ void VkRenderer::EndFrame() {
             }
             if (s_useProg && r.prog > 0) {
                 VkPipeline pp = lime::gl_shader_pipeline((int)r.prog, false);
-                if (pp != VK_NULL_HANDLE && pp != boundPipe) {
-                    g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pp);
-                    boundPipe = pp;
-                    s_progSw++;
+                VkPipelineLayout pl = lime::gl_shader_pipeline_layout((int)r.prog);
+                VkDescriptorSet ds = lime::gl_shader_descriptor_set((int)r.prog, false);
+                if (pp != VK_NULL_HANDLE && pl != VK_NULL_HANDLE && ds != VK_NULL_HANDLE) {
+                    VkImageView vw = VK_NULL_HANDLE;
+                    VkSampler sp = VK_NULL_HANDLE;
+                    if (r.id >= 1000) {
+                        uint32_t ti = r.id - 1000;
+                        if (ti < o.targets.size() && o.targets[ti].used) vw = o.targets[ti].view;
+                    } else if (r.id > 0 && (size_t)r.id <= o.textures.size()) {
+                        vw = o.textures[r.id - 1].view;
+                        sp = o.textures[r.id - 1].sampler;
+                    }
+                    if (vw != VK_NULL_HANDLE) {
+                        lime::gl_shader_upload_uniforms((int)r.prog);
+                        // 本工程 14 个片元着色器的采样器都叫 bitmap（源码已逐一核对）
+                        lime::gl_shader_write_sampler((int)r.prog, false, "bitmap", vw, sp);
+                        if (pp != boundPipe) {
+                            g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pp);
+                            boundPipe = pp;
+                            s_progSw++;
+                        }
+                        boundLayout = pl;
+                        g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &ds, 0, nullptr);
+                        g_cmdDraw(o.cmd, (uint32_t)r.count, 1, (uint32_t)r.first, 0);
+                        s_progDS++;
+                        continue;
+                    }
                 }
-            } else if (boundPipe != o.pipeline) {
+            }
+            if (boundPipe != o.pipeline) {
                 g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeline);
                 boundPipe = o.pipeline;
+            }
+            if (boundLayout != o.pipeLayout) {
+                boundLayout = o.pipeLayout;
             }
             g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeLayout, 0, 1, &r.set, 0, nullptr);
             g_cmdDraw(o.cmd, (uint32_t)r.count, 1, (uint32_t)r.first, 0);
         }
         if (s_useProg && (g_drawFrame % 120) == 1) {
-            fprintf(stderr, "[progpipe] use switches=%llu ranges=%zu f=%llu\n",
-                    (unsigned long long)s_progSw, ranges.size(), (unsigned long long)g_drawFrame);
+            fprintf(stderr, "[progpipe] use switches=%llu ranges=%zu ds=%llu f=%llu\n",
+                    (unsigned long long)s_progSw, ranges.size(),
+                    (unsigned long long)s_progDS, (unsigned long long)g_drawFrame);
         }
     }
     g_endRP(o.cmd);
