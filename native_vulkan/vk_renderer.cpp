@@ -4176,6 +4176,22 @@ void VkRenderer::EndFrame() {
                             s_progSw++;
                         }
                         boundLayout = pl;
+                        // 上屏笔（tgt=0）的坐标翻转：游戏给后缓冲的矩阵是按 GL 的
+                        // y-up NDC 生成的（实测 m11<0，y=0 映射到 +0.99），Vulkan 的
+                        // NDC 是 y-down，不翻会把整块画到屏幕另一侧并上下镜像——
+                        // FPS/Memory 文本就是这样跑到左下角且反着的。离屏笔的矩阵
+                        // 本身已是 y-down（m11>0），不能翻。
+                        // 同时取消 pack 阶段对离屏源（id>=1000）做的 V 翻转：整屏
+                        // 四边形下"翻几何"与"翻 V"等价，两者都做会互相抵消。
+                        if (o.currentTarget == 0) {
+                            float* vp = dst + r.first * 15;
+                            const float H = (float)ext.height;
+                            for (size_t k = 0; k < r.count; k++) {
+                                float* q = vp + k * 15;
+                                q[1] = H - q[1];
+                                if (r.id >= 1000) q[14] = 1.0f - q[14];
+                            }
+                        }
                         // UBO binding 0 是动态 UBO：传本笔的槽位偏移；program 没有
                         // uniform block（uniformSize=0，binding 0 不存在）时不能传动态偏移。
                         if (lime::gl_shader_uniform_buffer_size((int)r.prog) > 0) {
