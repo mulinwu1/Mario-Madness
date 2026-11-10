@@ -1776,6 +1776,32 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
                     cm0[0], cm0[1], cm0[2], cm0[3], cf0[0], cf0[1], cf0[2], cf0[3]);
         }
     }
+    // 诊断（VK_ALPHALOG=1，默认关）：只打“含半透明顶点 alpha”的笔，最多 240 条。
+    // 目的：确认 NoteSplash / 音符长条（源码里 alpha=0.6）在我们的管线里是否被二次乘 alpha。
+    {
+        static int s_mode = -1, s_n = 0;
+        if (s_mode < 0) { const char* e = getenv("VK_ALPHALOG"); s_mode = (e && e[0]) ? 1 : 0; }
+        if (s_mode && s_n < 240) {
+            float amn = 1.0f, amx = 0.0f;
+            if (vertexAlpha) {
+                for (int i = 0; i < vertexCount; i++) {
+                    float v = vertexAlpha[i];
+                    if (v < amn) amn = v;
+                    if (v > amx) amx = v;
+                }
+            } else {
+                amn = amx = g_drawAlpha;
+            }
+            if (amn < 0.95f) {
+                s_n++;
+                fprintf(stderr,
+                        "[alphalog] #%d f=%llu cur=%u tex=%u prog=%d n=%d amin=%.3f amax=%.3f alphav=%.3f\n",
+                        s_n, (unsigned long long)g_drawFrame, (unsigned)o.currentTarget, texId,
+                        lime::gl_shader_current_program(), vertexCount, amn, amx,
+                        lime::gl_shader_uniform_float(lime::gl_shader_current_program(), "openfl_Alphav"));
+            }
+        }
+    }
     // 后缓冲合成笔的 alpha（第十四轮）：标题页一个视觉帧分两笔铺后缓冲，
     // 批处理按纹理 id 排序 → 1001 先、1002 后。离屏画布现在按 GL 语义清成 (0,0,0,0)，
     // 两层都带像素 alpha，正常混合即可，默认 1.0（不再需要均一降 alpha 的折中）。
