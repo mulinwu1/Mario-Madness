@@ -275,8 +275,9 @@ jobs:
           # 冷路径才需要清空大资源目录：lime 会把 assets 搬进 bin，1.8GB 小文件在 runner 上极慢
           Get-ChildItem 'assets' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
             $mb = [math]::Round(((Get-ChildItem $_.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum) / 1MB, 1)
-            Write-Host "$($_.Name) = ${mb}MB -> emptied"
-            Get-ChildItem $_.FullName -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "$($_.Name) = ${mb}MB -> kept"
+            # CI(test): 不再清空 assets（lime 需要 assets/fonts 等资源来内嵌）
+            Write-Host "  (kept for lime embed)"
           }
           $hx = (Get-Command haxelib).Source
           Remove-Item build.log, build.err, empty.stdin -ErrorAction SilentlyContinue
