@@ -48,8 +48,9 @@
 	<define name="LUA_ALLOWED" if="windows" />
 	<define name="VIDEOS_ALLOWED" if="web || windows" unless="32"/>
 	
-	<!-- 默认关闭预加载：1.8GB assets 会让 Haxe 编译器 OOM，改为运行时从 assets/ 读取 -->
-	<define name="PRELOAD_ALL" if="preload_all" />
+	<!-- 实验：按上游默认开启 PRELOAD_ALL（默认库空壳是字体回退/资源 null 的根源）。
+	     若 CI 编译 OOM 或产物过大，改回 if="preload_all" 即可。 -->
+	<define name="PRELOAD_ALL" unless="web" />
 	<define name="NO_PRELOAD_ALL" unless="PRELOAD_ALL"/>
 	
 	<library name="videos"        preload="true" />
