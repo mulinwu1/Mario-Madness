@@ -130,8 +130,14 @@ struct AttribInfo {
 
 };
 
-struct PipelineSlot {
+// 每个 program 的 UBO 按“动态偏移槽位”分配：批处理把一帧内同一 program 的
+// 多笔绘制排到帧尾，如果共用一块 UBO，后一笔的 uniform 会覆盖前一笔
+// （典型症状：hasColorTransform 只有最后一笔的值）。每笔占一个 256B 对齐槽位。
+// 256 是 Vulkan 规范保证的 minUniformBufferOffsetAlignment 上界。
+static const uint32_t kUniformSlots = 64;
+static const uint32_t kUniformStride = 256;
 
+struct PipelineSlot {
 	bool built;
 	uint64_t fingerprint;
 	VkPipeline pipeline;
@@ -172,6 +178,8 @@ struct Program {
 	uint32_t uniformSize;
 	std::vector<uint8_t> uniformData;
 	bool uniformDirty;
+	// 本帧下一笔绘制可用的动态 UBO 槽位（每帧由 gl_shader_reset_uniform_slots 复位）
+	uint32_t nextUniformSlot;
 
 	std::vector<uint32_t> spirvVertex;
 	std::vector<uint32_t> spirvFragment;
@@ -182,7 +190,7 @@ struct Program {
 	PipelineSlot pipelineOffscreen;
 
 	Program () : id (0), deleted (false), linked (false), linkOk (false), validateOk (false),
-		nextLocation (0), uniformSize (0), uniformDirty (false) {}
+		nextLocation (0), uniformSize (0), uniformDirty (false), nextUniformSlot (0) {}
 
 };
 
@@ -1853,7 +1861,8 @@ static bool CreatePipelineSlot (Program* p, PipelineSlot* slot, const GLShaderVe
 
 		VkDescriptorSetLayoutBinding binding{};
 		binding.binding = 0;
-		binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		// 动态 UBO：每笔绘制一个偏移，绑定时传 dynamicOffset（见 gl_shader_upload_uniform_slot）
+		binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
 		binding.descriptorCount = 1;
 		binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 		bindings.push_back (binding);
@@ -1892,7 +1901,7 @@ static bool CreatePipelineSlot (Program* p, PipelineSlot* slot, const GLShaderVe
 	if (p->uniformSize > 0) {
 
 		VkDescriptorPoolSize size{};
-		size.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		size.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
 		size.descriptorCount = 1;
 		poolSizes.push_back (size);
 
@@ -1928,11 +1937,13 @@ static bool CreatePipelineSlot (Program* p, PipelineSlot* slot, const GLShaderVe
 	VkBuffer uniformBuffer = VK_NULL_HANDLE;
 	VkDeviceMemory uniformMemory = VK_NULL_HANDLE;
 	void* mapped = NULL;
+	// 整块 buffer 按 64 个动态偏移槽位分配；descriptor 只描述一个槽位大小（range=块大小），
+	// 实际地址由 vkCmdBindDescriptorSets 的 dynamicOffset 决定。
 	uint32_t bufferSize = p->uniformSize;
+	if (p->uniformSize > 0) {
 
-	if (bufferSize > 0) {
-
-		if (bufferSize < 16) bufferSize = 16;
+		bufferSize = kUniformSlots * kUniformStride;
+		if (bufferSize < p->uniformSize) bufferSize = p->uniformSize;
 
 		VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
 		bufferInfo.size = bufferSize;
@@ -2156,13 +2167,14 @@ static bool CreatePipelineSlot (Program* p, PipelineSlot* slot, const GLShaderVe
 		VkDescriptorBufferInfo bufferInfo{};
 		bufferInfo.buffer = uniformBuffer;
 		bufferInfo.offset = 0;
-		bufferInfo.range = bufferSize;
+		// 动态偏移绑定：range 只能是 UBO 块本身大小（std140），offset 由 dynamicOffset 叠加
+		bufferInfo.range = p->uniformSize;
 
 		VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
 		write.dstSet = descriptorSet;
 		write.dstBinding = 0;
 		write.descriptorCount = 1;
-		write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
 		write.pBufferInfo = &bufferInfo;
 
 		g_vkFns.UpdateDescriptorSets (device, 1, &write, 0, NULL);
@@ -2424,17 +2436,39 @@ bool gl_shader_upload_uniforms (int program) {
 
 }
 
-// 用一份绘制时刻的 uniform 快照上传：批处理把 draw 推迟到帧尾，同一个 program
-// 在一帧内可能有多次绘制且 uniform 不同（典型：hasColorTransform 0/1 交替）。
-// 直接覆盖镜像再走同一个上传路径，镜像本身就是"当前绘制用"的临时状态。
-bool gl_shader_upload_uniform_block (int program, const uint8_t* data, uint32_t size) {
+// 每帧开始时复位动态 UBO 槽位计数（批处理提交前调用）。
+void gl_shader_reset_uniform_slots () {
+
+	for (std::map<int, Program*>::iterator it = g_programs.begin (); it != g_programs.end (); ++it) {
+		it->second->nextUniformSlot = 0;
+	}
+
+}
+
+// 把一份绘制时刻的 uniform 快照写进该 program 的独立槽位，返回绑定时要用的
+// dynamicOffset（字节）。每笔绘制一个槽位，避免帧尾统一提交时互相覆盖。
+// 返回 0xFFFFFFFF 表示失败（无 UBO / 大小不符 / 无可用缓冲）。
+uint32_t gl_shader_upload_uniform_slot (int program, const uint8_t* data, uint32_t size) {
 
 	Program* p = FindProgram (program);
-	if (!p || !data || p->uniformData.empty () || size != (uint32_t) p->uniformData.size ()) return false;
+	if (!p || !data || p->uniformSize == 0 || size != p->uniformSize) return 0xFFFFFFFFu;
 
-	memcpy (p->uniformData.data (), data, size);
-	p->uniformDirty = true;
-	return gl_shader_upload_uniforms (program);
+	uint32_t slot = p->nextUniformSlot;
+	if (slot >= kUniformSlots) slot = 0;
+	p->nextUniformSlot = slot + 1;
+
+	uint32_t off = slot * kUniformStride;
+	PipelineSlot* slots[2] = { &p->pipelineBack, &p->pipelineOffscreen };
+	bool any = false;
+	for (int i = 0; i < 2; i++) {
+
+		if (!slots[i]->mapped || slots[i]->bufferSize < off + size) continue;
+		memcpy ((uint8_t*) slots[i]->mapped + off, data, size);
+		any = true;
+
+	}
+
+	return any ? off : 0xFFFFFFFFu;
 
 }
 
