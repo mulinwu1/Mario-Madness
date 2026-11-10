@@ -2162,12 +2162,23 @@ bool VkRenderer::InResizeAnimation() {
     return ((uint64_t)GetTickCount64() - o.lastResizeTick) < 400;
 }
 
+// 高精度毫秒计时（诊断）：GetTickCount64 只有 ~15.6ms 精度，量不出重建各阶段耗时。
+static double VkNowMs() {
+    static LARGE_INTEGER freq = {0};
+    static bool inited = false;
+    if (!inited) { QueryPerformanceFrequency(&freq); inited = true; }
+    LARGE_INTEGER c;
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / (double)freq.QuadPart;
+}
+
 // 交换链重建：present/acquire 一旦返回 OUT_OF_DATE 或 SUBOPTIMAL，旧交换链上
 // 所有后续 acquire 都会继续失败，而后缓冲帧开不起来 → 永久停在上一张清屏帧。
 // 这里按 surface 当前能力重建交换链 + image view + 全部 framebuffer。
 bool VkRenderer::RecreateSwapchain() {
     Impl& o = *impl;
     if (!o.dev || !o.swapchain || !o.gipa) return false;
+    const double tStart = VkNowMs();
     auto createSwap = (PFN_vkCreateSwapchainKHR)o.gipa(o.inst, "vkCreateSwapchainKHR");
     auto getImages = (PFN_vkGetSwapchainImagesKHR)o.gipa(o.inst, "vkGetSwapchainImagesKHR");
     auto getSurfCaps = (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)o.gipa(o.inst,
@@ -2193,6 +2204,8 @@ bool VkRenderer::RecreateSwapchain() {
     for (auto v : o.swapViews) if (v) o.destroyImageView(o.dev, v, nullptr);
     o.swapViews.clear();
     o.swapImages.clear();
+    // 计时（诊断）：缩放时每次重建的耗时分解，用来判断停顿在销毁旧链还是建新链。
+    const double tDrop = VkNowMs();
     // 旧交换链先留着：VkSwapchainCreateInfoKHR.oldSwapchain 交给驱动做“原地换尺寸”，
     // 比先销毁再新建快得多（缩放动画期间每次重建的停顿主要来自这里）。
     VkSwapchainKHR oldSwap = o.swapchain;
@@ -2259,8 +2272,10 @@ bool VkRenderer::RecreateSwapchain() {
         fprintf(stderr, "[vk] swapchain recreate ok=0 path=create err=%d\n", (int)cr);
         return false;
     }
+    const double tCreate = VkNowMs();
     // 新交换链建好后再销毁旧的（oldSwapchain 交接完成，驱动已可从旧的解绑）
     if (oldSwap) o.destroySwapchain(o.dev, oldSwap, nullptr);
+    const double tDestroy = VkNowMs();
 
     uint32_t ic = 0;
     getImages(o.dev, o.swapchain, &ic, nullptr);
@@ -2303,6 +2318,11 @@ bool VkRenderer::RecreateSwapchain() {
     o.sizeMismatchSince = 0;
     fprintf(stderr, "[vk] swapchain recreate ok=1 oldImages=%u newImages=%u %ux%u -> %ux%u\n",
             oldImages, ic, oldExtW, oldExtH, o.extent.width, o.extent.height);
+    {
+        const double tEnd = VkNowMs();
+        fprintf(stderr, "[vk] reccost total=%.1fms drop=%.1fms create=%.1fms oldDestroy=%.1fms fb=%.1fms\n",
+                tEnd - tStart, tDrop - tStart, tCreate - tDrop, tDestroy - tCreate, tEnd - tDestroy);
+    }
     return true;
 }
 
