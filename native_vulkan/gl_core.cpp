@@ -4,6 +4,7 @@
 #include "gl_vk_contract.h"
 #include "gl_state.h"
 #include "gl_packet.h"
+#include "gl_shader.h"
 
 #include <vector>
 #include <cstring>
@@ -814,9 +815,15 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
         }
         s_uvdbg++;
     }
+    // uniform 快照：批处理把提交推迟到帧尾，同一个 program 一帧内可能有多笔绘制
+    // 且 uniform 不同（典型：hasColorTransform 0/1 交替）。这里在 draw 时刻拷贝一份。
+    const unsigned char* uniData = nullptr;
+    uint32_t uniSize = 0;
+    lime::gl_shader_uniform_block (lime::gl_shader_current_program (), &uniData, &uniSize);
     g_renderer->DrawRaw(vkTex, out.data(), count, alphaFromArray ? alphas.data() : nullptr,
                         colorFromArray ? mults.data() : nullptr,
-                        colorFromArray ? offs.data() : nullptr);
+                        colorFromArray ? offs.data() : nullptr,
+                        uniData, uniSize);
 }
 
 void lime_gl_draw_elements(int mode, int count, int type, double offset) {
@@ -975,9 +982,13 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
         }
         s_uvdbg2++;
     }
+    const unsigned char* uniData = nullptr;
+    uint32_t uniSize = 0;
+    lime::gl_shader_uniform_block (lime::gl_shader_current_program (), &uniData, &uniSize);
     g_renderer->DrawRaw(vkTex, out.data(), count, alphaFromArray ? alphas.data() : nullptr,
                         colorFromArray ? mults.data() : nullptr,
-                        colorFromArray ? offs.data() : nullptr);
+                        colorFromArray ? offs.data() : nullptr,
+                        uniData, uniSize);
 }
 
 int lime_gl_get_error() {
