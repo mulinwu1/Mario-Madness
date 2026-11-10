@@ -1782,7 +1782,7 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
     {
         static int s_mode = -1, s_n = 0;
         if (s_mode < 0) { const char* e = getenv("VK_ALPHALOG"); s_mode = (e && e[0]) ? 1 : 0; }
-        if (s_mode && s_n < 600 && texId >= 30) {
+        if (s_mode && s_n < 800 && texId >= 30 && o.currentTarget >= 1006) {
             float amn = 1.0f, amx = 0.0f;
             if (vertexAlpha) {
                 for (int i = 0; i < vertexCount; i++) {
