@@ -847,11 +847,15 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
 
     VkDescriptorPoolSize dps[2]{};
     dps[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    dps[0].descriptorCount = MAX_TEXTURES * 2;
+    dps[0].descriptorCount = MAX_TEXTURES * 8;
     dps[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    dps[1].descriptorCount = MAX_TEXTURES * 2;
+    dps[1].descriptorCount = MAX_TEXTURES * 8;
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpci.maxSets = MAX_TEXTURES * 2;
+    // FREE 位：纹理销毁/重建时要把它占用的 set 还回池里。没有这个位就只能泄漏，
+    // 文本每秒重传一次纹理都能把 1024 个 set 吃光，之后 Allocate 失败拿到空句柄，
+    // 下一次绑定/更新描述符直接崩在驱动里（本项就是 §26.12 的“~90 秒崩”）。
+    dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dpci.maxSets = MAX_TEXTURES * 8;
     dpci.poolSizeCount = 2;
     dpci.pPoolSizes = dps;
     g_createDP(o.dev, &dpci, nullptr, &o.descPool);
@@ -1379,7 +1383,22 @@ uint32_t VkRenderer::CreateTextureOnce(int w, int h, const unsigned char* rgba) 
         dsai.descriptorPool = o.descPool;
         dsai.descriptorSetCount = 1;
         dsai.pSetLayouts = layouts.data();
-        g_allocDS(o.dev, &dsai, &t.set);
+        VkResult dsr = g_allocDS(o.dev, &dsai, &t.set);
+        if (dsr != VK_SUCCESS || t.set == VK_NULL_HANDLE) {
+            // 池耗尽：以前这里不检查，t.set 为空仍继续 UpdateDescriptorSets，
+            // 最终在驱动里 0xC0000005。这里直接放弃这张纹理（上层拿到 0 会跳过绘制），
+            // 把刚建的 image/view 也清掉，避免半成品泄漏。
+            static int s_dsFail = 0;
+            if (s_dsFail < 20) {
+                fprintf(stderr, "[vk] dspool exhausted r=%d w=%d h=%d n=%d\n",
+                        (int) dsr, w, h, s_dsFail + 1);
+            }
+            s_dsFail++;
+            if (t.view) { o.destroyImageView(o.dev, t.view, nullptr); t.view = VK_NULL_HANDLE; }
+            if (t.image) { o.destroyImage(o.dev, t.image, nullptr); t.image = VK_NULL_HANDLE; }
+            if (t.mem) { o.freeMemory(o.dev, t.mem, nullptr); t.mem = VK_NULL_HANDLE; }
+            return 0;
+        }
 
         VkDescriptorImageInfo dii{};
         dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -1440,6 +1459,12 @@ void VkRenderer::DestroyTexture(uint32_t id) {
     TexSlot& t = o.textures[id - 1];
     if (!t.used) return;
     PktDropSets(id);   // 变体 descriptor set 指向这张图，先还回池里
+    // 批处理路径的 set 也要还回池（池带 FREE 位）。不然每次纹理重建都漏一个 set，
+    // 池满后 Allocate 返回空句柄，绑定/更新时崩在驱动里。
+    if (t.set) {
+        if (g_freeDS) g_freeDS(o.dev, o.descPool, 1, &t.set);
+        t.set = VK_NULL_HANDLE;
+    }
     if (t.view) o.destroyImageView(o.dev, t.view, nullptr);
     if (t.sampler) o.destroySampler(o.dev, t.sampler, nullptr);
     if (t.image) o.destroyImage(o.dev, t.image, nullptr);
@@ -4176,19 +4201,20 @@ void VkRenderer::EndFrame() {
                             s_progSw++;
                         }
                         boundLayout = pl;
-                        // 上屏笔（tgt=0）的坐标翻转：游戏给后缓冲的矩阵是按 GL 的
-                        // y-up NDC 生成的（实测 m11<0，y=0 映射到 +0.99），Vulkan 的
-                        // NDC 是 y-down，不翻会把整块画到屏幕另一侧并上下镜像——
-                        // FPS/Memory 文本就是这样跑到左下角且反着的。离屏笔的矩阵
-                        // 本身已是 y-down（m11>0），不能翻。
-                        // 同时取消 pack 阶段对离屏源（id>=1000）做的 V 翻转：整屏
-                        // 四边形下"翻几何"与"翻 V"等价，两者都做会互相抵消。
+                        // 上屏笔（tgt=0）的 Y 方向：游戏给后缓冲的矩阵按 GL 的 y-up NDC
+                        // 生成（实测 m11<0，y=0 → +0.9889），Vulkan 是 y-down。用负高度
+                        // 视口把 Y 翻回来（等价于 NDC.y = -NDC.y，且保留矩阵里的平移量，
+                        // FPS 文本这种带 4px 偏移的小四边形才能落在原位置）。
+                        // 同时取消 pack 阶段对离屏源（id>=1000）做的 V 翻转：翻转几何
+                        // 已经由负视口完成，两个都做会互相抵消。
                         if (o.currentTarget == 0) {
+                            VkViewport nvp = dynVp;
+                            nvp.y = dynVp.y + dynVp.height;
+                            nvp.height = -dynVp.height;
+                            g_setViewport(o.cmd, 0, 1, &nvp);
                             float* vp = dst + r.first * 15;
-                            const float H = (float)ext.height;
                             for (size_t k = 0; k < r.count; k++) {
                                 float* q = vp + k * 15;
-                                q[1] = H - q[1];
                                 if (r.id >= 1000) q[14] = 1.0f - q[14];
                             }
                         }
@@ -4210,6 +4236,8 @@ void VkRenderer::EndFrame() {
                 boundPipe = o.pipeline;
             }
             boundLayout = o.pipeLayout;
+            // 固定管线用正常（y 向下）视口：上一笔 progpipe 上屏笔可能刚把它切成负高度
+            if (o.currentTarget == 0) g_setViewport(o.cmd, 0, 1, &dynVp);
             g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeLayout, 0, 1, &r.set, 0, nullptr);
             g_cmdDraw(o.cmd, (uint32_t)r.count, 1, (uint32_t)r.first, 0);
         }
