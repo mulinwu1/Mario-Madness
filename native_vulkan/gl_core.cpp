@@ -922,6 +922,20 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
         s_skip2++;
         return;
     }
+    // 诊断（indexed 路径，限 120 条）：每个 (GL 纹理名 -> Vk id/尺寸/是否别名) 只打一次。
+    {
+        static int s_n2 = 0;
+        static std::map<long long, int> s_seen2;
+        long long key = ((long long)texName << 32) | (long long)vkTex;
+        if (s_n2 < 120 && s_seen2.find(key) == s_seen2.end()) {
+            s_seen2[key] = 1;
+            s_n2++;
+            int tw = 0, th = 0;
+            gl_vk_texture_size(texName, &tw, &th);
+            fprintf(stderr, "[texmap] glName=%d vk=%u size=%dx%d alias=%d ie=1\n",
+                    texName, vkTex, tw, th, vkTex >= 1000 ? 1 : 0);
+        }
+    }
     g_draws++;
     bool alphaFromArray = false;
     std::vector<float> alphas = BuildVertexAlpha(count, 0, idxs.data(), &alphaFromArray);
