@@ -183,6 +183,8 @@ private:
     bool RecreateSwapchain();
     // 当前窗口客户区尺寸是否等于交换链 extent（resize 动画期间用来决定要不要立即重建）
     bool WindowSizeMatchesExtent();
+    // 每帧记录窗口尺寸变化（独立于 present 是否成功），返回 true 表示本帧尺寸变了
+    bool ObserveWindowSize();
     // 是否处于窗口缩放动画中（最近 400ms 内尺寸变过）；动画期间禁止重建交换链
     bool InResizeAnimation();
     // 真正上传的实现；CreateTexture 负责大图降级后再转调它
