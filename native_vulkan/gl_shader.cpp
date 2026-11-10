@@ -134,7 +134,9 @@ struct AttribInfo {
 // 多笔绘制排到帧尾，如果共用一块 UBO，后一笔的 uniform 会覆盖前一笔
 // （典型症状：hasColorTransform 只有最后一笔的值）。每笔占一个 256B 对齐槽位。
 // 256 是 Vulkan 规范保证的 minUniformBufferOffsetAlignment 上界。
-static const uint32_t kUniformSlots = 64;
+// 槽位数量按一帧内单个 program 的最大绘制笔数取（PlayState 一帧单 program 可超 100 笔）；
+// 64 会在进歌后回绕覆盖，症状是音符/长条突然变透明或颜色错乱。
+static const uint32_t kUniformSlots = 1024;
 static const uint32_t kUniformStride = 256;
 
 struct PipelineSlot {
@@ -180,6 +182,8 @@ struct Program {
 	bool uniformDirty;
 	// 本帧下一笔绘制可用的动态 UBO 槽位（每帧由 gl_shader_reset_uniform_slots 复位）
 	uint32_t nextUniformSlot;
+	// 槽位回绕只告警一次，避免每帧刷屏
+	bool slotOverflowLogged;
 
 	std::vector<uint32_t> spirvVertex;
 	std::vector<uint32_t> spirvFragment;
@@ -190,7 +194,8 @@ struct Program {
 	PipelineSlot pipelineOffscreen;
 
 	Program () : id (0), deleted (false), linked (false), linkOk (false), validateOk (false),
-		nextLocation (0), uniformSize (0), uniformDirty (false), nextUniformSlot (0) {}
+		nextLocation (0), uniformSize (0), uniformDirty (false), nextUniformSlot (0),
+		slotOverflowLogged (false) {}
 
 };
 
@@ -1937,7 +1942,7 @@ static bool CreatePipelineSlot (Program* p, PipelineSlot* slot, const GLShaderVe
 	VkBuffer uniformBuffer = VK_NULL_HANDLE;
 	VkDeviceMemory uniformMemory = VK_NULL_HANDLE;
 	void* mapped = NULL;
-	// 整块 buffer 按 64 个动态偏移槽位分配；descriptor 只描述一个槽位大小（range=块大小），
+	// 整块 buffer 按 kUniformSlots 个动态偏移槽位分配；descriptor 只描述一个槽位大小（range=块大小），
 	// 实际地址由 vkCmdBindDescriptorSets 的 dynamicOffset 决定。
 	uint32_t bufferSize = p->uniformSize;
 	if (p->uniformSize > 0) {
@@ -2454,7 +2459,14 @@ uint32_t gl_shader_upload_uniform_slot (int program, const uint8_t* data, uint32
 	if (!p || !data || p->uniformSize == 0 || size != p->uniformSize) return 0xFFFFFFFFu;
 
 	uint32_t slot = p->nextUniformSlot;
-	if (slot >= kUniformSlots) slot = 0;
+	if (slot >= kUniformSlots) {
+		if (!p->slotOverflowLogged) {
+			p->slotOverflowLogged = true;
+			fprintf (stderr, "[progpipe] uniform slots overflow prog=%d limit=%u, wrapping\n",
+				program, kUniformSlots);
+		}
+		slot = 0;
+	}
 	p->nextUniformSlot = slot + 1;
 
 	uint32_t off = slot * kUniformStride;
