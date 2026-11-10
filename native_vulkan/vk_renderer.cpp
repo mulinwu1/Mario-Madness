@@ -2111,6 +2111,15 @@ void VkRenderer::ResetLastGeometryTarget() {
     impl->lastGeomTarget = 0;
 }
 
+bool VkRenderer::WindowSizeMatchesExtent() {
+    Impl& o = *impl;
+    if (!o.nativeWindow) return true;
+    RECT rc;
+    if (!GetClientRect((HWND)o.nativeWindow, &rc)) return true;
+    return (int)o.extent.width == (int)(rc.right - rc.left) &&
+           (int)o.extent.height == (int)(rc.bottom - rc.top);
+}
+
 // 交换链重建：present/acquire 一旦返回 OUT_OF_DATE 或 SUBOPTIMAL，旧交换链上
 // 所有后续 acquire 都会继续失败，而后缓冲帧开不起来 → 永久停在上一张清屏帧。
 // 这里按 surface 当前能力重建交换链 + image view + 全部 framebuffer。
@@ -2326,7 +2335,10 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
             o.bbLoad = true;
         } else {
             VkResult ar = g_acquire(o.dev, o.swapchain, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE, &o.frameImageIndex);
-            if (ar == VK_SUBOPTIMAL_KHR) o.swapDirty = true;
+            // resize 动画期间 acquire 会报 SUBOPTIMAL；此时交换链尺寸其实还“够用”，
+            // 不能标脏，否则又变成每帧重建（窗口缩放被拖成几大跳）。
+            // 只有尺寸真的对上了还报 SUBOPTIMAL 才需要重建。
+            if (ar == VK_SUBOPTIMAL_KHR && WindowSizeMatchesExtent()) o.swapDirty = true;
             if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
                 o.swapDirty = true;
                 fprintf(stderr, "[vk] bbframe open f=%llu ok=0 target=0 path=acquire err=%d swapDirty=1\n",
@@ -2939,7 +2951,7 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
         }
         VkResult ar = g_acquire(o.dev, o.swapchain, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE,
                                 &o.frameImageIndex);
-        if (ar == VK_SUBOPTIMAL_KHR) o.swapDirty = true;
+        if (ar == VK_SUBOPTIMAL_KHR && WindowSizeMatchesExtent()) o.swapDirty = true;
         if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
             o.swapDirty = true;
             fprintf(stderr, "[pkt] begin target=0 ok=0 acquire_err=%d\n", (int)ar);
