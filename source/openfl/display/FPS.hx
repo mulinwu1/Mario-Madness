@@ -87,10 +87,10 @@ class FPS extends TextField
 			
 			#if openfl
 			memoryMegas = Math.abs(FlxMath.roundDecimal(System.totalMemory / 1000000, 1));
-			text += "\nMemory: " + memoryMegas + " MB";
+			text += "\nMEMORY: " + memoryMegas + " MB";
 			#end
 
-			textColor = 0xFFa11b1b;
+			textColor = 0xFFFFFFFF;
 			if (memoryMegas > 3000 || currentFPS <= ClientPrefs.framerate / 2 || PlayState.virtualmode == true)
 			{
 				textColor = 0xFFe30000;
