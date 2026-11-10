@@ -191,6 +191,10 @@ struct VkRenderer::Impl {
     float* uboPtr = nullptr;
 
     std::vector<TexSlot> textures;
+    // 延迟销毁队列：glTexImage2D 同名重建时先排队，等本帧命令缓冲提交完再真正释放。
+    // 若立即释放，槽位会被下一笔 CreateTexture 复用，本帧早先记录的绘制段就会
+    // 采样到新纹理（症状：整层贴图错乱、菜单多出亮层）。
+    std::vector<uint32_t> pendingTexDestroy;
     // 实验 VK_SINGLE_PRESENT=1（默认关）：一视觉帧只 acquire/present 一次；
     // 中途绑定后缓冲只提交几何（LOAD pass 叠加），不 flip。
     VkRenderPass renderPassLoad = VK_NULL_HANDLE;
@@ -1456,8 +1460,9 @@ uint32_t VkRenderer::CreateTextureOnce(int w, int h, const unsigned char* rgba) 
     return 0;
 }
 
-void VkRenderer::DestroyTexture(uint32_t id) {
-    Impl& o = *impl;
+// 真正释放纹理槽位。只能在“本帧命令缓冲已提交”之后调用（见 EndFrame 末尾），
+// 否则槽位 id 会被同一帧里后续的 CreateTexture 复用，导致已记录的绘制段改采样新纹理。
+static void DestroyTextureNow(Impl& o, uint32_t id) {
     if (id == 0 || id > o.textures.size()) return;
     TexSlot& t = o.textures[id - 1];
     if (!t.used) return;
@@ -1473,6 +1478,12 @@ void VkRenderer::DestroyTexture(uint32_t id) {
     if (t.image) o.destroyImage(o.dev, t.image, nullptr);
     if (t.mem) o.freeMemory(o.dev, t.mem, nullptr);
     t = TexSlot();
+}
+
+void VkRenderer::DestroyTexture(uint32_t id) {
+    // 延迟到 EndFrame 提交完成之后真正销毁（见 pendingTexDestroy）。
+    if (id == 0) return;
+    impl->pendingTexDestroy.push_back(id);
 }
 
 uint32_t VkRenderer::TextureCount() const {
@@ -4326,6 +4337,14 @@ void VkRenderer::EndFrame() {
     si.pCommandBuffers = &o.cmd;
     g_submit(o.queue, 1, &si, VK_NULL_HANDLE);
     g_waitIdle(o.queue);
+
+    // 本帧命令缓冲已提交：现在才真正销毁被替换的旧纹理，保证本帧早先记录的
+    // FrameSeg 仍采样到它们创建时的内容（避免槽位 id 复用造成贴图串层）。
+    if (!o.pendingTexDestroy.empty()) {
+        for (size_t pi = 0; pi < o.pendingTexDestroy.size(); pi++)
+            DestroyTextureNow(o, o.pendingTexDestroy[pi]);
+        o.pendingTexDestroy.clear();
+    }
 
     if (doStat) {
         const uint8_t* px = (const uint8_t*)o.statPtr;
