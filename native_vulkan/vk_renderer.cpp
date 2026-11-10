@@ -486,6 +486,29 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     o.width = width;
     o.height = height;
 
+    // 关掉 DWM 的窗口过渡动画（最大化/还原的系统动画）。歌曲里切全屏那一下，
+    // Windows 会把一次最大化拆成多个 WM_SIZE（1285→1335→1793→1920），
+    // 每个尺寸都逼我们重建交换链，还会出现旧尺寸的中间帧（画面上下翻）。
+    // DWMWA_TRANSITIONS_FORCEDISABLED=3 后窗口直接跳到目标尺寸，只需重建一次。
+    // VK_DWM_NOANIM=0 可关闭此行为。
+    if (o.nativeWindow) {
+        const char* dv = getenv("VK_DWM_NOANIM");
+        if (!(dv && dv[0] == '0')) {
+            HMODULE dwm = LoadLibraryA("dwmapi.dll");
+            if (dwm) {
+                typedef HRESULT (WINAPI *PFN_DwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
+                PFN_DwmSetWindowAttribute setAttr =
+                    (PFN_DwmSetWindowAttribute)GetProcAddress(dwm, "DwmSetWindowAttribute");
+                if (setAttr) {
+                    BOOL enable = TRUE;
+                    HRESULT hr = setAttr((HWND)o.nativeWindow, 3 /* DWMWA_TRANSITIONS_FORCEDISABLED */,
+                                         &enable, sizeof(enable));
+                    fprintf(stderr, "[vk] dwm transitions disabled hr=0x%lx\n", (unsigned long)hr);
+                }
+            }
+        }
+    }
+
     // 调参文件在设备/纹理初始化之前读进来，并立刻打一行生效值：
     // 之后所有 [sampler] / [pkt] 行都能和这一行对照，排除“以为改了但没生效”。
     vktuning::Load();
