@@ -222,6 +222,11 @@ struct VkRenderer::Impl {
     // 期间任何 OUT_OF_DATE / SUBOPTIMAL 都不重建交换链，否则每帧 waitIdle 会把
     // lime 的窗口缩放动画拖成几大跳（实测 922..935 后一下子 1280）。
     uint64_t lastResizeTick = 0;
+    // cover 交换链：窗口缩放动画期间，把交换链一次性重建到“屏幕尺寸”（不小于窗口），
+    // 这样后续每个缩放步 acquire 只会 SUBOPTIMAL、不再 OUT_OF_DATE，动画期间就能持续出帧。
+    // 尺寸稳定 400ms 后再重建回精确尺寸（1:1、不糊）。VK_COVER_SWAP=0 可关闭。
+    bool coverSwap = false;
+    uint64_t lastCoverTick = 0;
     // 取证：present 前把交换链图拷到主机可见缓冲，算亮度统计（VK_BBSTAT=1，默认关）
     VkBuffer statBuf = VK_NULL_HANDLE;
     VkDeviceMemory statMem = VK_NULL_HANDLE;
@@ -2124,8 +2129,34 @@ bool VkRenderer::WindowSizeMatchesExtent() {
            (int)o.extent.height == (int)(rc.bottom - rc.top);
 }
 
+// 每帧记录窗口客户区尺寸。必须独立于 present 成功与否调用：
+// resize 动画期间 acquire 会持续返回 OUT_OF_DATE，帧根本开不起来、present 分支不执行，
+// 若只在 present 分支里更新时间戳，lastResizeTick 会一直是旧值 → InResizeAnimation()
+// 恒 false → 每帧都重建交换链（实测全屏放大 1 秒重建 24 次，帧率 244→69）。
+// 返回 true 表示本帧尺寸相对上次有变化。
+bool VkRenderer::ObserveWindowSize() {
+    Impl& o = *impl;
+    int winW = o.width, winH = o.height;
+    if (o.nativeWindow) {
+        RECT rc;
+        if (GetClientRect((HWND)o.nativeWindow, &rc)) {
+            winW = (int)(rc.right - rc.left);
+            winH = (int)(rc.bottom - rc.top);
+        }
+    }
+    uint64_t nowMs = (uint64_t)GetTickCount64();
+    if (winW != o.lastWinW || winH != o.lastWinH) {
+        o.lastWinW = winW;
+        o.lastWinH = winH;
+        o.lastResizeTick = nowMs;
+        o.sizeMismatchSince = nowMs;
+        return true;
+    }
+    return false;
+}
+
 // 窗口缩放进度的统一判定：最近 400ms 内窗口尺寸变过就算“动画中”。
-// 动画期间一律不重建交换链（重建会 waitIdle，把帧时间拉长，lime 的缩放动画直接跳终点）。
+// 动画期间尽量不重建交换链（重建会 waitIdle，把帧时间拉长，lime 的缩放动画直接跳终点）。
 bool VkRenderer::InResizeAnimation() {
     Impl& o = *impl;
     if (o.lastResizeTick == 0) return false;
@@ -2172,6 +2203,19 @@ bool VkRenderer::RecreateSwapchain() {
         return false;
     }
     o.extent = PickSwapchainExtent (caps, o.width, o.height);
+    // cover 模式（缩放动画中）：extent 取“不小于当前窗口”的屏幕尺寸，
+    // 让整个缩放动画都落在交换链里，避免每一步 OUT_OF_DATE 触发一次 waitIdle 重建。
+    if (o.coverSwap) {
+        uint32_t cw = (uint32_t)GetSystemMetrics(SM_CXSCREEN);
+        uint32_t ch = (uint32_t)GetSystemMetrics(SM_CYSCREEN);
+        if (cw < o.extent.width) cw = o.extent.width;
+        if (ch < o.extent.height) ch = o.extent.height;
+        if (caps.minImageExtent.width > cw) cw = caps.minImageExtent.width;
+        if (caps.minImageExtent.height > ch) ch = caps.minImageExtent.height;
+        if (caps.maxImageExtent.width && cw > caps.maxImageExtent.width) cw = caps.maxImageExtent.width;
+        if (caps.maxImageExtent.height && ch > caps.maxImageExtent.height) ch = caps.maxImageExtent.height;
+        o.extent = {cw, ch};
+    }
     if (o.extent.width == 0 || o.extent.height == 0) {
         fprintf(stderr, "[vk] swapchain recreate ok=0 path=zeroextent\n");
         return false;
@@ -2336,6 +2380,9 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
     // “先绑后缓冲、再画一张全屏 quad”，一清就把这批顶点吃掉 → 屏幕只剩清屏色。
     // 顶点在 EndFrame 提交后由 EndFrame 自己清。
     if (id == 0) {
+        // 先观察窗口尺寸：即使本帧 acquire 失败，也要让“动画中”的判定拿到最新时间戳，
+        // 否则 lastResizeTick 永远停在旧值 → 全屏放大时每帧都重建交换链。
+        ObserveWindowSize();
         // 交换链脏（present/acquire 曾返回 OUT_OF_DATE/SUBOPTIMAL）→ 开帧前无条件重建。
         // 不依赖 acquire 是否报错：present 只要失败一次，[vk] pres 就停更、后缓冲再也开不起来。
         if (o.swapDirty) {
@@ -2352,9 +2399,25 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
             // 只有尺寸真的对上了还报 SUBOPTIMAL 才需要重建。
             if (ar == VK_SUBOPTIMAL_KHR && WindowSizeMatchesExtent() && !InResizeAnimation()) o.swapDirty = true;
             if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
-                if (!InResizeAnimation()) o.swapDirty = true;
-                fprintf(stderr, "[vk] bbframe open f=%llu ok=0 target=0 path=acquire err=%d swapDirty=1\n",
-                        (unsigned long long) g_drawFrame, (int) ar);
+                // OUT_OF_DATE：交换链尺寸已经装不下窗口，不重建就一帧都出不来。
+                // 动画期间直接进入 cover 模式（一次重建到屏幕尺寸，后续缩放步全部落在
+                // 交换链内，只会 SUBOPTIMAL）→ 整个放大/缩小过程可以持续出帧。
+                const uint64_t nowC = (uint64_t)GetTickCount64();
+                // 回退开关：VK_COVER_SWAP=0 恢复旧行为（动画期间不进入 cover 模式）
+                static int s_coverOn = -1;
+                if (s_coverOn < 0) {
+                    const char* cv = getenv("VK_COVER_SWAP");
+                    s_coverOn = (cv && cv[0] == '0') ? 0 : 1;
+                }
+                if (s_coverOn && InResizeAnimation() && !o.coverSwap && nowC - o.lastCoverTick > 300) {
+                    o.coverSwap = true;
+                    o.lastCoverTick = nowC;
+                    o.swapDirty = true;
+                } else if (!InResizeAnimation()) {
+                    o.swapDirty = true;
+                }
+                fprintf(stderr, "[vk] bbframe open f=%llu ok=0 target=0 path=acquire err=%d cover=%d\n",
+                        (unsigned long long) g_drawFrame, (int) ar, o.coverSwap ? 1 : 0);
                 return false;
             }
             o.bbHeld = true;
@@ -4450,28 +4513,17 @@ void VkRenderer::EndFrame() {
             // 过渡态保护：窗口动画缩放时，交换链尺寸可能还停在旧值。
             // 注意 o.width/o.height 只在 Init 赋一次，改分辨率后会过期，必须现取窗口
             // 客户区尺寸比较（否则永久判定不一致 → 永不 present → 黑屏，实测过）。
-            int winW = o.width, winH = o.height;
-            if (o.nativeWindow) {
-                RECT rc;
-                if (GetClientRect((HWND)o.nativeWindow, &rc)) {
-                    winW = (int)(rc.right - rc.left);
-                    winH = (int)(rc.bottom - rc.top);
-                }
-            }
+            // ObserveWindowSize 每帧都更新动画时间戳（acquire 失败的分支也会调用），
+            // 这里直接复用其结果，避免两处计时不同步。
+            ObserveWindowSize();
+            int winW = o.lastWinW, winH = o.lastWinH;
             bool sizeOK = ((int)o.extent.width == winW && (int)o.extent.height == winH);
-            // 先更新“窗口是否在动”：只要尺寸跟上一帧不同，就刷新动画时刻。
-            // 动画期间（400ms 内变过）任何 OUT_OF_DATE/SUBOPTIMAL 都不重建交换链。
             uint64_t nowMs = (uint64_t)GetTickCount64();
-            if (winW != o.lastWinW || winH != o.lastWinH) {
-                o.lastWinW = winW;
-                o.lastWinH = winH;
-                o.lastResizeTick = nowMs;
-                o.sizeMismatchSince = nowMs;   // 尺寸还在变 → 稳定计时重新开始
-            }
             bool resizing = (nowMs - o.lastResizeTick) < 400;
             VkResult pr = VK_SUCCESS;
             if (sizeOK) {
                 o.sizeMismatchSince = 0;
+                o.coverSwap = false;   // 尺寸精确匹配，已经不在 cover 态
                 VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
                 pi.swapchainCount = 1;
                 pi.pSwapchains = &o.swapchain;
@@ -4484,13 +4536,15 @@ void VkRenderer::EndFrame() {
                 // fast-fail（实测 0xc0000409 @ nvoglv64.dll，窗口从 1282 一路放大到 1594 那次）。
                 // 旧尺寸图 present 出去最多是缩放动画中闪一帧，不会崩。
                 //
-                // 重建节流：resize 动画期间每帧都 waitIdle+销毁/重建交换链会把帧时间拉长，
-                // lime 的窗口缩放动画被拖成几大跳（原版 922→928→958→1041→1213→1255→1280，
-                // 我们只剩 922→945→1280）。改成尺寸稳定 200ms 后才真正重建，动画期间用旧
-                // 交换链拉伸上屏，一次重建收尾。
+                // 重建节流：动画期间每帧 waitIdle+重建会把帧时间拉长；稳定 200ms 后只重建一次。
+                // cover 模式（见 BindRenderTarget）下 extent 是屏幕尺寸，动画结束后这里
+                // 退出 cover 并重建回精确尺寸。
                 uint64_t nowMs2 = (uint64_t)GetTickCount64();
                 if (o.sizeMismatchSince == 0) o.sizeMismatchSince = nowMs2;
-                if (!resizing && nowMs2 - o.sizeMismatchSince >= 200) o.swapDirty = true;
+                if (!resizing && nowMs2 - o.sizeMismatchSince >= 200) {
+                    o.coverSwap = false;
+                    o.swapDirty = true;
+                }
                 VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
                 pi.swapchainCount = 1;
                 pi.pSwapchains = &o.swapchain;
