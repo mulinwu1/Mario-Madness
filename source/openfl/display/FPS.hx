@@ -75,12 +75,14 @@ class FPS extends TextField
 	@:noCompletion
 	private #if !flash override #end function __enterFrame(deltaTime:Float):Void
 	{
-		if (!_fontApplied) {
-			var _f2 = Assets.getFont(Paths.font("mariones.ttf"));
-			if (_f2 != null && _f2.fontName != null) {
-				_fontApplied = true;
-				defaultTextFormat = new TextFormat(_f2.fontName, 10, textColor);
-			}
+		// 字体晚到时重设一次；defaultTextFormat 只影响后续文本，必须 setTextFormat 重刷已写入的内容
+		var _f2 = Assets.getFont(Paths.font("mariones.ttf"));
+		if (_f2 != null && _f2.fontName != null && _f2.fontName != _pixelFontName) {
+			_pixelFontName = _f2.fontName;
+			_fontApplied = true;
+			var _fmt = new TextFormat(_pixelFontName, 10, textColor);
+			defaultTextFormat = _fmt;
+			setTextFormat(_fmt);
 		}
 		currentTime += deltaTime;
 		times.push(currentTime);
