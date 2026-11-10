@@ -96,6 +96,9 @@ uint32_t gl_shader_upload_uniform_slot (int program, const uint8_t* data, uint32
 // 每帧提交前复位槽位计数。
 void gl_shader_reset_uniform_slots ();
 
+// 诊断用：读某个 float uniform 的当前值（未找到/类型不符返回 -1），不参与渲染。
+float gl_shader_uniform_float (int program, const char* name);
+
 // 按 sampler uniform 名写入纹理描述符。name 形如 "bitmap" 或 "bitmap[0]"。
 // 多次调用同一个 binding 会覆盖之前的纹理。
 bool gl_shader_write_sampler (int program, bool offscreen, const char* name, VkImageView view, VkSampler sampler);
