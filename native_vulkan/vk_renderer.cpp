@@ -3999,6 +3999,8 @@ void VkRenderer::EndFrame() {
         VkBuffer vbufs[2] = {o.vb, o.attrBuf};
         VkDeviceSize voffs[2] = {0, 0};
         g_bindVB(o.cmd, 0, 2, vbufs, voffs);
+        // 全新的一次提交：复位每个 program 的动态 UBO 槽位计数（每笔一个槽位）
+        lime::gl_shader_reset_uniform_slots();
         // VK_PROGPIPE_USE=1：按每段的 GL program 绑它自己的管线；取不到就退回固定管线。
         // 默认关（0）时行为与之前逐字一致。这是让游戏 shader 真正参与绘制的开关。
         static int s_useProg = -1;
@@ -4134,13 +4136,17 @@ void VkRenderer::EndFrame() {
                         sp = o.textures[r.id - 1].sampler;
                     }
                     if (vw != VK_NULL_HANDLE) {
-                        // 按“这一笔绘制时刻”的 uniform 快照上传（同一个 program 一帧里
-                        // 可能有多笔且 uniform 不同，例如 hasColorTransform 0/1 交替）。
-                        // 没有快照时退回 program 当前镜像，行为与之前一致。
-                        bool okU = (r.uni && !r.uni->empty())
-                            ? lime::gl_shader_upload_uniform_block((int)r.prog, r.uni->data(),
-                                                                   (uint32_t)r.uni->size())
-                            : lime::gl_shader_upload_uniforms((int)r.prog);
+                        // 按“这一笔绘制时刻”的 uniform 快照写入独立动态偏移槽位。
+                        // 批处理帧尾统一提交时，同一个 program 的多笔绘制不能再共用一块
+                        // UBO（否则最后一笔的 hasColorTransform/glitchAmount 会覆盖前面所有笔）。
+                        uint32_t dynOff = 0;
+                        bool okU = false;
+                        if (r.uni && !r.uni->empty()) {
+                            uint32_t o2 = lime::gl_shader_upload_uniform_slot(
+                                    (int)r.prog, r.uni->data(), (uint32_t)r.uni->size());
+                            if (o2 != 0xFFFFFFFFu) { dynOff = o2; okU = true; }
+                        }
+                        if (!okU) okU = lime::gl_shader_upload_uniforms((int)r.prog);
                         // 采样器名字不统一：8 属性那批叫 bitmap，5 属性那批（上屏用）叫
                         // openfl_Texture。两个都试，先命中的那个生效。
                         bool okS = lime::gl_shader_write_sampler((int)r.prog, off, "bitmap", vw, sp);
@@ -4170,7 +4176,13 @@ void VkRenderer::EndFrame() {
                             s_progSw++;
                         }
                         boundLayout = pl;
-                        g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &ds, 0, nullptr);
+                        // UBO binding 0 是动态 UBO：传本笔的槽位偏移；program 没有
+                        // uniform block（uniformSize=0，binding 0 不存在）时不能传动态偏移。
+                        if (lime::gl_shader_uniform_buffer_size((int)r.prog) > 0) {
+                            g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &ds, 1, &dynOff);
+                        } else {
+                            g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &ds, 0, nullptr);
+                        }
                         g_cmdDraw(o.cmd, (uint32_t)r.count, 1, (uint32_t)r.first, 0);
                         s_progDS++;
                         continue;
