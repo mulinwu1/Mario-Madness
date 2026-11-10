@@ -4523,7 +4523,9 @@ void VkRenderer::EndFrame() {
             VkResult pr = VK_SUCCESS;
             if (sizeOK) {
                 o.sizeMismatchSince = 0;
-                o.coverSwap = false;   // 尺寸精确匹配，已经不在 cover 态
+                // 注意：这里不能清 coverSwap。动画中间某一步的 extent 可能刚好等于当时窗口，
+                // 若在此清掉 cover，下一步窗口继续变大就又 OUT_OF_DATE → 每步重建一次
+                // （实测 1 秒 70 次）。cover 只在“稳定后重建精确尺寸”的分支里退出。
                 VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
                 pi.swapchainCount = 1;
                 pi.pSwapchains = &o.swapchain;
