@@ -64,6 +64,16 @@ static void EnsureSizeI(std::vector<int>& v, size_t n, int def) {
     if (v.size() < n) v.resize(n, def);
 }
 
+// 纹理槽位被释放/替换时，把所有仍指向它的 GL 名字一并清 0。
+// 槽位 id 会被 CreateTexture 复用；若不清理旧名字，后续绑定这些名字的绘制
+// 会采样到“别人的图”（症状：整层贴图错乱、菜单背景变成另一张图）。
+static void ClearTexNameMappings(uint32_t vkId) {
+    if (!vkId) return;
+    for (size_t i = 0; i < g_texVk.size(); i++) {
+        if (g_texVk[i] == vkId) g_texVk[i] = 0;
+    }
+}
+
 // ---------- 与 gl_fbo / gl_texture_params 的状态契约 ----------
 static uint32_t S_STATE_getTextureId(int glName) {
     if (glName <= 0 || glName >= (int)g_texVk.size()) return 0;
@@ -257,6 +267,7 @@ void lime_gl_delete_texture(int texture) {
     EnsureSize(g_texVk, (size_t)texture + 1, 0);
     uint32_t vk = g_texVk[texture];
     if (vk && g_renderer) g_renderer->DestroyTexture(vk);
+    ClearTexNameMappings(vk);
     g_texVk[texture] = 0;
 }
 
@@ -335,6 +346,7 @@ void lime_gl_tex_image_2d(int target, int level, int internalformat, int width, 
                     rgba.empty() ? 0 : rgba[2], rgba.size() < 4 ? 0 : rgba[3]);
         }
         s_n++;
+        ClearTexNameMappings(g_texVk[texName]);
         g_renderer->DestroyTexture(g_texVk[texName]);
     }
     g_texVk[texName] = g_renderer->CreateTexture(width, height, rgba.data());
