@@ -107,19 +107,37 @@ class LoadingState extends MusicBeatState
 	function checkLibrary(library:String)
 	{
 		trace(Assets.hasLibrary(library));
-		if (Assets.getLibrary(library) == null)
+		var lib = Assets.getLibrary(library);
+		// NO_PRELOAD_ALL 分支：lime 仍会为每个 <library preload="false"> 在 exe 里注册一个
+		// 空壳 manifest（assets=[]），hasLibrary/getLibrary 都为真但查不到任何资源；
+		// 旧代码据此跳过加载，磁盘上的 manifest/<name>.json 从未被读，进歌后
+		// shared: 资源全 null → 空图崩溃。这里把"有库但一张图都没有"视为未加载。
+		var isEmpty = lib == null || lib.list('IMAGE').length == 0;
+		trace('[assetdbg] checkLibrary ' + library + ' has=' + (lib != null) + ' empty=' + isEmpty);
+		if (isEmpty)
 		{
-			@:privateAccess
-			if (!LimeAssets.libraryPaths.exists(library))
-				throw "Missing library: " + library;
-
-			trace('[assetdbg] loadLibrary ' + library + ' start');
 			var callback = callbacks.add("library:" + library);
-			Assets.loadLibrary(library).onComplete(function(lib)
+			var manifestPath = 'manifest/' + library + '.json';
+			trace('[assetdbg] loadLibrary ' + library + ' start path=' + manifestPath);
+			AssetManifest.loadFromFile(manifestPath, 'manifest').onComplete(function(manifest)
 			{
-				trace('[assetdbg] loadLibrary ' + library + ' done null=' + (lib == null));
+				if (manifest == null)
+				{
+					trace('[assetdbg] loadLibrary ' + library + ' ERR null manifest');
+					callback();
+					return;
+				}
+				var newLib = AssetLibrary.fromManifest(manifest);
+				if (newLib == null)
+				{
+					trace('[assetdbg] loadLibrary ' + library + ' ERR fromManifest null');
+					callback();
+					return;
+				}
+				LimeAssets.registerLibrary(library, newLib);
+				trace('[assetdbg] loadLibrary ' + library + ' done imgs=' + newLib.list('IMAGE').length);
 				callback();
-			}).onError(function(e) trace('[assetdbg] loadLibrary ' + library + ' ERR ' + Std.string(e)));
+			});
 		}
 	}
 
@@ -204,7 +222,8 @@ class LoadingState extends MusicBeatState
 
 	static function isLibraryLoaded(library:String):Bool
 	{
-		return Assets.getLibrary(library) != null;
+		var lib = Assets.getLibrary(library);
+		return lib != null && lib.list('IMAGE').length > 0;
 	}
 	#end
 
