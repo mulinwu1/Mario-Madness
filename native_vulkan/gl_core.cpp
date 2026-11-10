@@ -7,6 +7,7 @@
 #include "gl_shader.h"
 
 #include <vector>
+#include <map>
 #include <cstring>
 #include <cstdint>
 #include <cstdio>
