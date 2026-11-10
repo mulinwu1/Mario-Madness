@@ -74,6 +74,12 @@ static void ClearTexNameMappings(uint32_t vkId) {
     }
 }
 
+// 渲染器真正销毁纹理时回调这里（FBO 重建等路径会绕过 gl_core 的显式清理）。
+// 必须清掉所有指向该 id 的 GL 名字，否则槽位被复用后会串图。
+extern "C" void gl_vk_on_texture_destroyed(uint32_t vkId) {
+    ClearTexNameMappings(vkId);
+}
+
 // ---------- 与 gl_fbo / gl_texture_params 的状态契约 ----------
 static uint32_t S_STATE_getTextureId(int glName) {
     if (glName <= 0 || glName >= (int)g_texVk.size()) return 0;
