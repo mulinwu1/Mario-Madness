@@ -18,6 +18,8 @@
 
 // 诊断用：gl_core.cpp 提供的当前 GL 混合状态读取（只给 VK_ALPHALOG 用）。
 extern "C" void lime_vk_get_blend_state(int* en, int* src, int* dst);
+// 纹理真正销毁时通知 gl_core 清掉所有指向该 id 的 GL 名字（避免槽位复用串图）。
+extern "C" void gl_vk_on_texture_destroyed(uint32_t vkId);
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -1467,6 +1469,7 @@ void VkRenderer::DestroyTextureNow(uint32_t id) {
     if (id == 0 || id > o.textures.size()) return;
     TexSlot& t = o.textures[id - 1];
     if (!t.used) return;
+    gl_vk_on_texture_destroyed(id);   // 清掉所有指向该 id 的 GL 名字
     PktDropSets(id);   // 变体 descriptor set 指向这张图，先还回池里
     // 批处理路径的 set 也要还回池（池带 FREE 位）。不然每次纹理重建都漏一个 set，
     // 池满后 Allocate 返回空句柄，绑定/更新时崩在驱动里。
