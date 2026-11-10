@@ -79,7 +79,7 @@ class FPS extends TextField
 			var _f2 = Assets.getFont(Paths.font("mariones.ttf"));
 			if (_f2 != null && _f2.fontName != null) {
 				_fontApplied = true;
-				defaultTextFormat = new TextFormat(_f2.fontName, 10, color);
+				defaultTextFormat = new TextFormat(_f2.fontName, 10, textColor);
 			}
 		}
 		currentTime += deltaTime;
