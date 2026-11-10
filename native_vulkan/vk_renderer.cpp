@@ -1776,12 +1776,13 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
                     cm0[0], cm0[1], cm0[2], cm0[3], cf0[0], cf0[1], cf0[2], cf0[3]);
         }
     }
-    // 诊断（VK_ALPHALOG=1，默认关）：只打“含半透明顶点 alpha”的笔，最多 240 条。
-    // 目的：确认 NoteSplash / 音符长条（源码里 alpha=0.6）在我们的管线里是否被二次乘 alpha。
+    // 诊断（VK_ALPHALOG=1，默认关）：只打“含半透明顶点 alpha 且纹素 >=30”的笔（标题/菜单
+    // 的纹理是 2..17，游戏内是 20+），最多 600 条。目的：拿到 NoteSplash / 长条（alpha=0.6）
+    // 在我们的管线里的真实 alpha，判断是否被二次乘。
     {
         static int s_mode = -1, s_n = 0;
         if (s_mode < 0) { const char* e = getenv("VK_ALPHALOG"); s_mode = (e && e[0]) ? 1 : 0; }
-        if (s_mode && s_n < 240) {
+        if (s_mode && s_n < 600 && texId >= 30) {
             float amn = 1.0f, amx = 0.0f;
             if (vertexAlpha) {
                 for (int i = 0; i < vertexCount; i++) {
