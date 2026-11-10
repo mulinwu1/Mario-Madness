@@ -774,6 +774,21 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
         s_skip++;
         return;
     }
+    // 诊断（默认常开、限 60 条）：每个 (GL 纹理名 -> Vk 纹理 id/尺寸) 组合只打一次。
+    // 用于确认某一笔是不是采样到了错误的纹理/离屏画布别名（菜单偏亮问题的定位线）。
+    {
+        static int s_n = 0;
+        static std::map<long long, int> s_seen;
+        long long key = ((long long)texName << 32) | (long long)vkTex;
+        if (s_n < 60 && s_seen.find(key) == s_seen.end()) {
+            s_seen[key] = 1;
+            s_n++;
+            int tw = 0, th = 0;
+            S_STATE_getTextureSize(texName, &tw, &th);
+            fprintf(stderr, "[texmap] glName=%d vk=%u size=%dx%d alias=%d\n",
+                    texName, vkTex, tw, th, vkTex >= 1000 ? 1 : 0);
+        }
+    }
     g_draws++;
     // 逐顶点 alpha（loc5 数组）；这是黑幕"几乎不可见"的唯一通道
     bool alphaFromArray = false;
