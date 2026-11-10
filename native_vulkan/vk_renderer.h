@@ -183,6 +183,8 @@ private:
     bool RecreateSwapchain();
     // 当前窗口客户区尺寸是否等于交换链 extent（resize 动画期间用来决定要不要立即重建）
     bool WindowSizeMatchesExtent();
+    // 是否处于窗口缩放动画中（最近 400ms 内尺寸变过）；动画期间禁止重建交换链
+    bool InResizeAnimation();
     // 真正上传的实现；CreateTexture 负责大图降级后再转调它
     uint32_t CreateTextureOnce(int w, int h, const unsigned char* rgba);
     // packet 路径的动态顶点/索引缓冲（首次使用时懒创建）
