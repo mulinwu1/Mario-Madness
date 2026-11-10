@@ -4437,13 +4437,23 @@ void VkRenderer::EndFrame() {
                 pi.pImageIndices = &o.frameImageIndex;
                 pr = g_present(o.queue, &pi);
             } else {
+                // 尺寸还没对上（窗口缩放动画中）：仍然必须 present 一次，把这个已 acquire
+                // 的交换链图像还给驱动。之前这里只标记 swapDirty 不 present，图像就永远停在
+                // acquired 状态；紧接着 RecreateSwapchain 销毁旧交换链，NVIDIA 驱动会直接
+                // fast-fail（实测 0xc0000409 @ nvoglv64.dll，窗口从 1282 一路放大到 1594 那次）。
+                // 旧尺寸图 present 出去最多是缩放动画中闪一帧，不会崩。
                 o.swapDirty = true;
+                VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+                pi.swapchainCount = 1;
+                pi.pSwapchains = &o.swapchain;
+                pi.pImageIndices = &o.frameImageIndex;
+                pr = g_present(o.queue, &pi);
                 static uint64_t s_skip = 0;
                 if (s_skip < 40) {
                     s_skip++;
-                    fprintf(stderr, "[vk] present skip swap=%ux%u win=%dx%d f=%llu\n",
+                    fprintf(stderr, "[vk] present resize swap=%ux%u win=%dx%d f=%llu pr=%d\n",
                             o.extent.width, o.extent.height, o.width, o.height,
-                            (unsigned long long)g_drawFrame);
+                            (unsigned long long)g_drawFrame, (int)pr);
                 }
             }
             static uint64_t s_badPres = 0;
