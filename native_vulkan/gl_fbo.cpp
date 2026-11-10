@@ -313,6 +313,16 @@ bool EnsureFboTarget (int fboName) {
                 // 这张纹理原来的像素会被离屏内容取代，先释放显存
                 r->DestroyTexture (old);
             }
+            // 诊断（限 40 条）：确认哪些 GL 纹理名被 FBO 别名成 RenderTarget。
+            // 若菜单背景用到的名字出现在这里，就能解释“采样到运行时画布”。
+            {
+                static int s_n = 0;
+                if (s_n < 40) {
+                    s_n++;
+                    fprintf (stderr, "[fboalias] #%d fbo=%d tex=%d rt=%u size=%dx%d old=%u\n",
+                             s_n, fboName, f.color.name, id, w, h, old);
+                }
+            }
             cs->setTextureId (f.color.name, id);
         }
     }
