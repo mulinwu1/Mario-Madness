@@ -2502,6 +2502,20 @@ static UniformInfo* FindUniform (Program* p, const std::string& name) {
 
 }
 
+// 诊断用：读某个 float uniform 的当前值（未找到/类型不符返回 -1）。
+// 只给日志用，不参与渲染。
+float gl_shader_uniform_float (int program, const char* name) {
+
+	Program* p = FindProgram (program);
+	if (!p || !name) return -1.0f;
+	UniformInfo* u = FindUniform (p, name);
+	if (!u || u->kind != 0 || u->components != 1) return -1.0f;
+	if (!p->uniformData.empty () && u->offset + 4 <= p->uniformData.size ())
+		return *(const float*) (p->uniformData.data () + u->offset);
+	return -1.0f;
+
+}
+
 int gl_shader_sampler_binding (int program, const char* name) {
 
 	Program* p = FindProgram (program);
