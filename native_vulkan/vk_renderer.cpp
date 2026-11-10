@@ -1462,7 +1462,8 @@ uint32_t VkRenderer::CreateTextureOnce(int w, int h, const unsigned char* rgba) 
 
 // 真正释放纹理槽位。只能在“本帧命令缓冲已提交”之后调用（见 EndFrame 末尾），
 // 否则槽位 id 会被同一帧里后续的 CreateTexture 复用，导致已记录的绘制段改采样新纹理。
-static void DestroyTextureNow(Impl& o, uint32_t id) {
+void VkRenderer::DestroyTextureNow(uint32_t id) {
+    Impl& o = *impl;
     if (id == 0 || id > o.textures.size()) return;
     TexSlot& t = o.textures[id - 1];
     if (!t.used) return;
@@ -4342,7 +4343,7 @@ void VkRenderer::EndFrame() {
     // FrameSeg 仍采样到它们创建时的内容（避免槽位 id 复用造成贴图串层）。
     if (!o.pendingTexDestroy.empty()) {
         for (size_t pi = 0; pi < o.pendingTexDestroy.size(); pi++)
-            DestroyTextureNow(o, o.pendingTexDestroy[pi]);
+            DestroyTextureNow(o.pendingTexDestroy[pi]);
         o.pendingTexDestroy.clear();
     }
 
