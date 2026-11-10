@@ -231,6 +231,14 @@ struct VkRenderer::Impl {
     VkDeviceMemory statMem = VK_NULL_HANDLE;
     void* statPtr = nullptr;
     size_t statBytes = 0;
+    bool statWanted = false;   // VK_BBSTAT / VK_DUMP_PRESENTS：每帧回读
+    // 色键透明（VK_COLORKEY，默认开）：游戏用 SetLayeredWindowAttributes 的色键，
+    // 在 DXGI flip 模型下不生效；这里把“色键色”区域从窗口裁掉（SetWindowRgn），
+    // 窗口外即桌面，等效原版 GDI 色键。ckR/G/B 是目标颜色（默认 RGB 87,25,0 = 6487）。
+    bool ckEnabled = false;
+    int ckR = 87, ckG = 25, ckB = 0;
+    uint64_t ckLastTick = 0;
+    bool ckActive = false;
     std::vector<RenderTarget> targets;
     // 批处理提交顺序：GL 里每笔绘制是立即执行的，而顶点按纹理分桶收集后
     // 若按纹理 id 升序提交，后画的整屏层会被压到先画的层下面（主菜单的
@@ -819,11 +827,28 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
 
     // 取证开关 VK_BBSTAT=1 / VK_DUMP_PRESENTS=1（默认关）：分配主机可见缓冲，
     // 把 present 前的交换链像素拷出来做亮度统计 / 写 BMP。
+    // 色键透明（VK_COLORKEY，默认开）也复用这块缓冲做逐像素扫描。
+    {
+        const char* ck = getenv("VK_COLORKEY");
+        o.ckEnabled = !(ck && ck[0] == '0');
+        const char* ckrgb = getenv("VK_COLORKEY_RGB");
+        int r = 0, g = 0, b = 0;
+        if (ckrgb && sscanf(ckrgb, "%d,%d,%d", &r, &g, &b) == 3) {
+            o.ckR = r; o.ckG = g; o.ckB = b;
+        }
+    }
     {
         const char* v = getenv("VK_BBSTAT");
         const char* d = getenv("VK_DUMP_PRESENTS");
-        if ((v && v[0] == '1') || (d && d[0] == '1')) {
-            o.statBytes = (size_t)o.extent.width * (size_t)o.extent.height * 4;
+        o.statWanted = (v && v[0] == '1') || (d && d[0] == '1');
+        if (o.statWanted || o.ckEnabled) {
+            // 色键扫描要覆盖最大窗口（全屏段 1920x1080），按屏幕尺寸分配。
+            size_t needW = (size_t)o.extent.width;
+            size_t needH = (size_t)o.extent.height;
+            int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+            if (sw > 0 && (size_t)sw > needW) needW = (size_t)sw;
+            if (sh > 0 && (size_t)sh > needH) needH = (size_t)sh;
+            o.statBytes = needW * needH * 4;
             VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
             bci.size = o.statBytes;
             bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -2170,6 +2195,68 @@ static double VkNowMs() {
     LARGE_INTEGER c;
     QueryPerformanceCounter(&c);
     return (double)c.QuadPart * 1000.0 / (double)freq.QuadPart;
+}
+
+// 把“非色键色”的像素合成窗口 region（窗口 region 之外 = 桌面）。
+// px 是 B8G8R8A8 交换链像素；色键色默认 RGB(87,25,0)（游戏 setTransparency 的 6487）。
+// DXGI flip 模型不支持 SetLayeredWindowAttributes 色键，用这个办法等效实现。
+static bool ApplyChromaRegion(HWND hwnd, const uint8_t* px, int w, int h,
+                              int okR, int okG, int okB, bool* active) {
+    if (!hwnd || !px || w <= 0 || h <= 0) return false;
+    RECT wr, cr;
+    if (!GetWindowRect(hwnd, &wr) || !GetClientRect(hwnd, &cr)) return false;
+    POINT pt{0, 0};
+    ClientToScreen(hwnd, &pt);
+    const int offX = pt.x - wr.left;
+    const int offY = pt.y - wr.top;
+
+    std::vector<RECT> rects;
+    rects.reserve((size_t)h * 2);
+    size_t chroma = 0;
+    for (int y = 0; y < h; ++y) {
+        const uint8_t* row = px + (size_t)y * (size_t)w * 4;
+        int x = 0;
+        while (x < w) {
+            const uint8_t* p = row + (size_t)x * 4;
+            if (p[2] == okR && p[1] == okG && p[0] == okB) { ++x; ++chroma; continue; }
+            const int x0 = x;
+            while (x < w) {
+                p = row + (size_t)x * 4;
+                if (p[2] == okR && p[1] == okG && p[0] == okB) break;
+                ++x;
+            }
+            RECT r{offX + x0, offY + y, offX + x, offY + y + 1};
+            rects.push_back(r);
+        }
+    }
+    const double ratio = (double)chroma / ((double)w * (double)h);
+    if (ratio < 0.02 || rects.empty() || rects.size() > 6000) {
+        if (*active) { SetWindowRgn(hwnd, nullptr, TRUE); *active = false; }
+        return false;
+    }
+    const size_t bytes = sizeof(RGNDATAHEADER) + rects.size() * sizeof(RECT);
+    std::vector<uint8_t> buf(bytes);
+    RGNDATA* rd = (RGNDATA*)buf.data();
+    rd->rdh.dwSize = sizeof(RGNDATAHEADER);
+    rd->rdh.iType = RDH_RECTANGLES;
+    rd->rdh.nCount = (DWORD)rects.size();
+    rd->rdh.nRgnSize = (DWORD)(rects.size() * sizeof(RECT));
+    rd->rdh.rcBound.left = 0;
+    rd->rdh.rcBound.top = 0;
+    rd->rdh.rcBound.right = w + offX;
+    rd->rdh.rcBound.bottom = h + offY;
+    memcpy(rd->Buffer, rects.data(), rects.size() * sizeof(RECT));
+    HRGN rgn = ExtCreateRegion(nullptr, (DWORD)bytes, rd);
+    if (!rgn) return false;
+    SetWindowRgn(hwnd, rgn, TRUE);   // 成功后系统接管 region，不能 DeleteObject
+    *active = true;
+    static int s_logged = 0;
+    if (s_logged < 10) {
+        s_logged++;
+        fprintf(stderr, "[vk] colorkey region rects=%zu chroma=%.1f%% size=%dx%d\n",
+                rects.size(), ratio * 100.0, w, h);
+    }
+    return true;
 }
 
 // 交换链重建：present/acquire 一旦返回 OUT_OF_DATE 或 SUBOPTIMAL，旧交换链上
@@ -4411,8 +4498,24 @@ void VkRenderer::EndFrame() {
 
     // 取证 VK_BBSTAT=1（默认关）：present 前把后缓冲拷到主机缓冲，供亮度统计。
     // 只在本层 target=0 且有几何时做；barrier 走 PRESENT_SRC -> TRANSFER_SRC -> PRESENT_SRC。
+    // 色键扫描：只有窗口带 WS_EX_LAYERED 且距上次扫描 >=120ms 才回读，避免每帧回读。
+    bool ckScan = false;
+    if (o.ckEnabled && o.nativeWindow) {
+        const bool layered = (GetWindowLongA((HWND)o.nativeWindow, GWL_EXSTYLE) & WS_EX_LAYERED) != 0;
+        if (!layered) {
+            if (o.ckActive) {
+                SetWindowRgn((HWND)o.nativeWindow, nullptr, TRUE);
+                o.ckActive = false;
+                fprintf(stderr, "[vk] colorkey region cleared (window no longer layered)\n");
+            }
+        } else {
+            const uint64_t nowCk = (uint64_t)GetTickCount64();
+            if (nowCk - o.ckLastTick >= 120) { o.ckLastTick = nowCk; ckScan = true; }
+        }
+    }
     bool doStat = (o.statBuf != VK_NULL_HANDLE && o.statPtr && o.currentTarget == 0 && totalVerts > 0 &&
-                   (size_t)o.extent.width * (size_t)o.extent.height * 4 <= o.statBytes);
+                   (size_t)o.extent.width * (size_t)o.extent.height * 4 <= o.statBytes) &&
+                  (o.statWanted || ckScan);
     if (doStat) {
         VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         // 本次 pass 的 finalLayout 决定当前真实布局（PRESENT_SRC 或 COLOR_ATTACHMENT_OPTIMAL）
@@ -4466,6 +4569,12 @@ void VkRenderer::EndFrame() {
 
     if (doStat) {
         const uint8_t* px = (const uint8_t*)o.statPtr;
+        // 色键透明：把非色键色区域设为窗口 region（窗口外 = 桌面）。
+        // DXGI flip 模型不支持 SetLayeredWindowAttributes 的色键，用 region 等效实现。
+        if (ckScan && o.ckEnabled && o.nativeWindow) {
+            ApplyChromaRegion((HWND)o.nativeWindow, px, (int)o.extent.width, (int)o.extent.height,
+                              o.ckR, o.ckG, o.ckB, &o.ckActive);
+        }
         double sum = 0;
         size_t nb = 0, cnt = 0;
         for (size_t yy = 0; yy < (size_t)o.extent.height; yy += 4) {
