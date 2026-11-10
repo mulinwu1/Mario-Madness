@@ -35,6 +35,8 @@ class FPS extends TextField
 	@:noCompletion private var cacheCount:Int;
 	@:noCompletion private var currentTime:Float;
 	@:noCompletion private var times:Array<Float>;
+	@:noCompletion private var _pixelFontName:String;
+	@:noCompletion private var _fontApplied:Bool = false;
 
 	public function new(x:Float = 10, y:Float = 10, color:Int = 0x000000)
 	{
@@ -46,7 +48,12 @@ class FPS extends TextField
 		currentFPS = 0;
 		selectable = false;
 		mouseEnabled = false;
-		defaultTextFormat = new TextFormat(Assets.getFont(Paths.font("mariones.ttf")).fontName, 10, color);
+		// 启动早期 mariones.ttf 还没进 AssetLibrary，getFont 返回空壳，TextFormat 会退化成
+		// 系统衬线字体（表现为又小又细、和原版完全不像）。这里先记下目标字体名，
+		// 在 __enterFrame 里字体真正可用后重设一次。
+		var _fnt = Assets.getFont(Paths.font("mariones.ttf"));
+		_pixelFontName = (_fnt != null) ? _fnt.fontName : null;
+		defaultTextFormat = new TextFormat(_pixelFontName, 10, color);
 		autoSize = LEFT;
 		multiline = true;
 		text = "FPS: ";
@@ -68,6 +75,13 @@ class FPS extends TextField
 	@:noCompletion
 	private #if !flash override #end function __enterFrame(deltaTime:Float):Void
 	{
+		if (!_fontApplied) {
+			var _f2 = Assets.getFont(Paths.font("mariones.ttf"));
+			if (_f2 != null && _f2.fontName != null) {
+				_fontApplied = true;
+				defaultTextFormat = new TextFormat(_f2.fontName, 10, color);
+			}
+		}
 		currentTime += deltaTime;
 		times.push(currentTime);
 
