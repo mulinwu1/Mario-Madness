@@ -216,6 +216,8 @@ struct VkRenderer::Impl {
     // resize 节流：窗口尺寸与交换链不一致的起始时刻（GetTickCount64 毫秒）。
     // 动画期间持续 present 旧尺寸图但不重建交换链，稳定 200ms 后才重建。
     uint64_t sizeMismatchSince = 0;
+    int lastWinW = 0;
+    int lastWinH = 0;
     // 取证：present 前把交换链图拷到主机可见缓冲，算亮度统计（VK_BBSTAT=1，默认关）
     VkBuffer statBuf = VK_NULL_HANDLE;
     VkDeviceMemory statMem = VK_NULL_HANDLE;
@@ -4453,6 +4455,13 @@ void VkRenderer::EndFrame() {
                 // 我们只剩 922→945→1280）。改成尺寸稳定 200ms 后才真正重建，动画期间用旧
                 // 交换链拉伸上屏，一次重建收尾。
                 uint64_t nowMs = (uint64_t)GetTickCount64();
+                // 尺寸还在变就重新计时：动画期间一次都不重建，等窗口停下来 200ms
+                // 再做唯一一次重建（原版也是动画结束后才稳定）。
+                if (winW != o.lastWinW || winH != o.lastWinH) {
+                    o.lastWinW = winW;
+                    o.lastWinH = winH;
+                    o.sizeMismatchSince = nowMs;
+                }
                 if (o.sizeMismatchSince == 0) o.sizeMismatchSince = nowMs;
                 if (nowMs - o.sizeMismatchSince >= 200) o.swapDirty = true;
                 VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
@@ -4471,10 +4480,15 @@ void VkRenderer::EndFrame() {
             }
             static uint64_t s_badPres = 0;
             if (pr == VK_ERROR_OUT_OF_DATE_KHR) {
-                // 真过期（必须重建，否则后缓冲永远开不起来）
-                o.swapDirty = true;
-                fprintf(stderr, "[vk] swapchain dirty reason=present err=%d f=%llu img=%u\n",
-                        (int)pr, (unsigned long long)g_drawFrame, o.frameImageIndex);
+                // 窗口缩放动画期间 present 每帧都会 OUT_OF_DATE（尺寸对不上）。
+                // 此时不要立刻重建：否则每帧 waitIdle+销毁/重建，帧时间被拉长，
+                // lime 的窗口缩放动画会直接跳到终点（实测 922..935 后一下子 1280，
+                // 原版是 922→928→958→1041→1213→1255→1280）。统一交给 200ms 稳定节流。
+                if (sizeOK) {
+                    o.swapDirty = true;
+                    fprintf(stderr, "[vk] swapchain dirty reason=present err=%d f=%llu img=%u\n",
+                            (int)pr, (unsigned long long)g_drawFrame, o.frameImageIndex);
+                }
             } else if (pr == VK_SUBOPTIMAL_KHR) {
                 // 次优在 resize 动画中每帧都会报；尺寸对上时才算脏，否则交给上面的
                 // 200ms 稳定节流，避免动画期间每帧重建把窗口缩放拖成几大跳。
