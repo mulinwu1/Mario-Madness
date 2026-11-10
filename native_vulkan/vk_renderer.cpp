@@ -213,6 +213,9 @@ struct VkRenderer::Impl {
     // 交换链脏标记：present/acquire 返回 OUT_OF_DATE 或 SUBOPTIMAL 后置位，
     // 下一次开后缓冲帧前无条件重建（原来全仓库没有重建分支 → 后缓冲永久开不起来）
     bool swapDirty = false;
+    // resize 节流：窗口尺寸与交换链不一致的起始时刻（GetTickCount64 毫秒）。
+    // 动画期间持续 present 旧尺寸图但不重建交换链，稳定 200ms 后才重建。
+    uint64_t sizeMismatchSince = 0;
     // 取证：present 前把交换链图拷到主机可见缓冲，算亮度统计（VK_BBSTAT=1，默认关）
     VkBuffer statBuf = VK_NULL_HANDLE;
     VkDeviceMemory statMem = VK_NULL_HANDLE;
@@ -2228,6 +2231,7 @@ bool VkRenderer::RecreateSwapchain() {
     o.frameImageIndex = 0;
     o.bbHeld = false;
     o.bbLoad = false;
+    o.sizeMismatchSince = 0;
     fprintf(stderr, "[vk] swapchain recreate ok=1 oldImages=%u newImages=%u %ux%u -> %ux%u\n",
             oldImages, ic, oldExtW, oldExtH, o.extent.width, o.extent.height);
     return true;
@@ -4431,6 +4435,7 @@ void VkRenderer::EndFrame() {
             bool sizeOK = ((int)o.extent.width == winW && (int)o.extent.height == winH);
             VkResult pr = VK_SUCCESS;
             if (sizeOK) {
+                o.sizeMismatchSince = 0;
                 VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
                 pi.swapchainCount = 1;
                 pi.pSwapchains = &o.swapchain;
@@ -4442,7 +4447,14 @@ void VkRenderer::EndFrame() {
                 // acquired 状态；紧接着 RecreateSwapchain 销毁旧交换链，NVIDIA 驱动会直接
                 // fast-fail（实测 0xc0000409 @ nvoglv64.dll，窗口从 1282 一路放大到 1594 那次）。
                 // 旧尺寸图 present 出去最多是缩放动画中闪一帧，不会崩。
-                o.swapDirty = true;
+                //
+                // 重建节流：resize 动画期间每帧都 waitIdle+销毁/重建交换链会把帧时间拉长，
+                // lime 的窗口缩放动画被拖成几大跳（原版 922→928→958→1041→1213→1255→1280，
+                // 我们只剩 922→945→1280）。改成尺寸稳定 200ms 后才真正重建，动画期间用旧
+                // 交换链拉伸上屏，一次重建收尾。
+                uint64_t nowMs = (uint64_t)GetTickCount64();
+                if (o.sizeMismatchSince == 0) o.sizeMismatchSince = nowMs;
+                if (nowMs - o.sizeMismatchSince >= 200) o.swapDirty = true;
                 VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
                 pi.swapchainCount = 1;
                 pi.pSwapchains = &o.swapchain;
@@ -4451,17 +4463,22 @@ void VkRenderer::EndFrame() {
                 static uint64_t s_skip = 0;
                 if (s_skip < 40) {
                     s_skip++;
-                    fprintf(stderr, "[vk] present resize swap=%ux%u win=%dx%d f=%llu pr=%d\n",
+                    fprintf(stderr, "[vk] present resize swap=%ux%u win=%dx%d f=%llu pr=%d wait=%llums\n",
                             o.extent.width, o.extent.height, o.width, o.height,
-                            (unsigned long long)g_drawFrame, (int)pr);
+                            (unsigned long long)g_drawFrame, (int)pr,
+                            (unsigned long long)(nowMs - o.sizeMismatchSince));
                 }
             }
             static uint64_t s_badPres = 0;
-            if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
-                // 交换链已过期：标记脏，下一帧开帧前重建（这是后缓冲冻结的唯一根因）
+            if (pr == VK_ERROR_OUT_OF_DATE_KHR) {
+                // 真过期（必须重建，否则后缓冲永远开不起来）
                 o.swapDirty = true;
                 fprintf(stderr, "[vk] swapchain dirty reason=present err=%d f=%llu img=%u\n",
                         (int)pr, (unsigned long long)g_drawFrame, o.frameImageIndex);
+            } else if (pr == VK_SUBOPTIMAL_KHR) {
+                // 次优在 resize 动画中每帧都会报；尺寸对上时才算脏，否则交给上面的
+                // 200ms 稳定节流，避免动画期间每帧重建把窗口缩放拖成几大跳。
+                if (sizeOK) o.swapDirty = true;
             }
             if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR) {
                 s_badPres++;
