@@ -2424,6 +2424,20 @@ bool gl_shader_upload_uniforms (int program) {
 
 }
 
+// 用一份绘制时刻的 uniform 快照上传：批处理把 draw 推迟到帧尾，同一个 program
+// 在一帧内可能有多次绘制且 uniform 不同（典型：hasColorTransform 0/1 交替）。
+// 直接覆盖镜像再走同一个上传路径，镜像本身就是"当前绘制用"的临时状态。
+bool gl_shader_upload_uniform_block (int program, const uint8_t* data, uint32_t size) {
+
+	Program* p = FindProgram (program);
+	if (!p || !data || p->uniformData.empty () || size != (uint32_t) p->uniformData.size ()) return false;
+
+	memcpy (p->uniformData.data (), data, size);
+	p->uniformDirty = true;
+	return gl_shader_upload_uniforms (program);
+
+}
+
 static std::string StripArraySuffix (const std::string& name) {
 
 	size_t open = name.find ('[');
