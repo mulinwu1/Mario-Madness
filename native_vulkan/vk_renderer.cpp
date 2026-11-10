@@ -218,6 +218,10 @@ struct VkRenderer::Impl {
     uint64_t sizeMismatchSince = 0;
     int lastWinW = 0;
     int lastWinH = 0;
+    // 最近一次观察到窗口尺寸变化的时刻（GetTickCount64）。400ms 内视为“缩放动画中”，
+    // 期间任何 OUT_OF_DATE / SUBOPTIMAL 都不重建交换链，否则每帧 waitIdle 会把
+    // lime 的窗口缩放动画拖成几大跳（实测 922..935 后一下子 1280）。
+    uint64_t lastResizeTick = 0;
     // 取证：present 前把交换链图拷到主机可见缓冲，算亮度统计（VK_BBSTAT=1，默认关）
     VkBuffer statBuf = VK_NULL_HANDLE;
     VkDeviceMemory statMem = VK_NULL_HANDLE;
@@ -2120,6 +2124,14 @@ bool VkRenderer::WindowSizeMatchesExtent() {
            (int)o.extent.height == (int)(rc.bottom - rc.top);
 }
 
+// 窗口缩放进度的统一判定：最近 400ms 内窗口尺寸变过就算“动画中”。
+// 动画期间一律不重建交换链（重建会 waitIdle，把帧时间拉长，lime 的缩放动画直接跳终点）。
+bool VkRenderer::InResizeAnimation() {
+    Impl& o = *impl;
+    if (o.lastResizeTick == 0) return false;
+    return ((uint64_t)GetTickCount64() - o.lastResizeTick) < 400;
+}
+
 // 交换链重建：present/acquire 一旦返回 OUT_OF_DATE 或 SUBOPTIMAL，旧交换链上
 // 所有后续 acquire 都会继续失败，而后缓冲帧开不起来 → 永久停在上一张清屏帧。
 // 这里按 surface 当前能力重建交换链 + image view + 全部 framebuffer。
@@ -2338,9 +2350,9 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
             // resize 动画期间 acquire 会报 SUBOPTIMAL；此时交换链尺寸其实还“够用”，
             // 不能标脏，否则又变成每帧重建（窗口缩放被拖成几大跳）。
             // 只有尺寸真的对上了还报 SUBOPTIMAL 才需要重建。
-            if (ar == VK_SUBOPTIMAL_KHR && WindowSizeMatchesExtent()) o.swapDirty = true;
+            if (ar == VK_SUBOPTIMAL_KHR && WindowSizeMatchesExtent() && !InResizeAnimation()) o.swapDirty = true;
             if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
-                o.swapDirty = true;
+                if (!InResizeAnimation()) o.swapDirty = true;
                 fprintf(stderr, "[vk] bbframe open f=%llu ok=0 target=0 path=acquire err=%d swapDirty=1\n",
                         (unsigned long long) g_drawFrame, (int) ar);
                 return false;
@@ -2951,9 +2963,9 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
         }
         VkResult ar = g_acquire(o.dev, o.swapchain, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE,
                                 &o.frameImageIndex);
-        if (ar == VK_SUBOPTIMAL_KHR && WindowSizeMatchesExtent()) o.swapDirty = true;
+        if (ar == VK_SUBOPTIMAL_KHR && WindowSizeMatchesExtent() && !InResizeAnimation()) o.swapDirty = true;
         if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
-            o.swapDirty = true;
+            if (!InResizeAnimation()) o.swapDirty = true;
             fprintf(stderr, "[pkt] begin target=0 ok=0 acquire_err=%d\n", (int)ar);
             TraceClearLog(0, r, g, b, a, 0, "acquire_err", clearMask);
             return false;
@@ -4447,6 +4459,16 @@ void VkRenderer::EndFrame() {
                 }
             }
             bool sizeOK = ((int)o.extent.width == winW && (int)o.extent.height == winH);
+            // 先更新“窗口是否在动”：只要尺寸跟上一帧不同，就刷新动画时刻。
+            // 动画期间（400ms 内变过）任何 OUT_OF_DATE/SUBOPTIMAL 都不重建交换链。
+            uint64_t nowMs = (uint64_t)GetTickCount64();
+            if (winW != o.lastWinW || winH != o.lastWinH) {
+                o.lastWinW = winW;
+                o.lastWinH = winH;
+                o.lastResizeTick = nowMs;
+                o.sizeMismatchSince = nowMs;   // 尺寸还在变 → 稳定计时重新开始
+            }
+            bool resizing = (nowMs - o.lastResizeTick) < 400;
             VkResult pr = VK_SUCCESS;
             if (sizeOK) {
                 o.sizeMismatchSince = 0;
@@ -4466,16 +4488,9 @@ void VkRenderer::EndFrame() {
                 // lime 的窗口缩放动画被拖成几大跳（原版 922→928→958→1041→1213→1255→1280，
                 // 我们只剩 922→945→1280）。改成尺寸稳定 200ms 后才真正重建，动画期间用旧
                 // 交换链拉伸上屏，一次重建收尾。
-                uint64_t nowMs = (uint64_t)GetTickCount64();
-                // 尺寸还在变就重新计时：动画期间一次都不重建，等窗口停下来 200ms
-                // 再做唯一一次重建（原版也是动画结束后才稳定）。
-                if (winW != o.lastWinW || winH != o.lastWinH) {
-                    o.lastWinW = winW;
-                    o.lastWinH = winH;
-                    o.sizeMismatchSince = nowMs;
-                }
-                if (o.sizeMismatchSince == 0) o.sizeMismatchSince = nowMs;
-                if (nowMs - o.sizeMismatchSince >= 200) o.swapDirty = true;
+                uint64_t nowMs2 = (uint64_t)GetTickCount64();
+                if (o.sizeMismatchSince == 0) o.sizeMismatchSince = nowMs2;
+                if (!resizing && nowMs2 - o.sizeMismatchSince >= 200) o.swapDirty = true;
                 VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
                 pi.swapchainCount = 1;
                 pi.pSwapchains = &o.swapchain;
@@ -4485,26 +4500,21 @@ void VkRenderer::EndFrame() {
                 if (s_skip < 40) {
                     s_skip++;
                     fprintf(stderr, "[vk] present resize swap=%ux%u win=%dx%d f=%llu pr=%d wait=%llums\n",
-                            o.extent.width, o.extent.height, o.width, o.height,
+                            o.extent.width, o.extent.height, winW, winH,
                             (unsigned long long)g_drawFrame, (int)pr,
-                            (unsigned long long)(nowMs - o.sizeMismatchSince));
+                            (unsigned long long)(nowMs2 - o.sizeMismatchSince));
                 }
             }
             static uint64_t s_badPres = 0;
-            if (pr == VK_ERROR_OUT_OF_DATE_KHR) {
-                // 窗口缩放动画期间 present 每帧都会 OUT_OF_DATE（尺寸对不上）。
-                // 此时不要立刻重建：否则每帧 waitIdle+销毁/重建，帧时间被拉长，
-                // lime 的窗口缩放动画会直接跳到终点（实测 922..935 后一下子 1280，
-                // 原版是 922→928→958→1041→1213→1255→1280）。统一交给 200ms 稳定节流。
-                if (sizeOK) {
-                    o.swapDirty = true;
-                    fprintf(stderr, "[vk] swapchain dirty reason=present err=%d f=%llu img=%u\n",
-                            (int)pr, (unsigned long long)g_drawFrame, o.frameImageIndex);
-                }
+            if (resizing) {
+                // 窗口缩放动画中：present 必然 OUT_OF_DATE/SUBOPTIMAL，全部忽略，
+                // 只靠上面的稳定计时在动画结束后重建一次。
+            } else if (pr == VK_ERROR_OUT_OF_DATE_KHR) {
+                o.swapDirty = true;
+                fprintf(stderr, "[vk] swapchain dirty reason=present err=%d f=%llu img=%u\n",
+                        (int)pr, (unsigned long long)g_drawFrame, o.frameImageIndex);
             } else if (pr == VK_SUBOPTIMAL_KHR) {
-                // 次优在 resize 动画中每帧都会报；尺寸对上时才算脏，否则交给上面的
-                // 200ms 稳定节流，避免动画期间每帧重建把窗口缩放拖成几大跳。
-                if (sizeOK) o.swapDirty = true;
+                o.swapDirty = true;
             }
             if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR) {
                 s_badPres++;
