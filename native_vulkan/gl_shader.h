@@ -90,8 +90,11 @@ bool gl_shader_upload_uniforms (int program);
 
 // 按一份“绘制时刻”的快照上传 uniform（批处理会把提交推迟到帧尾，同一个 program
 // 在一帧里可能被多次绘制且 uniform 不同，例如 hasColorTransform 0/1 交替）。
-// data/size 必须与 gl_shader_uniform_block 给出的大小一致。
-bool gl_shader_upload_uniform_block (int program, const uint8_t* data, uint32_t size);
+// 每笔写进独立的动态偏移槽位，绑定时把返回的偏移传给 vkCmdBindDescriptorSets。
+// 返回 0xFFFFFFFF 表示失败（无 UBO 或大小不符）。
+uint32_t gl_shader_upload_uniform_slot (int program, const uint8_t* data, uint32_t size);
+// 每帧提交前复位槽位计数。
+void gl_shader_reset_uniform_slots ();
 
 // 按 sampler uniform 名写入纹理描述符。name 形如 "bitmap" 或 "bitmap[0]"。
 // 多次调用同一个 binding 会覆盖之前的纹理。
