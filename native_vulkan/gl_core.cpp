@@ -828,6 +828,33 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
                               ((g_attrConstSet[5] && g_attrConst[5][0] != 0.0f) ? g_attrConst[5][0] : 1.0f),
                               foldZeroMult ? nullptr : (g_attrConstSet[6] ? g_attrConst[6] : nullptr),
                               g_attrConstSet[7] ? g_attrConst[7] : nullptr);
+    // 诊断：细高四边形（长条 sustain）单独打一条，确认纹理/UV/alpha/颜色
+    {
+        static int s_tall = 0;
+        if (s_tall < 300) {
+            float minX = out[0], maxX = out[0], minY = out[1], maxY = out[1];
+            float minU = out[2], maxU = out[2], minV = out[3], maxV = out[3];
+            for (int i = 1; i < count; i++) {
+                float x = out[(size_t)i * 4 + 0], y = out[(size_t)i * 4 + 1];
+                float u = out[(size_t)i * 4 + 2], v = out[(size_t)i * 4 + 3];
+                if (x < minX) minX = x; if (x > maxX) maxX = x;
+                if (y < minY) minY = y; if (y > maxY) maxY = y;
+                if (u < minU) minU = u; if (u > maxU) maxU = u;
+                if (v < minV) minV = v; if (v > maxV) maxV = v;
+            }
+            float w = maxX - minX, hh = maxY - minY;
+            if (hh > 100.0f && w < 60.0f && w > 0.5f) {
+                s_tall++;
+                int tw = 0, th = 0; gl_vk_texture_size (texName, &tw, &th);
+                fprintf (stderr, "[tall] tex=%d size=%dx%d n=%d pos=[%.1f..%.1f, %.1f..%.1f] uv=[%.3f..%.3f, %.3f..%.3f] a=[%.2f..%.2f] col=[%.2f %.2f %.2f %.2f] coff=[%.2f %.2f %.2f %.2f] blend=%d,%d,%d\n",
+                         texName, tw, th, count, minX, maxX, minY, maxY, minU, maxU, minV, maxV,
+                         alphas[0], alphas[count-1],
+                         mults[0], mults[1], mults[2], mults[3],
+                         offs[0], offs[1], offs[2], offs[3],
+                         g_blendEnabled ? 1 : 0, g_blendSrc, g_blendDst);
+            }
+        }
+    }
     // 诊断：确认 lime 传进来的 uv 是“帧子矩形归一化”还是“整图 0..1”/像素值
     {
         static int s_uvdbg = 0;
@@ -992,7 +1019,33 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
                               ((g_attrConstSet[5] && g_attrConst[5][0] != 0.0f) ? g_attrConst[5][0] : 1.0f),
                               foldZeroMult ? nullptr : (g_attrConstSet[6] ? g_attrConst[6] : nullptr),
                               g_attrConstSet[7] ? g_attrConst[7] : nullptr);
-    // 诊断：与 draw_arrays 同款，确认 indexed 路径的 uv 语义
+    // 诊断（indexed 路径）：细高四边形 = 长条，单独打一条
+    {
+        static int s_tall2 = 0;
+        if (s_tall2 < 300) {
+            float minX = out[0], maxX = out[0], minY = out[1], maxY = out[1];
+            float minU = out[2], maxU = out[2], minV = out[3], maxV = out[3];
+            for (int i = 1; i < count; i++) {
+                float x = out[(size_t)i * 4 + 0], y = out[(size_t)i * 4 + 1];
+                float u = out[(size_t)i * 4 + 2], v = out[(size_t)i * 4 + 3];
+                if (x < minX) minX = x; if (x > maxX) maxX = x;
+                if (y < minY) minY = y; if (y > maxY) maxY = y;
+                if (u < minU) minU = u; if (u > maxU) maxU = u;
+                if (v < minV) minV = v; if (v > maxV) maxV = v;
+            }
+            float w = maxX - minX, hh = maxY - minY;
+            if (hh > 100.0f && w < 60.0f && w > 0.5f) {
+                s_tall2++;
+                int tw = 0, th = 0; gl_vk_texture_size (texName, &tw, &th);
+                fprintf (stderr, "[tall/ie] tex=%d size=%dx%d n=%d pos=[%.1f..%.1f, %.1f..%.1f] uv=[%.3f..%.3f, %.3f..%.3f] a=[%.2f..%.2f] col=[%.2f %.2f %.2f %.2f] coff=[%.2f %.2f %.2f %.2f] prog=%d blend=%d,%d,%d\n",
+                         texName, tw, th, count, minX, maxX, minY, maxY, minU, maxU, minV, maxV,
+                         alphas[0], alphas[count-1],
+                         mults[0], mults[1], mults[2], mults[3],
+                         offs[0], offs[1], offs[2], offs[3],
+                         gl_shader_current_program (), g_blendEnabled ? 1 : 0, g_blendSrc, g_blendDst);
+            }
+        }
+    }
     {
         static int s_uvdbg2 = 0;
         if (s_uvdbg2 < 25 || s_uvdbg2 % 300 == 0) {
