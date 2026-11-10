@@ -374,8 +374,8 @@ class Paths
 				+ ' existsPrefixed=' + OpenFlAssets.exists('shared:assets/shared/' + key + '.png', IMAGE)
 				+ ' existsRaw=' + OpenFlAssets.exists('assets/shared/' + key + '.png', IMAGE)
 				+ ' fileExists=' + FileSystem.exists('assets/shared/' + key + '.png'));
-			if (lib != null) trace('[assetdbg] lib.exists assets/shared/' + key + '.png = ' + lib.exists('assets/shared/' + key + '.png')
-				+ ' | images/' + key + '.png = ' + lib.exists('images/' + key + '.png'));
+			if (lib != null) trace('[assetdbg] lib.exists assets/shared/' + key + '.png = ' + lib.exists('assets/shared/' + key + '.png', 'IMAGE')
+				+ ' | images/' + key + '.png = ' + lib.exists('images/' + key + '.png', 'IMAGE'));
 		}
 		trace('oh no ( ${path} ) returning null NOOOO');
 		return null;
