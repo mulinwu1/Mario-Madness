@@ -213,6 +213,13 @@ void lime_gl_blend_func(int sfactor, int dfactor) {
     glstate::BlendFunc(sfactor, dfactor);
 }
 
+// 诊断用：读当前 GL 混合状态（只给日志，不参与渲染）。
+extern "C" void lime_vk_get_blend_state(int* en, int* src, int* dst) {
+    if (en) *en = g_blendEnabled ? 1 : 0;
+    if (src) *src = g_blendSrc;
+    if (dst) *dst = g_blendDst;
+}
+
 void lime_gl_color_mask(bool red, bool green, bool blue, bool alpha) {
     g_colorMask[0] = red;
     g_colorMask[1] = green;
