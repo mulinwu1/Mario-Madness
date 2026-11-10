@@ -37,6 +37,7 @@ class FPS extends TextField
 	@:noCompletion private var times:Array<Float>;
 	@:noCompletion private var _pixelFontName:String;
 	@:noCompletion private var _fontApplied:Bool = false;
+	@:noCompletion private var _dbgFrames:Int = 0;
 
 	public function new(x:Float = 10, y:Float = 10, color:Int = 0x000000)
 	{
@@ -77,6 +78,11 @@ class FPS extends TextField
 	{
 		// 字体晚到时重设一次；defaultTextFormat 只影响后续文本，必须 setTextFormat 重刷已写入的内容
 		var _f2 = Assets.getFont(Paths.font("mariones.ttf"));
+		if (_dbgFrames < 3) {
+			_dbgFrames++;
+			trace('[fpsfont] getFont=' + (_f2 == null ? 'NULL' : _f2.fontName)
+				+ ' applied=' + _fontApplied + ' path=' + Paths.font("mariones.ttf"));
+		}
 		if (_f2 != null && _f2.fontName != null && _f2.fontName != _pixelFontName) {
 			_pixelFontName = _f2.fontName;
 			_fontApplied = true;
