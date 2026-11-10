@@ -177,6 +177,8 @@ public:
 private:
     struct Impl;
     Impl* impl;
+    // 真正释放纹理槽位；只在 EndFrame 提交完成后调用（延迟销毁，避免槽位 id 复用串图）
+    void DestroyTextureNow(uint32_t id);
     // 交换链过期（present/acquire 返回 OUT_OF_DATE/SUBOPTIMAL）后的重建
     bool RecreateSwapchain();
     // 真正上传的实现；CreateTexture 负责大图降级后再转调它
