@@ -846,12 +846,17 @@ void lime_gl_draw_arrays(int mode, int first, int count) {
             if (hh > 100.0f && w < 60.0f && w > 0.5f) {
                 s_tall++;
                 int tw = 0, th = 0; gl_vk_texture_size (texName, &tw, &th);
-                fprintf (stderr, "[tall] tex=%d size=%dx%d n=%d pos=[%.1f..%.1f, %.1f..%.1f] uv=[%.3f..%.3f, %.3f..%.3f] a=[%.2f..%.2f] col=[%.2f %.2f %.2f %.2f] coff=[%.2f %.2f %.2f %.2f] blend=%d,%d,%d\n",
+                // 诊断：带出当前 program 的自定义 uniform（daAlpha 是 ColorSwap 的额外乘数，
+                // 若它也被设成 0.6，长条/溅射就会被二次压暗成 0.36）
+                int curProg = gl_shader_current_program ();
+                float daVal = lime::gl_shader_uniform_float (curProg, "daAlpha");
+                float flVal = lime::gl_shader_uniform_float (curProg, "flash");
+                fprintf (stderr, "[tall] tex=%d size=%dx%d n=%d pos=[%.1f..%.1f, %.1f..%.1f] uv=[%.3f..%.3f, %.3f..%.3f] a=[%.2f..%.2f] col=[%.2f %.2f %.2f %.2f] coff=[%.2f %.2f %.2f %.2f] blend=%d,%d,%d da=%.3f fl=%.3f\n",
                          texName, tw, th, count, minX, maxX, minY, maxY, minU, maxU, minV, maxV,
                          alphas[0], alphas[count-1],
                          mults[0], mults[1], mults[2], mults[3],
                          offs[0], offs[1], offs[2], offs[3],
-                         g_blendEnabled ? 1 : 0, g_blendSrc, g_blendDst);
+                         g_blendEnabled ? 1 : 0, g_blendSrc, g_blendDst, daVal, flVal);
             }
         }
     }

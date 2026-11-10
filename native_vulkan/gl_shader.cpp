@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <stdint.h>
 
 #if defined (_MSC_VER) && defined (_WIN64)
@@ -2469,13 +2470,43 @@ uint32_t gl_shader_upload_uniform_slot (int program, const uint8_t* data, uint32
 	}
 	p->nextUniformSlot = slot + 1;
 
+	// 诊断：读出 daAlpha（ColorSwap 自定义乘数）的真实值；VK_FORCE_DAALPHA=1 时强制为 1，
+	// 用于验证"长条/溅射被 daAlpha 二次压暗"的假设。默认不改变任何行为。
+	const uint8_t* src = data;
+	std::vector<uint8_t> patched;
+	{
+		static int s_forceDa = -1;
+		if (s_forceDa < 0) {
+			const char* e = getenv ("VK_FORCE_DAALPHA");
+			s_forceDa = (e && e[0] == '1') ? 1 : 0;
+		}
+		for (size_t i = 0; i < p->uniforms.size (); i++) {
+			const UniformInfo& u = p->uniforms[i];
+			if (u.kind != 0 || u.components != 1 || u.name != "daAlpha") continue;
+			if (u.offset + 4u > size) break;
+			float daVal = *(const float*) (data + u.offset);
+			static std::map<long long, int> s_daSeen;
+			long long key = ((long long) program << 32) | (long long) ((int) (daVal * 1000.0f));
+			if (s_daSeen.find (key) == s_daSeen.end () && s_daSeen.size () < 40) {
+				s_daSeen[key] = 1;
+				fprintf (stderr, "[daalpha] prog=%d value=%g force=%d\n", program, daVal, s_forceDa);
+			}
+			if (s_forceDa) {
+				patched.assign (data, data + size);
+				*(float*) (patched.data () + u.offset) = 1.0f;
+				src = patched.data ();
+			}
+			break;
+		}
+	}
+
 	uint32_t off = slot * kUniformStride;
 	PipelineSlot* slots[2] = { &p->pipelineBack, &p->pipelineOffscreen };
 	bool any = false;
 	for (int i = 0; i < 2; i++) {
 
 		if (!slots[i]->mapped || slots[i]->bufferSize < off + size) continue;
-		memcpy ((uint8_t*) slots[i]->mapped + off, data, size);
+		memcpy ((uint8_t*) slots[i]->mapped + off, src, size);
 		any = true;
 
 	}

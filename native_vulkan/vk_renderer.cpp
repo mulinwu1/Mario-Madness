@@ -1536,7 +1536,15 @@ uint32_t VkRenderer::TextureCount() const {
 
 // ---- GL 常量 -> Vulkan 枚举（只认最常用的几种，其余按最接近语义映射）----
 static VkFilter GlFilterToVk(int glFilter) {
-    return (glFilter == 0x2600) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR; // NEAREST / LINEAR
+    switch (glFilter) {
+        // 只认最近的采样语义：mipmap 变体在 maxLod=0 时等价于 level0 的最近/线性
+        case 0x2600: // GL_NEAREST
+        case 0x2700: // GL_NEAREST_MIPMAP_NEAREST
+        case 0x2702: // GL_NEAREST_MIPMAP_LINEAR
+            return VK_FILTER_NEAREST;
+        default:     // GL_LINEAR / GL_LINEAR_MIPMAP_* / 其余
+            return VK_FILTER_LINEAR;
+    }
 }
 
 static VkSamplerAddressMode GlWrapToVk(int wrap) {
@@ -4454,7 +4462,9 @@ void VkRenderer::EndFrame() {
                         // FPS 文本这种带 4px 偏移的小四边形才能落在原位置）。
                         // 同时取消 pack 阶段对离屏源（id>=1000）做的 V 翻转：翻转几何
                         // 已经由负视口完成，两个都做会互相抵消。
-                        if (o.currentTarget == 0) {
+                        // 尺寸不匹配的过渡帧不做任何翻转（见 DrawRaw 里同条件），
+                        // 否则补偿会把整层镜像（缩放动画中“画面倒过来”）。
+                        if (o.currentTarget == 0 && WindowSizeMatchesExtent()) {
                             VkViewport nvp = dynVp;
                             nvp.y = dynVp.y + dynVp.height;
                             nvp.height = -dynVp.height;
