@@ -46,7 +46,7 @@ class FPS extends TextField
 		currentFPS = 0;
 		selectable = false;
 		mouseEnabled = false;
-		defaultTextFormat = new TextFormat(Assets.getFont(Paths.font("mariones.ttf")).fontName, 14, color);
+		defaultTextFormat = new TextFormat(Assets.getFont(Paths.font("mariones.ttf")).fontName, 10, color);
 		autoSize = LEFT;
 		multiline = true;
 		text = "FPS: ";
@@ -90,7 +90,7 @@ class FPS extends TextField
 			text += "\nMEMORY: " + memoryMegas + " MB";
 			#end
 
-			textColor = 0xFFFFFFFF;
+			textColor = 0xFFa11b1b;
 			if (memoryMegas > 3000 || currentFPS <= ClientPrefs.framerate / 2 || PlayState.virtualmode == true)
 			{
 				textColor = 0xFFe30000;
