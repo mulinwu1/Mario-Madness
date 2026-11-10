@@ -339,6 +339,7 @@ class Paths
 
 	// completely rewritten asset loading? fuck!
 	public static var currentTrackedAssets:Map<String, FlxGraphic> = [];
+	static var assetDbgCount:Int = 0;
 	public static function returnGraphic(key:String, ?library:String) {
 		#if MODS_ALLOWED
 		var modKey:String = modsImages(key);
@@ -364,6 +365,17 @@ class Paths
 			}
 			localTrackedAssets.push(path);
 			return currentTrackedAssets.get(path);
+		}
+		if (assetDbgCount < 6) {
+			assetDbgCount++;
+			var lib = Assets.getLibrary('shared');
+			trace('[assetdbg] key=' + key + ' cur=' + currentLevel + ' hasShared=' + Assets.hasLibrary('shared')
+				+ ' libNull=' + (lib == null)
+				+ ' existsPrefixed=' + OpenFlAssets.exists('shared:assets/shared/' + key + '.png', IMAGE)
+				+ ' existsRaw=' + OpenFlAssets.exists('assets/shared/' + key + '.png', IMAGE)
+				+ ' fileExists=' + FileSystem.exists('assets/shared/' + key + '.png'));
+			if (lib != null) trace('[assetdbg] lib.exists assets/shared/' + key + '.png = ' + lib.exists('assets/shared/' + key + '.png', IMAGE)
+				+ ' | images/' + key + '.png = ' + lib.exists('images/' + key + '.png', IMAGE));
 		}
 		trace('oh no ( ${path} ) returning null NOOOO');
 		return null;
