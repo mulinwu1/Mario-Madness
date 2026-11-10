@@ -957,6 +957,26 @@ void lime_gl_draw_elements(int mode, int count, int type, double offset) {
                     texName, vkTex, tw, th, vkTex >= 1000 ? 1 : 0);
         }
     }
+    // 诊断（VK_ATTRLOG=1，限 120 条）：打印每笔的 attrib 5/6/7 状态，
+    // 用于定位“该走顶点数组却退化成常量”的笔（菜单 UI 红色调制丢失）。
+    {
+        static int s_mode = -1, s_n3 = 0;
+        if (s_mode < 0) { const char* e = getenv("VK_ATTRLOG"); s_mode = (e && e[0]) ? 1 : 0; }
+        if (s_mode && s_n3 < 120) {
+            s_n3++;
+            const AttribState& a5 = g_attrs[5];
+            const AttribState& a6 = g_attrs[6];
+            const AttribState& a7 = g_attrs[7];
+            fprintf(stderr,
+                    "[attrlog] #%d tex=%d n=%d a5(en=%d sz=%d buf=%d cl=%d str=%d off=%.0f) "
+                    "a6(en=%d sz=%d buf=%d cl=%d str=%d off=%.0f) "
+                    "a7(en=%d sz=%d buf=%d cl=%d str=%d off=%.0f)\n",
+                    s_n3, texName, count,
+                    a5.enabled ? 1 : 0, a5.size, a5.buffer, a5.client ? 1 : 0, a5.stride, a5.offset,
+                    a6.enabled ? 1 : 0, a6.size, a6.buffer, a6.client ? 1 : 0, a6.stride, a6.offset,
+                    a7.enabled ? 1 : 0, a7.size, a7.buffer, a7.client ? 1 : 0, a7.stride, a7.offset);
+        }
+    }
     g_draws++;
     bool alphaFromArray = false;
     std::vector<float> alphas = BuildVertexAlpha(count, 0, idxs.data(), &alphaFromArray);
