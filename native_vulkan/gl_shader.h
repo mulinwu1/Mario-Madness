@@ -88,6 +88,11 @@ int gl_shader_sampler_unit (int program, int index);
 // 把 CPU 侧 uniform 镜像写入 host visible buffer 并更新 descriptor set（仅 UBO 部分）。
 bool gl_shader_upload_uniforms (int program);
 
+// 按一份“绘制时刻”的快照上传 uniform（批处理会把提交推迟到帧尾，同一个 program
+// 在一帧里可能被多次绘制且 uniform 不同，例如 hasColorTransform 0/1 交替）。
+// data/size 必须与 gl_shader_uniform_block 给出的大小一致。
+bool gl_shader_upload_uniform_block (int program, const uint8_t* data, uint32_t size);
+
 // 按 sampler uniform 名写入纹理描述符。name 形如 "bitmap" 或 "bitmap[0]"。
 // 多次调用同一个 binding 会覆盖之前的纹理。
 bool gl_shader_write_sampler (int program, bool offscreen, const char* name, VkImageView view, VkSampler sampler);
