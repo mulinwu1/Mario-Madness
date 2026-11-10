@@ -181,6 +181,8 @@ private:
     void DestroyTextureNow(uint32_t id);
     // 交换链过期（present/acquire 返回 OUT_OF_DATE/SUBOPTIMAL）后的重建
     bool RecreateSwapchain();
+    // 当前窗口客户区尺寸是否等于交换链 extent（resize 动画期间用来决定要不要立即重建）
+    bool WindowSizeMatchesExtent();
     // 真正上传的实现；CreateTexture 负责大图降级后再转调它
     uint32_t CreateTextureOnce(int w, int h, const unsigned char* rgba);
     // packet 路径的动态顶点/索引缓冲（首次使用时懒创建）
