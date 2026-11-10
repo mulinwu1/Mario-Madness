@@ -15,6 +15,9 @@
 #include <ctime>
 #if defined(_WIN32)
 #include <direct.h>
+
+// 诊断用：gl_core.cpp 提供的当前 GL 混合状态读取（只给 VK_ALPHALOG 用）。
+extern "C" void lime_vk_get_blend_state(int* en, int* src, int* dst);
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -1782,7 +1785,7 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
     {
         static int s_mode = -1, s_n = 0;
         if (s_mode < 0) { const char* e = getenv("VK_ALPHALOG"); s_mode = (e && e[0]) ? 1 : 0; }
-        if (s_mode && s_n < 800 && texId >= 30 && o.currentTarget >= 1006) {
+        if (s_mode && s_n < 1200 && o.currentTarget >= 1006) {
             float amn = 1.0f, amx = 0.0f;
             if (vertexAlpha) {
                 for (int i = 0; i < vertexCount; i++) {
@@ -1795,11 +1798,12 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
             }
             if (amn < 0.95f) {
                 s_n++;
+                int ben = 0, bsrc = 0, bdst = 0;
+                lime_vk_get_blend_state(&ben, &bsrc, &bdst);
                 fprintf(stderr,
-                        "[alphalog] #%d f=%llu cur=%u tex=%u prog=%d n=%d amin=%.3f amax=%.3f alphav=%.3f\n",
+                        "[alphalog] #%d f=%llu cur=%u tex=%u prog=%d n=%d amin=%.3f amax=%.3f blend=%d,%d,%d\n",
                         s_n, (unsigned long long)g_drawFrame, (unsigned)o.currentTarget, texId,
-                        lime::gl_shader_current_program(), vertexCount, amn, amx,
-                        lime::gl_shader_uniform_float(lime::gl_shader_current_program(), "openfl_Alphav"));
+                        lime::gl_shader_current_program(), vertexCount, amn, amx, ben, bsrc, bdst);
             }
         }
     }
