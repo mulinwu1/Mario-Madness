@@ -38,6 +38,7 @@ class FPS extends TextField
 	@:noCompletion private var _pixelFontName:String;
 	@:noCompletion private var _fontApplied:Bool = false;
 	@:noCompletion private var _dbgFrames:Int = 0;
+	@:noCompletion private var _fontFromDisk:Bool = false;
 
 	public function new(x:Float = 10, y:Float = 10, color:Int = 0x000000)
 	{
@@ -78,6 +79,22 @@ class FPS extends TextField
 	{
 		// 字体晚到时重设一次；defaultTextFormat 只影响后续文本，必须 setTextFormat 重刷已写入的内容
 		var _f2 = Assets.getFont(Paths.font("mariones.ttf"));
+		// NO_PRELOAD_ALL 下 fonts 库是空壳、CI 产物也没内嵌 ttf：直接从磁盘读并注册一次
+		#if sys
+		if (_f2 == null && !_fontFromDisk) {
+			_fontFromDisk = true;
+			try {
+				var _p = Paths.font("mariones.ttf");
+				if (sys.FileSystem.exists(_p)) {
+					var _f3 = lime.text.Font.fromBytes(sys.io.File.getBytes(_p), "mariones");
+					if (_f3 != null) {
+						lime.utils.Assets.registerFont(_f3);
+						_f2 = lime.utils.Assets.getFont("mariones");
+					}
+				}
+			} catch (e:Dynamic) {}
+		}
+		#end
 		if (_dbgFrames < 3) {
 			_dbgFrames++;
 			trace('[fpsfont] getFont=' + (_f2 == null ? 'NULL' : _f2.fontName)
