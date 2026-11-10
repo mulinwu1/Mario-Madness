@@ -78,8 +78,16 @@ class LoadingState extends MusicBeatState
 		});
 	}
 
-	function checkLoadSong(path:String)
+	function checkLoadSong(path:Dynamic)
 	{
+		// 本分支的 Paths.inst()/voices() 返回的是 Sound.fromFile 已加载好的 Sound 对象，
+		// 不是字符串路径。按字符串去 Assets.loadSound() 会找不到资源，Future 只挂
+		// onComplete（没有 onError），LoadingState 的回调永远不齐 → 卡在 LOADING。
+		if (!Std.isOfType(path, String))
+		{
+			trace('[load] already-loaded sound, skip: ' + Std.string(path));
+			return;
+		}
 		if (!Assets.cache.hasSound(path))
 		{
 			var library = Assets.getLibrary("songs");
@@ -133,6 +141,7 @@ class LoadingState extends MusicBeatState
 
 	function onLoad()
 	{
+		trace('[load] onLoad -> switchState');
 		if (stopMusic && FlxG.sound.music != null)
 			FlxG.sound.music.stop();
 
