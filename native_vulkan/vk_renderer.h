@@ -115,10 +115,13 @@ public:
     // 顶点数组里，黑幕的 0.05 就在这条数组里）；NULL 用 SetDrawColor 的常量值
     // vertexMult / vertexOff 非 NULL 时按顶点逐点取 colorMultiplier / colorOffset
     // （各 4 float；lime 把这两组放在 loc6/loc7 顶点数组里），NULL 用常量值
+    // uniformData/uniformSize：调用时刻该 program 的 uniform 快照（gl_shader_uniform_block），
+    // 批处理提交时会按这份快照上传，避免同一个 program 一帧多次绘制时互相覆盖。
     void DrawRaw(uint32_t texId, const float* verts, int vertexCount,
                  const float* vertexAlpha = nullptr,
                  const float* vertexMult = nullptr,
-                 const float* vertexOff = nullptr);
+                 const float* vertexOff = nullptr,
+                 const uint8_t* uniformData = nullptr, uint32_t uniformSize = 0);
 
     // 设置本次绘制的常量顶点属性（GL glVertexAttrib1f/4f 的语义）：
     // alpha 对应 loc1 openfl_Alpha，mult 对应 loc2 colorMultiplier，offset 对应 loc3 colorOffset。
