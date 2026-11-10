@@ -214,7 +214,13 @@ struct VkRenderer::Impl {
     // 若按纹理 id 升序提交，后画的整屏层会被压到先画的层下面（主菜单的
     // 静态噪声层就是这么被背景盖掉的）。这里按 GL 提交顺序记录每一笔的
     // 源 id / 该源顶点数组里的起始顶点 / 顶点数，EndFrame 严格照此顺序提交。
-    struct FrameSeg { uint32_t id; size_t off; size_t count; };
+    // uni：绘制时刻该 program 的 uniform 快照（可为空）。
+    struct FrameSeg {
+        uint32_t id;
+        size_t off;
+        size_t count;
+        std::vector<uint8_t> uni;
+    };
     std::vector<FrameSeg> segs;
     uint32_t currentTarget = 0;
     // 最后一次真正收到顶点并提交的离屏目标（present 选源用）
@@ -1694,7 +1700,8 @@ void VkRenderer::DrawSprite(uint32_t texId, float x, float y, float w, float h,
 }
 
 void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, const float* vertexAlpha,
-                         const float* vertexMult, const float* vertexOff) {
+                         const float* vertexMult, const float* vertexOff,
+                         const uint8_t* uniformData, uint32_t uniformSize) {
     Impl& o = *impl;
     std::vector<float>* vertsPtr = nullptr;
     std::vector<uint16_t>* progsPtr = nullptr;
@@ -1984,6 +1991,9 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
         progsPtr->push_back((uint16_t)((vkProg > 0 && vkProg < 65535) ? vkProg : 0));
     }
     o.segs.push_back({texId, segOff, (size_t)vertexCount});
+    if (uniformData && uniformSize > 0) {
+        o.segs.back().uni.assign(uniformData, uniformData + uniformSize);
+    }
 }
 
 void VkRenderer::BeginFrame(float r, float g, float b, float a) {
@@ -3605,7 +3615,14 @@ void VkRenderer::EndFrame() {
 
     float* dst = o.vbPtr;
     // id = 本段采样源的批次号（1..N 贴图，1000+ 离屏槽位）：接自定义管线时要按它取 view/sampler
-    struct DrawRange { VkDescriptorSet set; size_t first; size_t count; uint16_t prog; uint32_t id; };
+    struct DrawRange {
+        VkDescriptorSet set;
+        size_t first;
+        size_t count;
+        uint16_t prog;
+        uint32_t id;
+        const std::vector<uint8_t>* uni;   // 该笔的 uniform 快照（可为空）
+    };
     std::vector<DrawRange> ranges;
     size_t totalVerts = 0;
 
@@ -3617,7 +3634,8 @@ void VkRenderer::EndFrame() {
     // 诊断 VK_PROGPIPE_DBG=1：标签数与顶点数对不上时整段退化成 prog=0，
     // 着色器就永远绑不上。先把差值打出来，指认是哪一批漏了 push。
     auto pushSeg = [&](const float* src, size_t cnt, const std::vector<uint16_t>* pv,
-                       size_t pvOff, VkDescriptorSet set, uint32_t id) {
+                       size_t pvOff, VkDescriptorSet set, uint32_t id,
+                       const std::vector<uint8_t>* uni) {
         if (!src || cnt == 0) return;
         if (totalVerts + cnt > (size_t)MAX_SPRITES * 6) return;
         memcpy(dst + totalVerts * 15, src, cnt * 15 * sizeof(float));
@@ -3632,12 +3650,13 @@ void VkRenderer::EndFrame() {
             size_t start = 0;
             for (size_t k = 1; k <= cnt; k++) {
                 if (k == cnt || (*pv)[pvOff + k] != (*pv)[pvOff + start]) {
-                    ranges.push_back({set, totalVerts + start, k - start, (*pv)[pvOff + start], id});
+                    ranges.push_back({set, totalVerts + start, k - start,
+                                      (*pv)[pvOff + start], id, uni});
                     start = k;
                 }
             }
         } else {
-            ranges.push_back({set, totalVerts, cnt, 0, id});
+            ranges.push_back({set, totalVerts, cnt, 0, id, uni});
         }
         totalVerts += cnt;
         batchIds.push_back(id);
@@ -3668,13 +3687,13 @@ void VkRenderer::EndFrame() {
             const std::vector<float>& v = o.targets[ti].verts;
             if ((s.off + s.count) * 15 > v.size()) return;
             pushSeg(v.data() + s.off * 15, s.count, &o.targets[ti].progs, s.off,
-                    o.targets[ti].set, s.id);
+                    o.targets[ti].set, s.id, &s.uni);
         } else {
             if (s.id == 0 || s.id > o.textures.size()) return;
             TexSlot& t = o.textures[s.id - 1];
             if (!t.used) return;
             if ((s.off + s.count) * 15 > t.verts.size()) return;
-            pushSeg(t.verts.data() + s.off * 15, s.count, &t.progs, s.off, t.set, s.id);
+            pushSeg(t.verts.data() + s.off * 15, s.count, &t.progs, s.off, t.set, s.id, &s.uni);
         }
     };
     if (s_11first) for (auto& s : o.segs) if (s.id == 11) pushOneSeg(s);
@@ -3705,7 +3724,7 @@ void VkRenderer::EndFrame() {
             PushLimeVertex(q, x0, y0, 0.0f, 0.0f);
             PushLimeVertex(q, x0 + 30.0f, H, 1.0f, 1.0f);
             PushLimeVertex(q, x0, H, 0.0f, 1.0f);
-            pushSeg(q.data(), 6, nullptr, 0, o.textures[7].set, 8);
+            pushSeg(q.data(), 6, nullptr, 0, o.textures[7].set, 8, nullptr);
         }
     }
 
@@ -4115,7 +4134,13 @@ void VkRenderer::EndFrame() {
                         sp = o.textures[r.id - 1].sampler;
                     }
                     if (vw != VK_NULL_HANDLE) {
-                        bool okU = lime::gl_shader_upload_uniforms((int)r.prog);
+                        // 按“这一笔绘制时刻”的 uniform 快照上传（同一个 program 一帧里
+                        // 可能有多笔且 uniform 不同，例如 hasColorTransform 0/1 交替）。
+                        // 没有快照时退回 program 当前镜像，行为与之前一致。
+                        bool okU = (r.uni && !r.uni->empty())
+                            ? lime::gl_shader_upload_uniform_block((int)r.prog, r.uni->data(),
+                                                                   (uint32_t)r.uni->size())
+                            : lime::gl_shader_upload_uniforms((int)r.prog);
                         // 采样器名字不统一：8 属性那批叫 bitmap，5 属性那批（上屏用）叫
                         // openfl_Texture。两个都试，先命中的那个生效。
                         bool okS = lime::gl_shader_write_sampler((int)r.prog, off, "bitmap", vw, sp);
