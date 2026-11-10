@@ -346,8 +346,11 @@ void lime_gl_tex_image_2d(int target, int level, int internalformat, int width, 
                     rgba.empty() ? 0 : rgba[2], rgba.size() < 4 ? 0 : rgba[3]);
         }
         s_n++;
-        ClearTexNameMappings(g_texVk[texName]);
-        g_renderer->DestroyTexture(g_texVk[texName]);
+        // 先保存旧 id：ClearTexNameMappings 会把 g_texVk[texName] 清 0，
+        // 若先清再取，DestroyTexture 收到 0 → 纹理永远不释放（槽位一路膨胀）。
+        uint32_t oldVk = g_texVk[texName];
+        ClearTexNameMappings(oldVk);
+        g_renderer->DestroyTexture(oldVk);
     }
     g_texVk[texName] = g_renderer->CreateTexture(width, height, rgba.data());
 }
