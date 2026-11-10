@@ -113,11 +113,13 @@ class LoadingState extends MusicBeatState
 			if (!LimeAssets.libraryPaths.exists(library))
 				throw "Missing library: " + library;
 
+			trace('[assetdbg] loadLibrary ' + library + ' start');
 			var callback = callbacks.add("library:" + library);
-			Assets.loadLibrary(library).onComplete(function(_)
+			Assets.loadLibrary(library).onComplete(function(lib)
 			{
+				trace('[assetdbg] loadLibrary ' + library + ' done null=' + (lib == null));
 				callback();
-			});
+			}).onError(function(e) trace('[assetdbg] loadLibrary ' + library + ' ERR ' + Std.string(e)));
 		}
 	}
 
