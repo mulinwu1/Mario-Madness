@@ -14196,12 +14196,22 @@ class PlayState extends MusicBeatState
 
 				if (value2 != "")
 				{
-					subTitle.color = Std.parseInt(newcolor);
+					var parsed:Null<Int> = Std.parseInt(newcolor);
+					subTitle.color = (parsed != null) ? parsed : FlxColor.WHITE;
 				}
 				else
 				{
 					subTitle.color = FlxColor.WHITE;
 				}
+				// [vkfix] 我们的 lime 构建不会在运行时应用 FlxText.set_color 的格式颜色（字幕一直是白色），
+				// 这里额外用 sprite 颜色调制把白字贴图染成目标颜色（黑描边乘后仍为黑）。
+				var subColor:Int = subTitle.color;
+				if (subTitle.colorTransform == null)
+					subTitle.colorTransform = new openfl.geom.ColorTransform();
+				subTitle.colorTransform.redMultiplier = ((subColor >> 16) & 0xFF) / 255;
+				subTitle.colorTransform.greenMultiplier = ((subColor >> 8) & 0xFF) / 255;
+				subTitle.colorTransform.blueMultiplier = (subColor & 0xFF) / 255;
+				subTitle.useColorTransform = true;
 
 			case 'Show Song':
 				var triggerMR:Float = Std.parseFloat(value1);
