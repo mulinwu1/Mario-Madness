@@ -38,7 +38,10 @@ jobs:
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "ndk;${NDK_VERSION}" "platforms;android-28" "build-tools;28.0.3" "platform-tools"
           echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
           echo "ANDROID_SDK=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          # lime 用这个环境变量判断"已经 setup 过"，省掉交互式 lime setup android
+          echo "ANDROID_SETUP=1" >> "$GITHUB_ENV"
 
       - name: Restore caches
         uses: actions/cache@v4
@@ -163,8 +166,12 @@ jobs:
           haxelib run hxcpp Build.xml -Dandroid -DHXCPP_ARM64 -DPLATFORM=android-21 2>&1 | tee ../build-android.log
           test "${PIPESTATUS[0]}" -eq 0
           echo "--- ndll output ---"
-          ls -lR ../ndll/Android || true
-          test -f ../ndll/Android/arm64-v8a/liblime-64.so
+          find .. -name '*.so' -printf '%p %s bytes\n' 2>/dev/null | head -40 || true
+          SO=$(find ../ndll -name 'liblime*.so' 2>/dev/null | head -n 1)
+          test -n "$SO"
+          file "$SO"
+          file "$SO" | grep -qi aarch64
+          echo "lime android lib: $SO"
 
       - name: Upload lime android ndll
         uses: actions/upload-artifact@v4
@@ -197,7 +204,10 @@ jobs:
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "ndk;${NDK_VERSION}" "platforms;android-28" "build-tools;28.0.3" "platform-tools"
           echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
           echo "ANDROID_SDK=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          # lime 用这个环境变量判断"已经 setup 过"，省掉交互式 lime setup android
+          echo "ANDROID_SETUP=1" >> "$GITHUB_ENV"
 
       - name: Download lime android ndll
         uses: actions/download-artifact@v4
@@ -249,8 +259,12 @@ jobs:
           set -e
           LIME_ROOT="$HOME/haxelib/lime/8,0,2"
           test -d "$LIME_ROOT"
+          SO=$(find lime-android -name 'liblime*.so' | head -n 1)
+          test -n "$SO"
+          file "$SO"
           mkdir -p "$LIME_ROOT/ndll/Android/arm64-v8a"
-          cp -v lime-android/ndll/Android/arm64-v8a/liblime-64.so "$LIME_ROOT/ndll/Android/arm64-v8a/"
+          cp -v "$SO" "$LIME_ROOT/ndll/Android/arm64-v8a/liblime-64.so"
+          cp -v "$SO" "$LIME_ROOT/ndll/Android/arm64-v8a/liblime.so"
           ls -l "$LIME_ROOT/ndll/Android/arm64-v8a/"
           # 确认真的是 Vulkan 版
           strings "$LIME_ROOT/ndll/Android/arm64-v8a/liblime-64.so" | grep -c vkCreateInstance
@@ -263,7 +277,7 @@ jobs:
           export NEKOPATH="$HOME/neko"
           export LD_LIBRARY_PATH="$HOME/neko:$LD_LIBRARY_PATH"
           export HXCPP_COMPILE_THREADS="$(nproc)"
-          haxelib run lime build android -Dandroid --verbose 2>&1 | tee build-apk.log
+          haxelib run lime build android -Dandroid -debug --verbose 2>&1 | tee build-apk.log
           test "${PIPESTATUS[0]}" -eq 0
           echo "--- apk ---"
           find . -name "*.apk" -print
