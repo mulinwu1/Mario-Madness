@@ -24,24 +24,35 @@ jobs:
             native_vulkan
           sparse-checkout-cone-mode: false
 
-      - name: Setup Java 11
+      # sdkmanager(cmdline-tools 16) 需要 JDK 17；先用它装 NDK/SDK 包，再切回 JDK 11 跑 gradle
+      - name: Setup Java 17 (sdkmanager)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install NDK and SDK packages
+        run: |
+          set -e
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          echo "SDK=$SDK"
+          "$SDKM" --version
+          # runner 上许可证已接受，不再走交互式 --licenses
+          "$SDKM" "ndk;${NDK_VERSION}" "platforms;android-28" "build-tools;28.0.3" "platform-tools"
+          test -d "$SDK/ndk/${NDK_VERSION}"
+          echo "ANDROID_NDK_ROOT=$SDK/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$SDK/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SETUP=1" >> "$GITHUB_ENV"
+
+      - name: Setup Java 11 (gradle/hxcpp)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '11'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install NDK and SDK packages
-        run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "ndk;${NDK_VERSION}" "platforms;android-28" "build-tools;28.0.3" "platform-tools"
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
-          # lime 用这个环境变量判断"已经 setup 过"，省掉交互式 lime setup android
-          echo "ANDROID_SETUP=1" >> "$GITHUB_ENV"
 
       - name: Restore caches
         uses: actions/cache@v4
@@ -190,24 +201,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Java 11
+      # sdkmanager(cmdline-tools 16) 需要 JDK 17；先用它装 NDK/SDK 包，再切回 JDK 11 跑 gradle
+      - name: Setup Java 17 (sdkmanager)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install NDK and SDK packages
+        run: |
+          set -e
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          echo "SDK=$SDK"
+          "$SDKM" --version
+          # runner 上许可证已接受，不再走交互式 --licenses
+          "$SDKM" "ndk;${NDK_VERSION}" "platforms;android-28" "build-tools;28.0.3" "platform-tools"
+          test -d "$SDK/ndk/${NDK_VERSION}"
+          echo "ANDROID_NDK_ROOT=$SDK/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$SDK/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SETUP=1" >> "$GITHUB_ENV"
+
+      - name: Setup Java 11 (gradle/hxcpp)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '11'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install NDK and SDK packages
-        run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "ndk;${NDK_VERSION}" "platforms;android-28" "build-tools;28.0.3" "platform-tools"
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
-          # lime 用这个环境变量判断"已经 setup 过"，省掉交互式 lime setup android
-          echo "ANDROID_SETUP=1" >> "$GITHUB_ENV"
 
       - name: Download lime android ndll
         uses: actions/download-artifact@v4
