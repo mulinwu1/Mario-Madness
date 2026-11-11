@@ -396,7 +396,6 @@ class PlayState extends MusicBeatState
 	public var scoreTxt:FlxText;
 	public var ratingTxt:FlxText;
 	public var subTitle:FlxText;
-	var subTitleColor:Int = -1;
 	public var stream:Int = 0;
 	public var ifuckingdelete:Int = 0;
 
@@ -5256,7 +5255,7 @@ class PlayState extends MusicBeatState
 		subTitle = new FlxText(0, 560.8, FlxG.width, "", 20);
 		if (curStage != 'exeport')
 		{
-			subTitle.setFormat(Paths.font("mario2.ttf"), 30, FlxColor.WHITE, CENTER, FlxTextBorderStyle.OUTLINE, FlxColor.BLACK);
+			subTitle.setFormat(Paths.font("vcr.ttf"), 30, FlxColor.WHITE, CENTER, FlxTextBorderStyle.OUTLINE, FlxColor.BLACK);
 		}
 		else
 		{
@@ -14172,7 +14171,6 @@ class PlayState extends MusicBeatState
 
 			case 'Add Subtitle':
 				var newcolor:String = "";
-				subTitle.text = value1;
 
 				if (value2.startsWith('0xFF'))
 				{ // uses hexadecimal value
@@ -14201,27 +14199,9 @@ class PlayState extends MusicBeatState
 					var parsed:Null<Int> = Std.parseInt(newcolor);
 					if (parsed != null) subColor = parsed;
 				}
-				// [vkfix] 我们的 lime 构建不应用运行时 FlxText 颜色；颜色变化时重建文本对象，
-				// 让颜色在创建时的 setFormat 里就带上（初始格式颜色是生效的，计时器/标题同理）。
-				if (subTitleColor != subColor)
-				{
-					if (subTitle != null)
-						remove(subTitle, true);
-					subTitle = new FlxText(0, 560.8, FlxG.width, value1, 20);
-					subTitle.setFormat((curStage != 'exeport') ? Paths.font('mario2.ttf') : Paths.font('mariones.ttf'), 31, subColor,
-						CENTER, FlxTextBorderStyle.OUTLINE, FlxColor.BLACK);
-					subTitle.scrollFactor.set();
-					subTitle.borderSize = 1.25;
-					subTitle.cameras = [camOther];
-					subTitle.visible = !ClientPrefs.hideHud;
-					add(subTitle);
-					subTitleColor = subColor;
-				}
-				else
-				{
-					subTitle.text = value1;
-					subTitle.color = subColor;
-				}
+				// [vkfix] 先设颜色再设文本：文本贴图是按当前格式色栅格化的，顺序反了会留下白色贴图。
+				subTitle.color = subColor;
+				subTitle.text = value1;
 
 			case 'Show Song':
 				var triggerMR:Float = Std.parseFloat(value1);
