@@ -115,6 +115,15 @@ bool WindowClientSize (void* nativeWindow, int* outW, int* outH) {
     return true;
 }
 
+bool ScreenSize (int* outW, int* outH) {
+    int w = GetSystemMetrics (SM_CXSCREEN);
+    int h = GetSystemMetrics (SM_CYSCREEN);
+    if (w <= 0 || h <= 0) return false;
+    if (outW) *outW = w;
+    if (outH) *outH = h;
+    return true;
+}
+
 bool WindowIsLayered (void* nativeWindow) {
     if (!nativeWindow) return false;
     return (GetWindowLongA ((HWND)nativeWindow, GWL_EXSTYLE) & WS_EX_LAYERED) != 0;
