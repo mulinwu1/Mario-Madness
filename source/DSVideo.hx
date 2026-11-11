@@ -7,7 +7,7 @@ import openfl.events.NetStatusEvent;
 import openfl.media.Video;
 import openfl.net.NetConnection;
 import openfl.net.NetStream;
-#else
+#elseif desktop
 import openfl.events.Event;
 import vlc.DSBitmap;
 #end
@@ -15,9 +15,9 @@ import vlc.DSBitmap;
 // its just FlxVideo but with different positioning
 class DSVideo extends FlxBasic
 {
-	#if VIDEOS_ALLOWED
 	public var finishCallback:Void->Void;
 
+	#if VIDEOS_ALLOWED
 	public static var vlcBitmap:DSBitmap;
 	#end
 
