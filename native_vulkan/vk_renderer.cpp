@@ -828,10 +828,12 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
 
     // 取证开关 VK_BBSTAT=1 / VK_DUMP_PRESENTS=1（默认关）：分配主机可见缓冲，
     // 把 present 前的交换链像素拷出来做亮度统计 / 写 BMP。
-    // 色键透明（VK_COLORKEY，默认开）也复用这块缓冲做逐像素扫描。
+    // 色键透明（VK_COLORKEY，默认关）：游戏用 SetLayeredWindowAttributes 的色键，
+    // 我们走 DXGI flip 不支持 layered，只能回读后缓冲+SetWindowRgn 模拟——开销大且《Too Late》
+    // 全屏段会明显卡。默认关=还原原版以外的行为（该区域显示暗红色块）；需要时 VK_COLORKEY=1 打开。
     {
         const char* ck = getenv("VK_COLORKEY");
-        o.ckEnabled = !(ck && ck[0] == '0');
+        o.ckEnabled = (ck && ck[0] == '1');
         const char* ckrgb = getenv("VK_COLORKEY_RGB");
         int r = 0, g = 0, b = 0;
         if (ckrgb && sscanf(ckrgb, "%d,%d,%d", &r, &g, &b) == 3) {
