@@ -34,7 +34,7 @@ import Discord.DiscordClient;
 // Yeah seems like a reasonable goal to me
 class MMOptions extends MusicBeatSubstate
 {
-	var options:Array<String> = ['Notes', 'Controls', 'Preferences', 'Mario Options', 'Delete Data'];
+	var options:Array<String> = ['Notes', 'Controls', 'Preferences', 'Mario Options', 'Unlock All', 'Delete Data'];
 	private var grpOptions:FlxTypedGroup<FlxText>;
 
 	private static var curSelected:Int = 0;
@@ -144,10 +144,42 @@ class MMOptions extends MusicBeatSubstate
 
 				case 'Mario Options':
 					openSubState(new MarioSubstate());
+				case 'Unlock All':
+					unlockEverything();
+
+					var unlockedText:FlxText = new FlxText(0, 0, 0, 'ALL LEVELS UNLOCKED!', 48);
+					unlockedText.setFormat(Paths.font("mariones.ttf"), 48, FlxColor.RED, "center", FlxTextBorderStyle.OUTLINE, FlxColor.BLACK);
+					unlockedText.borderSize = 4;
+					unlockedText.screenCenter();
+					unlockedText.alpha = 0;
+					add(unlockedText);
+					FlxTween.tween(unlockedText, {alpha: 1}, 0.25, {ease: FlxEase.circOut, onComplete: function(twn:FlxTween) {
+						FlxTween.tween(unlockedText, {alpha: 0}, 0.6, {ease: FlxEase.circIn, startDelay: 1.2, onComplete: function(twn2:FlxTween) {
+							remove(unlockedText, true);
+							unlockedText.destroy();
+						}});
+					}});
+					FlxG.sound.play(Paths.sound('confirmMenu'));
+					changeSelection();
 				case 'Delete Data':
 					openSubState(new DeleteSubstate());
 			}
 		}
+	}
+
+	// 一键解锁全部关卡：storySave 全开 + 各世界星星数拉满 + ALT/overworld 标记，
+	// 然后走 ClientPrefs.saveSettings()（它会按 worlds 反推 storySave[1..6]/[9]）。
+	function unlockEverything():Void
+	{
+		for (i in 0...ClientPrefs.storySave.length)
+			ClientPrefs.storySave[i] = true;
+
+		ClientPrefs.worlds = [3, 7, 5, 6, 3];    // 与 saveSettings 的 starNeed 一致
+		ClientPrefs.worldsALT = [2, 2, 2, 1, 3];
+		ClientPrefs.storyPass = true;
+		ClientPrefs.overworld = true;
+		ClientPrefs.saveSettings();
+		trace('[unlock] all levels unlocked');
 	}
 
 	function changeSelection(change:Int = 0)
