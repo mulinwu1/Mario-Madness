@@ -104,6 +104,11 @@ bool WindowIsLayered (void* nativeWindow) {
     return false;
 }
 
+bool ScreenSize (int* outW, int* outH) {
+    (void)outW; (void)outH;
+    return false;
+}
+
 // 窗口 region 色键是 Windows 专有做法；Android 上色键透明不生效（原版也没有）。
 bool ApplyChromaRegion (void* nativeWindow, const uint8_t* px, int w, int h,
                         int okR, int okG, int okB, bool* active) {
