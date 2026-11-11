@@ -14208,7 +14208,7 @@ class PlayState extends MusicBeatState
 					if (subTitle != null)
 						remove(subTitle, true);
 					subTitle = new FlxText(0, 560.8, FlxG.width, value1, 20);
-					subTitle.setFormat((curStage != 'exeport') ? Paths.font('mario2.ttf') : Paths.font('mariones.ttf'), 30, subColor,
+					subTitle.setFormat((curStage != 'exeport') ? Paths.font('mario2.ttf') : Paths.font('mariones.ttf'), 31, subColor,
 						CENTER, FlxTextBorderStyle.OUTLINE, FlxColor.BLACK);
 					subTitle.scrollFactor.set();
 					subTitle.borderSize = 1.25;
