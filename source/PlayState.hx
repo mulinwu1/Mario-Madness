@@ -7,6 +7,10 @@ import Song.SwagSong;
 import StageData;
 import TitleScreenShaders.TVStatic;
 import WiggleEffect.WiggleEffectType;
+#if mobileC
+import ui.Mobilecontrols;
+import ui.FlxVirtualPad;
+#end
 import editors.CharacterEditorState;
 import editors.ChartingState;
 import flixel.FlxBasic;
@@ -753,6 +757,10 @@ class PlayState extends MusicBeatState
 	public static var pixelPerfect:Bool = false;
 
 	public var inCutscene:Bool = false;
+
+	#if mobileC
+	var mcontrols:Mobilecontrols;
+	#end
 
 	var songLength:Float = 0;
 	var timebarthing:Float;
@@ -5628,6 +5636,26 @@ class PlayState extends MusicBeatState
 		timeBarBG.cameras = [camHUD];
 		timeTxt.cameras = [camHUD];
 
+		#if mobileC
+		mcontrols = new Mobilecontrols();
+		switch (mcontrols.mode)
+		{
+			case VIRTUALPAD_RIGHT | VIRTUALPAD_LEFT | VIRTUALPAD_CUSTOM:
+				controls.setVirtualPad(mcontrols._virtualPad, FULL, NONE);
+			case HITBOX:
+				controls.setHitBox(mcontrols._hitbox);
+			default:
+		}
+		trackedinputs = controls.trackedinputs;
+		controls.trackedinputs = [];
+		var camcontrol = new FlxCamera();
+		FlxG.cameras.add(camcontrol);
+		camcontrol.bgColor.alpha = 0;
+		mcontrols.cameras = [camcontrol];
+		mcontrols.visible = false;
+		add(mcontrols);
+		#end
+
 		if (noHUD)
 		{
 			camHUD.alpha = 0;
@@ -6246,6 +6274,10 @@ class PlayState extends MusicBeatState
 
 	public function startCountdown():Void
 	{
+		#if mobileC
+		mcontrols.visible = true;
+		#end
+
 		if (startedCountdown)
 		{
 			callOnLuas('onStartCountdown', []);
@@ -7558,7 +7590,7 @@ class PlayState extends MusicBeatState
 			}
 		}
 
-		if (FlxG.keys.justPressed.ENTER && startedCountdown && canPause)
+		if ((FlxG.keys.justPressed.ENTER #if android || FlxG.android.justReleased.BACK #end) && startedCountdown && canPause)
 		{
 			var ret:Dynamic = callOnLuas('onPause', []);
 			if (ret != FunkinLua.Function_Stop)
