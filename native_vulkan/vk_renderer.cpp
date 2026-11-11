@@ -16,11 +16,6 @@
 #include <chrono>
 #if defined(_WIN32)
 #include <direct.h>
-
-// 诊断用：gl_core.cpp 提供的当前 GL 混合状态读取（只给 VK_ALPHALOG 用）。
-extern "C" void lime_vk_get_blend_state(int* en, int* src, int* dst);
-// 纹理真正销毁时通知 gl_core 清掉所有指向该 id 的 GL 名字（避免槽位复用串图）。
-extern "C" void gl_vk_on_texture_destroyed(uint32_t vkId);
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -31,6 +26,12 @@ extern "C" void gl_vk_on_texture_destroyed(uint32_t vkId);
 #else
 #include <sys/stat.h>
 #endif
+
+// 这两个符号由 gl_core.cpp 提供，与平台无关（Android 也要用），不能放在 _WIN32 里。
+// 诊断用：当前 GL 混合状态读取（只给 VK_ALPHALOG 用）。
+extern "C" void lime_vk_get_blend_state(int* en, int* src, int* dst);
+// 纹理真正销毁时通知 gl_core 清掉所有指向该 id 的 GL 名字（避免槽位复用串图）。
+extern "C" void gl_vk_on_texture_destroyed(uint32_t vkId);
 
 // gl_fbo 侧的当前目标（只读探针用，定义在 lime 命名空间的 gl_fbo.cpp:706）
 namespace lime { uint32_t gl_vk_current_target (); }
@@ -848,7 +849,8 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
             // 色键扫描要覆盖最大窗口（全屏段 1920x1080），按屏幕尺寸分配。
             size_t needW = (size_t)o.extent.width;
             size_t needH = (size_t)o.extent.height;
-            int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+            int sw = 0, sh = 0;
+            vkplat::ScreenSize(&sw, &sh);
             if (sw > 0 && (size_t)sw > needW) needW = (size_t)sw;
             if (sh > 0 && (size_t)sh > needH) needH = (size_t)sh;
             o.statBytes = needW * needH * 4;
