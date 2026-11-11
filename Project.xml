@@ -3,6 +3,9 @@
 	<!-- _________________________ Application Settings _________________________ -->
 
 	<app title="Friday Night Funkin': Mario's Madness" file="Mario" packageName="com.shadowmario.psychengine" package="com.shadowmario.psychengine" main="Main" version="2.0.1" company="ShadowMario" />
+
+	<!-- 安卓只出 arm64-v8a：我们的 lime/Vulkan 原生库只有这一份，armv7/x86 会链接失败 -->
+	<architecture name="arm64" if="android" />
 	
 	<!--Switch Export with Unique ApplicationID and Icon-->
 	<set name="APP_ID" value="0x0100f6c013bbc000" />
