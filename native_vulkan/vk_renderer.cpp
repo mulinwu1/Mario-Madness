@@ -2008,14 +2008,19 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
         if (lime::gl_shader_program_has_attribute (vkProg, 5)) {
             // 带 loc5（alpha）的 program：原版 trace 里 loc5 是独立缓冲 stride=4，
             // 我们的顶点是 60 字节交错布局，按 offset 16 映射即可。
-            static const lime::GLShaderVertexAttribute s_vattrs5[5] = {
+            // [vkfix 2026-11-11] 游戏 shader 顶点端是 `Alphav = openfl_Alpha * alpha`：
+            // openfl_Alpha(loc1) 在原版 GL 里是常量 1.0（apitrace: glVertexAttrib1f(1, 1)
+            // ×135k），真正的逐顶点 alpha 只在 loc5。这里之前没绑 loc1，读到什么全看驱动；
+            // 显式绑到 binding1 的 stride=0 常量缓冲（值 1.0），保证 alpha 只乘一次。
+            static const lime::GLShaderVertexAttribute s_vattrs5[6] = {
                 {0, 0, 109 /* R32G32B32A32_SFLOAT */, 0},
+                {1, 1, 100 /* R32_SFLOAT */, 0},   // openfl_Alpha ← 常量 1.0（binding1 stride=0）
                 {5, 0, 100 /* R32_SFLOAT */, 16},
                 {6, 0, 109, 20},
                 {7, 0, 109, 36},
                 {4, 0, 103 /* R32G32_SFLOAT */, 52},
             };
-            lime::GLShaderVertexLayout layout5{0, 60, s_vattrs5, 5};
+            lime::GLShaderVertexLayout layout5{0, 60, s_vattrs5, 6};
             buildOne(&layout5, false);
             buildOne(&layout5, true);
         } else {
