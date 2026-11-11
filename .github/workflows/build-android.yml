@@ -112,8 +112,10 @@ jobs:
           set -e
           export ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}"
           if [ ! -d glslang-src/.git ]; then
-            git clone --depth 1 --branch 16.6.0 --recursive --shallow-submodules https://github.com/KhronosGroup/glslang.git glslang-src
+            git clone --depth 1 --branch 16.6.0 https://github.com/KhronosGroup/glslang.git glslang-src
           fi
+          # 缓存恢复的源码可能缺子模块：显式补齐 SPIRV-Tools / SPIRV-Headers
+          git -C glslang-src submodule update --init --recursive --depth 1
           if [ ! -f glslang-android/lib/libglslang.a ]; then
             cmake -S glslang-src -B glslang-build \
               -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" \
