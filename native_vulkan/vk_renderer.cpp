@@ -2754,6 +2754,13 @@ void* VkRenderer::PktPipelineFor(const PktPipelineState& st) {
         if (st.blendSrc != PKT_BLEND_UNSET) src = st.blendSrc;
         if (st.blendDst != PKT_BLEND_UNSET) dst = st.blendDst;
     }
+    // [vkfix 2026-11-11] 批处理里的贴图已是预乘 alpha（Flixel 着色器输出也是预乘），
+    // 但记录到的 GL 状态常是 SRC_ALPHA/ONE_MINUS_SRC_ALPHA，会让半透明再乘一次 alpha
+    // （实测：测试雾贴图 alpha=0.5 只渲出 ~0.21，红雾/长条/光晕全都偏透明）。
+    // 这里把该组合改成预乘 ONE/ONE_MINUS_SRC_ALPHA，alpha 只生效一次。
+    if (en && src == PKT_BLEND_SRC_ALPHA && dst == PKT_BLEND_ONE_MINUS_SRC_ALPHA) {
+        src = PKT_BLEND_ONE;
+    }
     uint8_t cull = (st.cullMode > 3) ? 0 : st.cullMode;
     uint8_t ff = st.frontFace ? 1 : 0;
     uint8_t cm = (uint8_t)(st.colorMask & 0x0F);
