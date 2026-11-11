@@ -44,9 +44,11 @@ import openfl.utils.Assets as OpenFlAssets;
 import openfl.utils.ByteArray;
 
 using StringTools;
+#if sys
+import sys.FileSystem;
+#end
 #if MODS_ALLOWED
 import flash.media.Sound;
-import sys.FileSystem;
 import sys.io.File;
 #end
 
