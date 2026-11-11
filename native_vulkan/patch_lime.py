@@ -183,8 +183,13 @@ if PLATFORM == "android":
         sys.exit(1)
     inject += '\t\t<compilerflag value="-I%s/include" />\n' % GLSLANG_ANDROID_DIR
     inject += '\t\t<lib name="-L%s/lib" />\n' % GLSLANG_ANDROID_DIR
-    for lib in ("glslang", "glslang-default-resource-limits", "SPIRV-Tools", "SPIRV-Tools-opt"):
+    for lib in ("glslang", "glslang-default-resource-limits"):
         inject += '\t\t<lib name="-l%s" />\n' % lib
+    # SPIRV-Tools 只在确实构建出来时才链接：glslang 16.x 不再自带它，
+    # 我们的 gl_shader 只调 glslang C 接口（SPIR-V 由自己解析），ENABLE_OPT=OFF 即可。
+    for lib in ("SPIRV-Tools", "SPIRV-Tools-opt"):
+        if os.path.exists(os.path.join(GLSLANG_ANDROID_DIR, "lib", "lib%s.a" % lib)):
+            inject += '\t\t<lib name="-l%s" />\n' % lib
 
 b = os.path.join(LIME, "project", "Build.xml")
 xml = open(b, encoding="utf-8").read()
