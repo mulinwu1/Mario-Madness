@@ -40,6 +40,9 @@ double NowMs ();
 // 窗口客户区尺寸；Android 恒返回 false（用 surface 尺寸即可，没有"窗口边框"概念）。
 bool WindowClientSize (void* nativeWindow, int* outW, int* outH);
 
+// 主显示器尺寸（色键回读缓冲要按屏幕上限分配）；Android 恒返回 false。
+bool ScreenSize (int* outW, int* outH);
+
 // 窗口是否带 layered 样式（Windows 色键透明用）；Android 恒 false。
 bool WindowIsLayered (void* nativeWindow);
 
