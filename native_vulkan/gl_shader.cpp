@@ -2058,14 +2058,25 @@ static bool CreatePipelineSlot (Program* p, PipelineSlot* slot, const GLShaderVe
 
 	}
 
-	VkVertexInputBindingDescription bindingDescription{};
-	bindingDescription.binding = bindingIndex;
-	bindingDescription.stride = stride;
-	bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+	// 顶点 binding：binding0 = 交错顶点（layout->stride），其余（如 binding1）= stride 0
+	// 的常量属性（渲染器已把 attrBuf 绑在 binding1 上，loc5/loc1 从这里取 1.0 之类常量）。
+	std::vector<VkVertexInputBindingDescription> bindingDescriptions;
+	uint32_t maxBinding = bindingIndex;
+	if (layout && layout->attributes && layout->attributeCount > 0) {
+		for (uint32_t i = 0; i < layout->attributeCount; i++)
+			if (layout->attributes[i].binding > maxBinding) maxBinding = layout->attributes[i].binding;
+	}
+	for (uint32_t b = 0; b <= maxBinding; b++) {
+		VkVertexInputBindingDescription bd{};
+		bd.binding = b;
+		bd.stride = (b == bindingIndex) ? stride : 0;
+		bd.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+		bindingDescriptions.push_back (bd);
+	}
 
 	VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-	vertexInput.vertexBindingDescriptionCount = stride ? 1 : 0;
-	vertexInput.pVertexBindingDescriptions = stride ? &bindingDescription : NULL;
+	vertexInput.vertexBindingDescriptionCount = (uint32_t) bindingDescriptions.size ();
+	vertexInput.pVertexBindingDescriptions = bindingDescriptions.data ();
 	vertexInput.vertexAttributeDescriptionCount = (uint32_t) attributeDescriptions.size ();
 	vertexInput.pVertexAttributeDescriptions = attributeDescriptions.empty () ? NULL : attributeDescriptions.data ();
 
@@ -2110,13 +2121,24 @@ static bool CreatePipelineSlot (Program* p, PipelineSlot* slot, const GLShaderVe
 
 	VkPipelineDepthStencilStateCreateInfo depthStencil{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
 
+	// [vkfix 2026-11-11] 片元输出已是预乘 alpha：游戏 shader 的 flixel_texture2D 返回
+	// `color.rgb * color.a * openfl_Alphav`，贴图上传也是预乘的。GL 原版对应状态全程是
+	// glBlendFunc(ONE, ONE_MINUS_SRC_ALPHA)（apitrace 实测 blend=1,1,771）。
+	// 这里以前写 SRC_ALPHA 会把 RGB 再乘一次 alpha：长条 0.6→0.36、溅射/记忆图淡入
+	// （0.4→0.16）都变得又暗又透，而 alpha=1 的箭头完全看不出问题。
+	// VK_ALPHA_LEGACY=1 可回退到旧行为（排查用）。
+	static int s_legacyBlend = -1;
+	if (s_legacyBlend < 0) {
+		const char* e = getenv ("VK_ALPHA_LEGACY");
+		s_legacyBlend = (e && e[0] == '1') ? 1 : 0;
+	}
 	VkPipelineColorBlendAttachmentState blendAttachment{};
 	blendAttachment.blendEnable = VK_TRUE;
-	blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+	blendAttachment.srcColorBlendFactor = s_legacyBlend ? VK_BLEND_FACTOR_SRC_ALPHA : VK_BLEND_FACTOR_ONE;
 	blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
 	blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
 	blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-	blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+	blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
 	blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
 	blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
 		VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
