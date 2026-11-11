@@ -2475,6 +2475,20 @@ uint32_t gl_shader_upload_uniform_slot (int program, const uint8_t* data, uint32
 	const uint8_t* src = data;
 	std::vector<uint8_t> patched;
 	{
+		// [probe 2026-11-11] VK_NO_CT=<prog>：把指定 program 的 hasColorTransform 关掉，
+		// 让 flixel_texture2D 走 `color * openfl_Alphav`（alpha 只乘一次）。
+		// 用来验证"长条 0.6→0.36 是 colorTransform 分支二次预乘"的假设。
+		static int s_noCtProg = -2;
+		if (s_noCtProg == -2) {
+			const char* e = getenv ("VK_NO_CT");
+			s_noCtProg = (e && e[0]) ? atoi (e) : -1;
+		}
+		if (s_noCtProg >= 0 && program == s_noCtProg && size >= 84u) {
+			patched.assign (data, data + size);
+			*(uint32_t*) (patched.data () + 80) = 0;   // hasColorTransform = false
+			src = patched.data ();
+		}
+
 		static int s_forceDa = -1;
 		if (s_forceDa < 0) {
 			const char* e = getenv ("VK_FORCE_DAALPHA");
