@@ -179,6 +179,11 @@ private:
     Impl* impl;
     // 真正释放纹理槽位；只在 EndFrame 提交完成后调用（延迟销毁，避免槽位 id 复用串图）
     void DestroyTextureNow(uint32_t id);
+    // 帧环：选当前槽位并等它的 fence（保证命令缓冲/顶点区/UBO 区可复用），
+    // 顺带真正释放该槽延迟销毁的纹理
+    void AcquireSlot();
+    // 等当前槽位已提交的命令缓冲执行完（present/读回前必须调用）
+    void WaitSlotFence();
     // 交换链过期（present/acquire 返回 OUT_OF_DATE/SUBOPTIMAL）后的重建
     bool RecreateSwapchain();
     // 当前窗口客户区尺寸是否等于交换链 extent（resize 动画期间用来决定要不要立即重建）
