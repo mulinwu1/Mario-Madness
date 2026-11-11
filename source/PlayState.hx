@@ -14199,8 +14199,14 @@ class PlayState extends MusicBeatState
 					var parsed:Null<Int> = Std.parseInt(newcolor);
 					if (parsed != null) subColor = parsed;
 				}
-				// [vkfix] 先设颜色再设文本：文本贴图是按当前格式色栅格化的，顺序反了会留下白色贴图。
-				subTitle.color = subColor;
+				// [vkfix] 文本贴图颜色在我们的 lime 里不生效；用公开的 setColorTransform 给白字贴图做 RGB 调制，
+				// 再把格式色重置为白色，避免双重染色。
+				subTitle.setColorTransform(
+					((subColor >> 16) & 0xFF) / 255,
+					((subColor >> 8) & 0xFF) / 255,
+					(subColor & 0xFF) / 255,
+					1);
+				subTitle.color = FlxColor.WHITE;
 				subTitle.text = value1;
 
 			case 'Show Song':
