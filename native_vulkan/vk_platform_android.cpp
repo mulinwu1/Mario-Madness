@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <ctime>
 
 namespace vkplat {
 
@@ -76,6 +77,44 @@ bool CreateSurface (uint64_t instance, void* gipa, void* nativeWindow,
 void ExeDir (char* out, int outCap) {
     if (!out || outCap <= 0) return;
     out[0] = '\0';
+}
+
+static uint64_t MonotonicNs () {
+    struct timespec ts;
+    clock_gettime (CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+uint64_t TicksMs () {
+    return MonotonicNs () / 1000000ull;
+}
+
+double NowMs () {
+    return (double)MonotonicNs () / 1000000.0;
+}
+
+// Android 没有 Win32 的"客户区"概念；surface 尺寸就是全部信息。
+bool WindowClientSize (void* nativeWindow, int* outW, int* outH) {
+    (void)nativeWindow; (void)outW; (void)outH;
+    return false;
+}
+
+bool WindowIsLayered (void* nativeWindow) {
+    (void)nativeWindow;
+    return false;
+}
+
+// 窗口 region 色键是 Windows 专有做法；Android 上色键透明不生效（原版也没有）。
+bool ApplyChromaRegion (void* nativeWindow, const uint8_t* px, int w, int h,
+                        int okR, int okG, int okB, bool* active) {
+    (void)nativeWindow; (void)px; (void)w; (void)h; (void)okR; (void)okG; (void)okB;
+    if (active) *active = false;
+    return false;
+}
+
+void ClearChromaRegion (void* nativeWindow, bool* active) {
+    (void)nativeWindow;
+    if (active) *active = false;
 }
 
 }
