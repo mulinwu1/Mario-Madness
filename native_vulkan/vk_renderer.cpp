@@ -2173,10 +2173,10 @@ void VkRenderer::ResetLastGeometryTarget() {
 bool VkRenderer::WindowSizeMatchesExtent() {
     Impl& o = *impl;
     if (!o.nativeWindow) return true;
-    RECT rc;
-    if (!GetClientRect((HWND)o.nativeWindow, &rc)) return true;
-    return (int)o.extent.width == (int)(rc.right - rc.left) &&
-           (int)o.extent.height == (int)(rc.bottom - rc.top);
+    int w = 0, h = 0;
+    // 平台不提供客户区尺寸（Android）= 视为始终一致，交换链尺寸就是画面尺寸。
+    if (!vkplat::WindowClientSize(o.nativeWindow, &w, &h)) return true;
+    return (int)o.extent.width == w && (int)o.extent.height == h;
 }
 
 // 每帧记录窗口客户区尺寸。必须独立于 present 成功与否调用：
@@ -2188,13 +2188,13 @@ bool VkRenderer::ObserveWindowSize() {
     Impl& o = *impl;
     int winW = o.width, winH = o.height;
     if (o.nativeWindow) {
-        RECT rc;
-        if (GetClientRect((HWND)o.nativeWindow, &rc)) {
-            winW = (int)(rc.right - rc.left);
-            winH = (int)(rc.bottom - rc.top);
+        int cw = 0, ch = 0;
+        if (vkplat::WindowClientSize(o.nativeWindow, &cw, &ch)) {
+            winW = cw;
+            winH = ch;
         }
     }
-    uint64_t nowMs = (uint64_t)GetTickCount64();
+    uint64_t nowMs = vkplat::TicksMs();
     if (winW != o.lastWinW || winH != o.lastWinH) {
         o.lastWinW = winW;
         o.lastWinH = winH;
@@ -2210,79 +2210,12 @@ bool VkRenderer::ObserveWindowSize() {
 bool VkRenderer::InResizeAnimation() {
     Impl& o = *impl;
     if (o.lastResizeTick == 0) return false;
-    return ((uint64_t)GetTickCount64() - o.lastResizeTick) < 400;
+    return ((uint64_t)vkplat::TicksMs() - o.lastResizeTick) < 400;
 }
 
-// 高精度毫秒计时（诊断）：GetTickCount64 只有 ~15.6ms 精度，量不出重建各阶段耗时。
+// 高精度毫秒计时（诊断）。平台实现见 vk_platform_*。
 static double VkNowMs() {
-    static LARGE_INTEGER freq = {0};
-    static bool inited = false;
-    if (!inited) { QueryPerformanceFrequency(&freq); inited = true; }
-    LARGE_INTEGER c;
-    QueryPerformanceCounter(&c);
-    return (double)c.QuadPart * 1000.0 / (double)freq.QuadPart;
-}
-
-// 把“非色键色”的像素合成窗口 region（窗口 region 之外 = 桌面）。
-// px 是 B8G8R8A8 交换链像素；色键色默认 RGB(87,25,0)（游戏 setTransparency 的 6487）。
-// DXGI flip 模型不支持 SetLayeredWindowAttributes 色键，用这个办法等效实现。
-static bool ApplyChromaRegion(HWND hwnd, const uint8_t* px, int w, int h,
-                              int okR, int okG, int okB, bool* active) {
-    if (!hwnd || !px || w <= 0 || h <= 0) return false;
-    RECT wr, cr;
-    if (!GetWindowRect(hwnd, &wr) || !GetClientRect(hwnd, &cr)) return false;
-    POINT pt{0, 0};
-    ClientToScreen(hwnd, &pt);
-    const int offX = pt.x - wr.left;
-    const int offY = pt.y - wr.top;
-
-    std::vector<RECT> rects;
-    rects.reserve((size_t)h * 2);
-    size_t chroma = 0;
-    for (int y = 0; y < h; ++y) {
-        const uint8_t* row = px + (size_t)y * (size_t)w * 4;
-        int x = 0;
-        while (x < w) {
-            const uint8_t* p = row + (size_t)x * 4;
-            if (p[2] == okR && p[1] == okG && p[0] == okB) { ++x; ++chroma; continue; }
-            const int x0 = x;
-            while (x < w) {
-                p = row + (size_t)x * 4;
-                if (p[2] == okR && p[1] == okG && p[0] == okB) break;
-                ++x;
-            }
-            RECT r{offX + x0, offY + y, offX + x, offY + y + 1};
-            rects.push_back(r);
-        }
-    }
-    const double ratio = (double)chroma / ((double)w * (double)h);
-    if (ratio < 0.02 || rects.empty() || rects.size() > 6000) {
-        if (*active) { SetWindowRgn(hwnd, nullptr, TRUE); *active = false; }
-        return false;
-    }
-    const size_t bytes = sizeof(RGNDATAHEADER) + rects.size() * sizeof(RECT);
-    std::vector<uint8_t> buf(bytes);
-    RGNDATA* rd = (RGNDATA*)buf.data();
-    rd->rdh.dwSize = sizeof(RGNDATAHEADER);
-    rd->rdh.iType = RDH_RECTANGLES;
-    rd->rdh.nCount = (DWORD)rects.size();
-    rd->rdh.nRgnSize = (DWORD)(rects.size() * sizeof(RECT));
-    rd->rdh.rcBound.left = 0;
-    rd->rdh.rcBound.top = 0;
-    rd->rdh.rcBound.right = w + offX;
-    rd->rdh.rcBound.bottom = h + offY;
-    memcpy(rd->Buffer, rects.data(), rects.size() * sizeof(RECT));
-    HRGN rgn = ExtCreateRegion(nullptr, (DWORD)bytes, rd);
-    if (!rgn) return false;
-    SetWindowRgn(hwnd, rgn, TRUE);   // 成功后系统接管 region，不能 DeleteObject
-    *active = true;
-    static int s_logged = 0;
-    if (s_logged < 10) {
-        s_logged++;
-        fprintf(stderr, "[vk] colorkey region rects=%zu chroma=%.1f%% size=%dx%d\n",
-                rects.size(), ratio * 100.0, w, h);
-    }
-    return true;
+    return vkplat::NowMs();
 }
 
 // 交换链重建：present/acquire 一旦返回 OUT_OF_DATE 或 SUBOPTIMAL，旧交换链上
@@ -2539,7 +2472,7 @@ bool VkRenderer::BindRenderTarget(uint32_t id, float r, float g, float b, float 
                 // 无法建一个“更大”的覆盖交换链，所以只能重建。这里做限频：
                 // 缩放动画中最多每 100ms 重建一次（约 10 次/秒），内容跟着窗口走，
                 // 但不至于每帧 waitIdle+建链（实测每步一次会掉到 69fps）。
-                const uint64_t nowC = (uint64_t)GetTickCount64();
+                const uint64_t nowC = (uint64_t)vkplat::TicksMs();
                 static int s_recMs = -1;
                 if (s_recMs < 0) {
                     const char* rv = getenv("VK_RESIZE_RECREATE_MS");
@@ -4570,15 +4503,14 @@ void VkRenderer::EndFrame() {
     // 色键扫描：只有窗口带 WS_EX_LAYERED 且距上次扫描 >=120ms 才回读，避免每帧回读。
     bool ckScan = false;
     if (o.ckEnabled && o.nativeWindow) {
-        const bool layered = (GetWindowLongA((HWND)o.nativeWindow, GWL_EXSTYLE) & WS_EX_LAYERED) != 0;
+        const bool layered = vkplat::WindowIsLayered(o.nativeWindow);
         if (!layered) {
             if (o.ckActive) {
-                SetWindowRgn((HWND)o.nativeWindow, nullptr, TRUE);
-                o.ckActive = false;
+                vkplat::ClearChromaRegion(o.nativeWindow, &o.ckActive);
                 fprintf(stderr, "[vk] colorkey region cleared (window no longer layered)\n");
             }
         } else {
-            const uint64_t nowCk = (uint64_t)GetTickCount64();
+            const uint64_t nowCk = vkplat::TicksMs();
             if (nowCk - o.ckLastTick >= 120) { o.ckLastTick = nowCk; ckScan = true; }
         }
     }
@@ -4641,8 +4573,8 @@ void VkRenderer::EndFrame() {
         // 色键透明：把非色键色区域设为窗口 region（窗口外 = 桌面）。
         // DXGI flip 模型不支持 SetLayeredWindowAttributes 的色键，用 region 等效实现。
         if (ckScan && o.ckEnabled && o.nativeWindow) {
-            ApplyChromaRegion((HWND)o.nativeWindow, px, (int)o.extent.width, (int)o.extent.height,
-                              o.ckR, o.ckG, o.ckB, &o.ckActive);
+            vkplat::ApplyChromaRegion(o.nativeWindow, px, (int)o.extent.width, (int)o.extent.height,
+                                      o.ckR, o.ckG, o.ckB, &o.ckActive);
         }
         double sum = 0;
         size_t nb = 0, cnt = 0;
@@ -4717,7 +4649,7 @@ void VkRenderer::EndFrame() {
             ObserveWindowSize();
             int winW = o.lastWinW, winH = o.lastWinH;
             bool sizeOK = ((int)o.extent.width == winW && (int)o.extent.height == winH);
-            uint64_t nowMs = (uint64_t)GetTickCount64();
+            uint64_t nowMs = (uint64_t)vkplat::TicksMs();
             bool resizing = (nowMs - o.lastResizeTick) < 400;
             VkResult pr = VK_SUCCESS;
             if (sizeOK) {
@@ -4735,7 +4667,7 @@ void VkRenderer::EndFrame() {
                 // 旧尺寸图 present 出去最多是缩放动画中闪一帧，不会崩。
                 //
                 // 重建节流：动画期间每帧 waitIdle+重建会把帧时间拉长；稳定 200ms 后只重建一次。
-                uint64_t nowMs2 = (uint64_t)GetTickCount64();
+                uint64_t nowMs2 = (uint64_t)vkplat::TicksMs();
                 if (o.sizeMismatchSince == 0) o.sizeMismatchSince = nowMs2;
                 if (!resizing && nowMs2 - o.sizeMismatchSince >= 200) {
                     o.swapDirty = true;
