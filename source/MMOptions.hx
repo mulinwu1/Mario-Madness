@@ -1,7 +1,6 @@
 package;
 
 import Controls;
-import discord_rpc.DiscordRpc;
 import flash.text.TextField;
 import flash.text.TextField;
 import flixel.FlxG;
@@ -26,9 +25,7 @@ import lime.app.Application;
 import lime.utils.Assets;
 
 using StringTools;
-#if desktop
 import Discord.DiscordClient;
-#end
 
 // TO DO: Redo the menu creation system for not being as dumb
 // Yeah seems like a reasonable goal to me
