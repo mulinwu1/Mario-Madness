@@ -1104,8 +1104,8 @@ class MainMenuState extends MusicBeatState {
 								}
 								else
 									FlxG.log.warn('Couldnt find video file: ' + fileName);
-								#end
 						}
+								#end
 					});
 				});
 			});
