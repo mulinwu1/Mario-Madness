@@ -134,7 +134,8 @@ static size_t PendingVertsOf (const std::vector<TexSlot>& tex, const std::vector
 // 统计口径：一次 BeginFrame = 一个视觉帧；一次 EndFrame = 一次提交（可能一帧多次，
 // 每个离屏目标一次）。draws/pipes/ds/rp 都是"每次提交"累计值，输出时除以视觉帧数。
 struct PerfCounters {
-    uint64_t frames = 0;      // BeginFrame 次数
+    uint64_t frames = 0;      // BeginFrame 次数（只在后缓冲 glClear 时发生，可能为 0）
+    uint64_t presents = 0;    // 真正 vkQueuePresentKHR 的次数 = 视觉帧数
     uint64_t submits = 0;     // EndFrame 里真正 vkQueueSubmit 的次数
     uint64_t rpBegins = 0;    // vkCmdBeginRenderPass 次数
     uint64_t draws = 0;       // vkCmdDraw 次数
@@ -177,8 +178,9 @@ static void PerfFlushIfDue () {
     double now = PerfNowMs();
     if (g_perf.lastPrintMs <= 0) { g_perf.lastPrintMs = now; return; }
     double span = now - g_perf.lastPrintMs;
-    if (span < 1000.0 || g_perf.frames == 0) return;
-    double f = (double)g_perf.frames;
+    uint64_t fpsFrames = g_perf.presents ? g_perf.presents : g_perf.frames;
+    if (span < 1000.0 || fpsFrames == 0) return;
+    double f = (double)fpsFrames;
     fprintf(stderr,
             "[perf] fps=%.1f frame=%.2fms end=%.2fms(max %.2f) wait=%.2fms | "
             "draws/f=%.1f pipes/f=%.1f ds/f=%.1f rp/f=%.1f submits/f=%.1f verts/f=%.0f\n",
@@ -188,7 +190,7 @@ static void PerfFlushIfDue () {
             (double)g_perf.draws / f, (double)g_perf.pipeBinds / f,
             (double)g_perf.dsBinds / f, (double)g_perf.rpBegins / f,
             (double)g_perf.submits / f, (double)g_perf.verts / f);
-    g_perf.frames = g_perf.submits = g_perf.rpBegins = 0;
+    g_perf.frames = g_perf.presents = g_perf.submits = g_perf.rpBegins = 0;
     g_perf.draws = g_perf.pipeBinds = g_perf.dsBinds = g_perf.verts = 0;
     g_perf.endMs = g_perf.waitMs = g_perf.frameMs = 0;
     g_perf.maxEndMs = 0;
@@ -4739,6 +4741,7 @@ void VkRenderer::EndFrame() {
                 pi.pSwapchains = &o.swapchain;
                 pi.pImageIndices = &o.frameImageIndex;
                 pr = g_present(o.queue, &pi);
+                if (PerfOn()) g_perf.presents++;
             } else {
                 // 尺寸还没对上（窗口缩放动画中）：仍然必须 present 一次，把这个已 acquire
                 // 的交换链图像还给驱动。之前这里只标记 swapDirty 不 present，图像就永远停在
@@ -4757,6 +4760,7 @@ void VkRenderer::EndFrame() {
                 pi.pSwapchains = &o.swapchain;
                 pi.pImageIndices = &o.frameImageIndex;
                 pr = g_present(o.queue, &pi);
+                if (PerfOn()) g_perf.presents++;
                 static uint64_t s_skip = 0;
                 if (s_skip < 40) {
                     s_skip++;
