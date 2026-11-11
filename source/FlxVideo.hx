@@ -1,3 +1,4 @@
+#if VIDEOS_ALLOWED
 #if web
 import openfl.events.NetStatusEvent;
 import openfl.media.Video;
@@ -7,12 +8,13 @@ import openfl.net.NetStream;
 import openfl.events.Event;
 import vlc.VlcBitmap;
 #end
+#end
 import flixel.FlxBasic;
 import flixel.FlxG;
 
+#if VIDEOS_ALLOWED
 class FlxVideo extends FlxBasic
 {
-	#if VIDEOS_ALLOWED
 	public var finishCallback:Void->Void = null;
 
 	#if desktop
@@ -140,5 +142,17 @@ class FlxVideo extends FlxBasic
 		}
 	}
 	#end
-	#end
 }
+#else
+// 安卓等没有视频目标：vlc.VlcBitmap 在 !desktop 下不存在，
+// 这里提供空实现，保证 VideoSubState 等处的调用可以编译。
+class FlxVideo extends FlxBasic
+{
+	public var finishCallback:Void->Void = null;
+
+	public function new(name:String)
+	{
+		super();
+	}
+}
+#end
