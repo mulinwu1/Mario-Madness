@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <chrono>
 #if defined(_WIN32)
 #include <direct.h>
 
@@ -1792,6 +1793,16 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
                          const float* vertexMult, const float* vertexOff,
                          const uint8_t* uniformData, uint32_t uniformSize) {
     Impl& o = *impl;
+    // [vkfix] OpenFL 的 scrollRect 在变换带旋转/斜切时会放弃 scissor，改走 stencil 遮罩：
+    // 先 glColorMask(false,false,false,false)，再用 Context3DMaskShader（1x1 不透明黑）
+    // 画一块相机尺寸的矩形当遮罩。批处理/progpipe 路径没有 stencil，这笔会原样画成
+    // 黑色四边形（Act2→Act3 camHUD 倾倒时随 GUI 转 15° 的"黑框"就是它）。
+    // 颜色写全关 = 本笔不产生任何可见像素，直接跳过。
+    {
+        int cm[4] = {1, 1, 1, 1};
+        lime::glstate::GetColorMask(cm);
+        if (!cm[0] && !cm[1] && !cm[2] && !cm[3]) return;
+    }
     std::vector<float>* vertsPtr = nullptr;
     std::vector<uint16_t>* progsPtr = nullptr;
     if (texId >= 1000) {
@@ -3614,6 +3625,7 @@ struct TexDumpCfg {
     std::string dir;
     uint64_t frame = 0;  // VK_DUMP_FRAME
     bool frameSet = false;  // false = 第一有机会的帧就转
+    double atSec = -1.0;    // VK_DUMP_AT_SEC：启动后按墙钟秒数触发（优先于 frame）
     std::vector<uint32_t> ids;  // VK_DUMP_IDS=5,6,7,13（显式清单，绕过自动判定）
     bool idsSet = false;
 };
@@ -3631,6 +3643,10 @@ static TexDumpCfg& TexDumpConfig () {
             if (f && f[0]) {
                 c.frame = (uint64_t)strtoull(f, nullptr, 10);
                 c.frameSet = true;
+            }
+            const char* a = getenv("VK_DUMP_AT_SEC");
+            if (a && a[0]) {
+                c.atSec = atof(a);
             }
             const char* s = getenv("VK_DUMP_IDS");
             if (s && s[0]) {
@@ -3667,10 +3683,16 @@ bool VkRenderer::MaybeDumpTextures(uint64_t frameHint) {
     if (!cfg.on) return false;
     Impl& o = *impl;
     if (o.dumpDone) return false;
-    // 命中口径：给 VK_DUMP_FRAME 就等"当前帧 >= 目标帧"的第一次收尾；只给 VK_DUMP_IDS
-    // 就在第一次收尾直接转；都没给就第一帧收尾转。不再要求 sampleGen/frameHint 同时相等
-    // （旧口径会让 f300/f420/f480 整帧漏掉）。宁可空采一次，也不跳过目标帧。
-    if (cfg.frameSet && frameHint < cfg.frame) return false;
+    // 命中口径：VK_DUMP_AT_SEC 优先（按墙钟秒数，避免加载/菜单帧率过高提前触发）；
+    // 否则给 VK_DUMP_FRAME 就等"当前帧 >= 目标帧"的第一次收尾；只给 VK_DUMP_IDS
+    // 就在第一次收尾直接转；都没给就第一帧收尾转。
+    if (cfg.atSec >= 0.0) {
+        static const auto t0 = std::chrono::steady_clock::now();
+        double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        if (el < cfg.atSec) return false;
+    } else if (cfg.frameSet && frameHint < cfg.frame) {
+        return false;
+    }
     o.dumpDone = true;
 
     // 转储清单：显式 ids 优先，否则用累积的 sampled（只增不清，整帧所有采样都保留）
