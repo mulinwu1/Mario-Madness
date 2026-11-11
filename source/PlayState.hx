@@ -396,6 +396,7 @@ class PlayState extends MusicBeatState
 	public var scoreTxt:FlxText;
 	public var ratingTxt:FlxText;
 	public var subTitle:FlxText;
+	var subTitleColor:Int = -1;
 	public var stream:Int = 0;
 	public var ifuckingdelete:Int = 0;
 
@@ -14194,24 +14195,33 @@ class PlayState extends MusicBeatState
 							newcolor = "0xFF2BE81A";
 					}
 
+				var subColor:Int = FlxColor.WHITE;
 				if (value2 != "")
 				{
 					var parsed:Null<Int> = Std.parseInt(newcolor);
-					subTitle.color = (parsed != null) ? parsed : FlxColor.WHITE;
+					if (parsed != null) subColor = parsed;
+				}
+				// [vkfix] 我们的 lime 构建不应用运行时 FlxText 颜色；颜色变化时重建文本对象，
+				// 让颜色在创建时的 setFormat 里就带上（初始格式颜色是生效的，计时器/标题同理）。
+				if (subTitleColor != subColor)
+				{
+					if (subTitle != null)
+						remove(subTitle, true);
+					subTitle = new FlxText(0, 560.8, FlxG.width, value1, 20);
+					subTitle.setFormat((curStage != 'exeport') ? Paths.font('vcr.ttf') : Paths.font('mariones.ttf'), 30, subColor,
+						CENTER, FlxTextBorderStyle.OUTLINE, FlxColor.BLACK);
+					subTitle.scrollFactor.set();
+					subTitle.borderSize = 1.25;
+					subTitle.cameras = [camOther];
+					subTitle.visible = !ClientPrefs.hideHud;
+					add(subTitle);
+					subTitleColor = subColor;
 				}
 				else
 				{
-					subTitle.color = FlxColor.WHITE;
+					subTitle.text = value1;
+					subTitle.color = subColor;
 				}
-				// [vkfix] 我们的 lime 构建不会在运行时应用 FlxText.set_color 的格式颜色（字幕一直是白色），
-				// 这里额外用 sprite 颜色调制把白字贴图染成目标颜色（黑描边乘后仍为黑）。
-				var subColor:Int = subTitle.color;
-				if (subTitle.colorTransform == null)
-					subTitle.colorTransform = new openfl.geom.ColorTransform();
-				subTitle.colorTransform.redMultiplier = ((subColor >> 16) & 0xFF) / 255;
-				subTitle.colorTransform.greenMultiplier = ((subColor >> 8) & 0xFF) / 255;
-				subTitle.colorTransform.blueMultiplier = (subColor & 0xFF) / 255;
-				subTitle.useColorTransform = true;
 
 			case 'Show Song':
 				var triggerMR:Float = Std.parseFloat(value1);
