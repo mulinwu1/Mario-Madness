@@ -1,0 +1,279 @@
+name: Build Android APK
+
+# 安卓（arm64-v8a）+ Vulkan：先编 lime 的 native 库（注入 native_vulkan），
+# 再用它打 APK。产物：mario-android-apk（debug 签名，可直接 adb install）。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  HAXE_VERSION: 4.2.5
+  NDK_VERSION: 21.4.7075529
+
+jobs:
+  build-lime-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout (native only)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            native_vulkan
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Java 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK and SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "ndk;${NDK_VERSION}" "platforms;android-28" "build-tools;28.0.3" "platform-tools"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+
+      - name: Restore caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/haxelib
+            lime-src
+            glslang-src
+            glslang-build
+            glslang-android
+            vkh
+          key: android-lime-v1-${{ runner.os }}
+
+      - name: Install Haxe and Neko
+        run: |
+          set -e
+          if [ ! -x "$HOME/haxe/haxe" ]; then
+            curl -sSL -o /tmp/haxe.tar.gz "https://github.com/HaxeFoundation/haxe/releases/download/${HAXE_VERSION}/haxe-${HAXE_VERSION}-linux64.tar.gz"
+            mkdir -p "$HOME/haxe"
+            tar -xzf /tmp/haxe.tar.gz -C "$HOME/haxe" --strip-components=1
+          fi
+          if [ ! -x "$HOME/neko/neko" ]; then
+            curl -sSL -o /tmp/neko.tar.gz "https://github.com/HaxeFoundation/neko/releases/download/v2-3-0/neko-2.3.0-linux64.tar.gz"
+            mkdir -p "$HOME/neko"
+            tar -xzf /tmp/neko.tar.gz -C "$HOME/neko" --strip-components=1
+          fi
+          echo "$HOME/haxe" >> "$GITHUB_PATH"
+          echo "$HOME/neko" >> "$GITHUB_PATH"
+          echo "HAXE_STD_PATH=$HOME/haxe/std" >> "$GITHUB_ENV"
+          echo "NEKOPATH=$HOME/neko" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$HOME/neko:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          "$HOME/haxe/haxe" -version
+          "$HOME/neko/neko" -version
+
+      - name: Install haxelibs
+        run: |
+          set -e
+          export PATH="$HOME/haxe:$HOME/neko:$PATH"
+          export HAXE_STD_PATH="$HOME/haxe/std"
+          export NEKOPATH="$HOME/neko"
+          export LD_LIBRARY_PATH="$HOME/neko:$LD_LIBRARY_PATH"
+          haxelib setup "$HOME/haxelib" || true
+          haxelib install hxcpp 4.3.2 --quiet || true
+          haxelib install format --quiet || true
+          haxelib install hxp --quiet || true
+          haxelib list
+
+      - name: Fetch Vulkan headers
+        run: |
+          if [ ! -f vkh/include/vulkan/vulkan.h ]; then
+            git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git vkh
+          fi
+          test -f vkh/include/vulkan/vulkan.h
+
+      - name: Build glslang (arm64-v8a static)
+        run: |
+          set -e
+          export ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}"
+          if [ ! -d glslang-src/.git ]; then
+            git clone --depth 1 --branch 16.6.0 --recursive --shallow-submodules https://github.com/KhronosGroup/glslang.git glslang-src
+          fi
+          if [ ! -f glslang-android/lib/libglslang.a ]; then
+            cmake -S glslang-src -B glslang-build \
+              -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI=arm64-v8a \
+              -DANDROID_PLATFORM=android-21 \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_SHARED_LIBS=OFF \
+              -DENABLE_GLSLANG_BINARIES=OFF \
+              -DENABLE_HLSL=OFF \
+              -DENABLE_OPT=ON \
+              -DCMAKE_INSTALL_PREFIX="$PWD/glslang-android"
+            cmake --build glslang-build -j"$(nproc)"
+            cmake --install glslang-build
+          fi
+          ls -l glslang-android/lib/
+
+      - name: Prepare lime source and inject vulkan
+        run: |
+          set -e
+          if [ ! -d lime-src/.git ]; then
+            git clone --depth 1 --branch 8.0.2 --recursive --shallow-submodules https://github.com/openfl/lime.git lime-src
+          else
+            git -C lime-src checkout -- .
+            git -C lime-src clean -fd
+            git -C lime-src submodule update --init --recursive --depth 1
+          fi
+          mkdir -p lime-src/project/src/graphics/vulkan
+          cp native_vulkan/vk_shaders_spv.h native_vulkan/vk_renderer.h native_vulkan/vk_platform.h \
+             native_vulkan/vk_platform_android.cpp native_vulkan/vk_renderer.cpp \
+             native_vulkan/gl_core.cpp native_vulkan/gl_compat.h native_vulkan/gl_vk_bridge.h \
+             native_vulkan/gl_vk_c.h native_vulkan/gl_vk_contract.h native_vulkan/gl_vk_contract.cpp \
+             native_vulkan/gl_fbo.cpp native_vulkan/gl_texture_params.cpp native_vulkan/gl_state.h \
+             native_vulkan/gl_state.cpp native_vulkan/gl_shader.h native_vulkan/gl_shader.cpp \
+             native_vulkan/gl_packet.cpp native_vulkan/gl_packet.h native_vulkan/vk_packet.cpp \
+             native_vulkan/vk_packet.h native_vulkan/vk_tuning.cpp native_vulkan/vk_tuning.h \
+             lime-src/project/src/graphics/vulkan/
+          cp -r vkh/include/vulkan lime-src/project/include/
+          if [ -d vkh/include/vk_video ]; then cp -r vkh/include/vk_video lime-src/project/include/; fi
+          cp -r glslang-android/include/glslang lime-src/project/include/
+          export LIME_SRC="$PWD/lime-src"
+          export LIME_PLATFORM=android
+          export GLSLANG_ANDROID_DIR="$PWD/glslang-android"
+          python3 native_vulkan/patch_lime.py
+          export PATH="$HOME/haxe:$HOME/neko:$PATH"
+          export HAXE_STD_PATH="$HOME/haxe/std"
+          export NEKOPATH="$HOME/neko"
+          export LD_LIBRARY_PATH="$HOME/neko:$LD_LIBRARY_PATH"
+          haxelib dev lime "$PWD/lime-src"
+
+      - name: Build lime native (arm64 only)
+        run: |
+          set -e
+          export PATH="$HOME/haxe:$HOME/neko:$PATH"
+          export HAXE_STD_PATH="$HOME/haxe/std"
+          export NEKOPATH="$HOME/neko"
+          export LD_LIBRARY_PATH="$HOME/neko:$LD_LIBRARY_PATH"
+          export ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}"
+          export ANDROID_SDK="$ANDROID_SDK_ROOT"
+          export HXCPP_COMPILE_THREADS="$(nproc)"
+          cd lime-src/project
+          haxelib run hxcpp Build.xml -Dandroid -DHXCPP_ARM64 -DPLATFORM=android-21 2>&1 | tee ../build-android.log
+          test "${PIPESTATUS[0]}" -eq 0
+          echo "--- ndll output ---"
+          ls -lR ../ndll/Android || true
+          test -f ../ndll/Android/arm64-v8a/liblime-64.so
+
+      - name: Upload lime android ndll
+        uses: actions/upload-artifact@v4
+        with:
+          name: lime-vulkan-android
+          path: |
+            lime-src/ndll/Android/**/*.so
+            lime-src/build-android.log
+          retention-days: 7
+
+  build-apk:
+    needs: build-lime-android
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK and SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "ndk;${NDK_VERSION}" "platforms;android-28" "build-tools;28.0.3" "platform-tools"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+
+      - name: Download lime android ndll
+        uses: actions/download-artifact@v4
+        with:
+          name: lime-vulkan-android
+          path: lime-android
+
+      - name: Install Haxe and Neko
+        run: |
+          set -e
+          if [ ! -x "$HOME/haxe/haxe" ]; then
+            curl -sSL -o /tmp/haxe.tar.gz "https://github.com/HaxeFoundation/haxe/releases/download/${HAXE_VERSION}/haxe-${HAXE_VERSION}-linux64.tar.gz"
+            mkdir -p "$HOME/haxe"
+            tar -xzf /tmp/haxe.tar.gz -C "$HOME/haxe" --strip-components=1
+          fi
+          if [ ! -x "$HOME/neko/neko" ]; then
+            curl -sSL -o /tmp/neko.tar.gz "https://github.com/HaxeFoundation/neko/releases/download/v2-3-0/neko-2.3.0-linux64.tar.gz"
+            mkdir -p "$HOME/neko"
+            tar -xzf /tmp/neko.tar.gz -C "$HOME/neko" --strip-components=1
+          fi
+          echo "$HOME/haxe" >> "$GITHUB_PATH"
+          echo "$HOME/neko" >> "$GITHUB_PATH"
+          echo "HAXE_STD_PATH=$HOME/haxe/std" >> "$GITHUB_ENV"
+          echo "NEKOPATH=$HOME/neko" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$HOME/neko:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+
+      - name: Restore haxelib cache
+        uses: actions/cache@v4
+        with:
+          path: ~/haxelib
+          key: game-haxelib-android-v1-${{ runner.os }}
+
+      - name: Install haxelibs
+        run: |
+          set -e
+          export PATH="$HOME/haxe:$HOME/neko:$PATH"
+          export HAXE_STD_PATH="$HOME/haxe/std"
+          export NEKOPATH="$HOME/neko"
+          export LD_LIBRARY_PATH="$HOME/neko:$LD_LIBRARY_PATH"
+          haxelib setup "$HOME/haxelib" || true
+          for lib in "hxcpp 4.3.2" "lime 8.0.2" "openfl 9.2.0" "flixel 5.3.1" "flixel-addons 3.1.1" "flixel-ui 2.5.0" "hscript" "format" "hxp"; do
+            haxelib install $lib --quiet || true
+          done
+          haxelib install hxCodec 2.6.1 --quiet || true
+          haxelib list
+
+      - name: Wire Vulkan lime ndll into haxelib lime (android arm64)
+        run: |
+          set -e
+          LIME_ROOT="$HOME/haxelib/lime/8,0,2"
+          test -d "$LIME_ROOT"
+          mkdir -p "$LIME_ROOT/ndll/Android/arm64-v8a"
+          cp -v lime-android/ndll/Android/arm64-v8a/liblime-64.so "$LIME_ROOT/ndll/Android/arm64-v8a/"
+          ls -l "$LIME_ROOT/ndll/Android/arm64-v8a/"
+          # 确认真的是 Vulkan 版
+          strings "$LIME_ROOT/ndll/Android/arm64-v8a/liblime-64.so" | grep -c vkCreateInstance
+
+      - name: Build APK
+        run: |
+          set -e
+          export PATH="$HOME/haxe:$HOME/neko:$PATH"
+          export HAXE_STD_PATH="$HOME/haxe/std"
+          export NEKOPATH="$HOME/neko"
+          export LD_LIBRARY_PATH="$HOME/neko:$LD_LIBRARY_PATH"
+          export HXCPP_COMPILE_THREADS="$(nproc)"
+          haxelib run lime build android -Dandroid --verbose 2>&1 | tee build-apk.log
+          test "${PIPESTATUS[0]}" -eq 0
+          echo "--- apk ---"
+          find . -name "*.apk" -print
+          find Export android bin -name "*.apk" -print 2>/dev/null || true
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: mario-android-apk
+          path: |
+            **/*.apk
+            build-apk.log
+          retention-days: 7
