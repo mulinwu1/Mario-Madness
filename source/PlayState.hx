@@ -5892,7 +5892,9 @@ class PlayState extends MusicBeatState
 			CoolUtil.precacheSound('psAtt');
 		}
 
+		#if desktop
 		discName = PlayState.SONG.song.replace(' ', '');
+		#end
 
 		#if desktop
 		// Updating Discord Rich Presence.
@@ -6701,7 +6703,11 @@ class PlayState extends MusicBeatState
 		var songName:String = Paths.formatToSongPath(SONG.song);
 		var file:String = Paths.json('songData/' + songName + '/events');
 		#if sys
+		#if MODS_ALLOWED
 		if (FileSystem.exists(Paths.modsJson('songData/' + songName + '/events')) || FileSystem.exists(file))
+		#else
+		if (FileSystem.exists(file))
+		#end
 		{
 		#else
 		if (OpenFlAssets.exists(file))
