@@ -50,6 +50,8 @@
 	<define name="MODS_ALLOWED" if="desktop" />
 	<define name="LUA_ALLOWED" if="windows" />
 	<define name="VIDEOS_ALLOWED" if="web || windows" unless="32"/>
+	<!-- 安卓触控：mobileC 打开 Controls/MusicBeatState 里的虚拟按键支持 -->
+	<define name="mobileC" if="mobile" />
 	
 	<!-- 默认开启 PRELOAD_ALL（与上游一致）。空壳库会导致字体/资源全缺（Assets.getFont 返回 null）。
 	     已验证：CI 保留 assets 后编译正常出包（run 42894747485，约 11min，exe 20.5MB）。
@@ -79,6 +81,8 @@
 	<assets path="assets/shared"        library="shared"        exclude="*.mp3" unless="web"/>
 	
 	<assets path='example_mods' rename='mods' embed='false' if="MODS_ALLOWED"/>
+	<!-- 触控贴图：hitbox 在 assets/shared/images/hitbox（随 shared 库打包），
+	     virtual-input 由 FlxVirtualPad.hx 里的 @:bitmap 直接编译进代码 -->
 	<assets path='art/readme.txt' rename='do NOT readme.txt' />
 	<!-- <template path='mods' /> -->
 	
