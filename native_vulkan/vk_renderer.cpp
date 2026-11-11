@@ -3282,6 +3282,34 @@ bool VkRenderer::PktDraw(const PktDrawDesc& d) {
     VkDeviceSize voff = o.pktVbOff;
     o.pktVbOff += vbytes;
 
+    // [diag 2026-11-11] 长条(sustain)取证：细高四边形单独打一条，
+    // 记录纹理/UV/顶点 alpha/颜色调制/混合，用来定位"中间空心"。
+    {
+        static int s_tallPkt = 0;
+        if (s_tallPkt < 400 && d.vertexCount >= 6) {
+            const float* vp = d.verts;
+            float x0 = vp[0], x1 = vp[0], y0 = vp[1], y1 = vp[1];
+            float u0 = vp[13], u1 = vp[13], v0 = vp[14], v1 = vp[14];
+            for (int i = 1; i < d.vertexCount; i++) {
+                const float* q = vp + (size_t)i * 15;
+                if (q[0] < x0) x0 = q[0]; if (q[0] > x1) x1 = q[0];
+                if (q[1] < y0) y0 = q[1]; if (q[1] > y1) y1 = q[1];
+                if (q[13] < u0) u0 = q[13]; if (q[13] > u1) u1 = q[13];
+                if (q[14] < v0) v0 = q[14]; if (q[14] > v1) v1 = q[14];
+            }
+            float w = x1 - x0, h = y1 - y0;
+            if (h > 100.0f && w < 80.0f && w > 0.5f) {
+                s_tallPkt++;
+                fprintf(stderr,
+                        "[tallpkt] tex=%u n=%d pos=[%.1f..%.1f, %.1f..%.1f] uv=[%.4f..%.4f, %.4f..%.4f] "
+                        "a=%.3f cm=[%.2f %.2f %.2f %.2f] cf=[%.1f %.1f %.1f %.1f] blend=%d,%d,%d\n",
+                        (unsigned)d.texId, d.vertexCount, x0, x1, y0, y1, u0, u1, v0, v1,
+                        vp[4], vp[5], vp[6], vp[7], vp[8], vp[9], vp[10], vp[11], vp[12],
+                        d.state.blendEnabled ? 1 : 0, (int)d.state.blendSrc, (int)d.state.blendDst);
+            }
+        }
+    }
+
     bool indexed = ((d.indices != nullptr || d.indices32 != nullptr) && d.indexCount > 0);
     bool use32 = (d.index32 != 0 && d.indices32 != nullptr);
     VkDeviceSize ioff = 0;
