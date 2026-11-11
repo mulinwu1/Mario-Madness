@@ -91,6 +91,9 @@ class WarpState extends MusicBeatState
 	//te presento a mi wawa está lleno de Arrays y else if
 	override function create()
 	{
+		#if mobileC
+		addVirtualPad(LEFT_RIGHT, A);
+		#end
 		#if desktop
 		// Updating Discord Rich Presence
 		DiscordClient.changePresence("In the Overworld", null);
@@ -374,12 +377,12 @@ class WarpState extends MusicBeatState
 						goodbye();
 					}
 
-				if (FlxG.keys.justPressed.LEFT)
+				if (controls.UI_LEFT_P)
 				{
 					quieto = false;
 					caminar(canciones[curSelected][3]);
 				}
-				else if (FlxG.keys.justPressed.RIGHT)
+				else if (controls.UI_RIGHT_P)
 				{
 					quieto = false;
 					caminar(canciones[curSelected][4]);
