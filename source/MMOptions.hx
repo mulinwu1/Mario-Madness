@@ -145,41 +145,11 @@ class MMOptions extends MusicBeatSubstate
 				case 'Mario Options':
 					openSubState(new MarioSubstate());
 				case 'Unlock All':
-					unlockEverything();
-
-					var unlockedText:FlxText = new FlxText(0, 0, 0, 'ALL LEVELS UNLOCKED!', 48);
-					unlockedText.setFormat(Paths.font("mariones.ttf"), 48, FlxColor.RED, "center", FlxTextBorderStyle.OUTLINE, FlxColor.BLACK);
-					unlockedText.borderSize = 4;
-					unlockedText.screenCenter();
-					unlockedText.alpha = 0;
-					add(unlockedText);
-					FlxTween.tween(unlockedText, {alpha: 1}, 0.25, {ease: FlxEase.circOut, onComplete: function(twn:FlxTween) {
-						FlxTween.tween(unlockedText, {alpha: 0}, 0.6, {ease: FlxEase.circIn, startDelay: 1.2, onComplete: function(twn2:FlxTween) {
-							remove(unlockedText, true);
-							unlockedText.destroy();
-						}});
-					}});
-					FlxG.sound.play(Paths.sound('confirmMenu'));
-					changeSelection();
+					openSubState(new UnlockSubstate());
 				case 'Delete Data':
 					openSubState(new DeleteSubstate());
 			}
 		}
-	}
-
-	// 一键解锁全部关卡：storySave 全开 + 各世界星星数拉满 + ALT/overworld 标记，
-	// 然后走 ClientPrefs.saveSettings()（它会按 worlds 反推 storySave[1..6]/[9]）。
-	function unlockEverything():Void
-	{
-		for (i in 0...ClientPrefs.storySave.length)
-			ClientPrefs.storySave[i] = true;
-
-		ClientPrefs.worlds = [3, 7, 5, 6, 3];    // 与 saveSettings 的 starNeed 一致
-		ClientPrefs.worldsALT = [2, 2, 2, 1, 3];
-		ClientPrefs.storyPass = true;
-		ClientPrefs.overworld = true;
-		ClientPrefs.saveSettings();
-		trace('[unlock] all levels unlocked');
 	}
 
 	function changeSelection(change:Int = 0)
@@ -1759,4 +1729,90 @@ class DeleteSubstate extends MusicBeatSubstate
 				rotButton.scale.set(1, 1);
 			}
 		}
+}
+
+// 设置 → Unlock All：进入后是一个真正的按钮，按回车或鼠标点击才执行解锁。
+class UnlockSubstate extends MusicBeatSubstate
+{
+	var buttonBg:FlxSprite;
+	var buttonText:FlxText;
+	var hintText:FlxText;
+	var nextAccept:Float = 0.35;
+	var unlocked:Bool = false;
+
+	public function new()
+	{
+		super();
+
+		var darkbg:FlxSprite = new FlxSprite().makeGraphic(FlxG.width, FlxG.height, 0xFF000000);
+		darkbg.alpha = 0.75;
+		add(darkbg);
+
+		var title:FlxText = new FlxText(0, 0, FlxG.width, 'Unlock All Levels', 48);
+		title.setFormat(Paths.font("mariones.ttf"), 48, FlxColor.RED, "center", FlxTextBorderStyle.OUTLINE, FlxColor.BLACK);
+		title.borderSize = 4;
+		title.screenCenter();
+		title.y -= 140;
+		add(title);
+
+		buttonBg = new FlxSprite().makeGraphic(360, 84, FlxColor.WHITE);
+		buttonBg.color = 0xFF500000;
+		buttonBg.screenCenter();
+		add(buttonBg);
+
+		buttonText = new FlxText(buttonBg.x, buttonBg.y + 20, buttonBg.width, 'UNLOCK ALL', 36);
+		buttonText.setFormat(Paths.font("mariones.ttf"), 36, FlxColor.WHITE, "center", FlxTextBorderStyle.OUTLINE, FlxColor.BLACK);
+		buttonText.borderSize = 3;
+		add(buttonText);
+
+		hintText = new FlxText(0, 0, FlxG.width, 'Enter or click the button to unlock every level and world', 22);
+		hintText.setFormat(Paths.font("mariones.ttf"), 22, FlxColor.WHITE, "center");
+		hintText.screenCenter();
+		hintText.y += 100;
+		add(hintText);
+
+		FlxG.mouse.visible = true;
+	}
+
+	override function update(elapsed:Float)
+	{
+		super.update(elapsed);
+
+		if (nextAccept > 0)
+			nextAccept -= elapsed;
+
+		var hover:Bool = FlxG.mouse.overlaps(buttonBg);
+		buttonBg.color = unlocked ? 0xFF2E7D32 : (hover ? 0xFF8B0000 : 0xFF500000);
+
+		if (!unlocked && nextAccept <= 0 && (controls.ACCEPT || (FlxG.mouse.justPressed && hover)))
+		{
+			unlocked = true;
+			unlockEverything();
+			buttonText.text = 'UNLOCKED!';
+			hintText.text = 'All levels unlocked and saved. Press BACK to exit.';
+			FlxG.sound.play(Paths.sound('confirmMenu'));
+		}
+
+		if (controls.BACK)
+		{
+			FlxG.sound.play(Paths.sound('cancelMenu'));
+			FlxG.mouse.visible = false;
+			close();
+		}
+	}
+
+	// storySave 全开 + 各世界星星拉满 + ALT/overworld 标记，
+	// 再交给 ClientPrefs.saveSettings()（它会按 worlds 反推 storySave[1..6]/[9]）写盘。
+	function unlockEverything():Void
+	{
+		for (i in 0...ClientPrefs.storySave.length)
+			ClientPrefs.storySave[i] = true;
+
+		ClientPrefs.worlds = [3, 7, 5, 6, 3];    // 与 saveSettings 的 starNeed 一致
+		ClientPrefs.worldsALT = [2, 2, 2, 1, 3];
+		ClientPrefs.storyPass = true;
+		ClientPrefs.overworld = true;
+		ClientPrefs.saveSettings();
+		trace('[unlock] all levels unlocked');
+	}
 }
