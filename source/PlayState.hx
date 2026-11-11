@@ -5256,7 +5256,7 @@ class PlayState extends MusicBeatState
 		subTitle = new FlxText(0, 560.8, FlxG.width, "", 20);
 		if (curStage != 'exeport')
 		{
-			subTitle.setFormat(Paths.font("vcr.ttf"), 30, FlxColor.WHITE, CENTER, FlxTextBorderStyle.OUTLINE, FlxColor.BLACK);
+			subTitle.setFormat(Paths.font("mario2.ttf"), 30, FlxColor.WHITE, CENTER, FlxTextBorderStyle.OUTLINE, FlxColor.BLACK);
 		}
 		else
 		{
@@ -14208,7 +14208,7 @@ class PlayState extends MusicBeatState
 					if (subTitle != null)
 						remove(subTitle, true);
 					subTitle = new FlxText(0, 560.8, FlxG.width, value1, 20);
-					subTitle.setFormat((curStage != 'exeport') ? Paths.font('vcr.ttf') : Paths.font('mariones.ttf'), 30, subColor,
+					subTitle.setFormat((curStage != 'exeport') ? Paths.font('mario2.ttf') : Paths.font('mariones.ttf'), 30, subColor,
 						CENTER, FlxTextBorderStyle.OUTLINE, FlxColor.BLACK);
 					subTitle.scrollFactor.set();
 					subTitle.borderSize = 1.25;
