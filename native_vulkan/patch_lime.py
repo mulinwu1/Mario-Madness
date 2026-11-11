@@ -226,7 +226,10 @@ if os.path.exists(sdl):
     else:
         anchor = '#include "../../graphics/opengl/OpenGLBindings.h"'
         if anchor in s:
-            s = s.replace(anchor, anchor + '\n#include "../../graphics/vulkan/gl_vk_c.h"', 1)
+            # SDL_syswm.h 在 lime 里只在 HX_WINDOWS 下被包含；Android 也要用
+            # SDL_GetWindowWMInfo(info.android.window)，所以这里补一个条件包含。
+            s = s.replace(anchor, anchor + '\n#include "../../graphics/vulkan/gl_vk_c.h"\n'
+                          '#if defined(HX_ANDROID)\n#include <SDL_syswm.h>\n#endif', 1)
         else:
             print("WARN: SDLWindow include anchor not found")
 
