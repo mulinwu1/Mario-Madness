@@ -31,4 +31,24 @@ bool CreateSurface (uint64_t instance, void* gipa, void* nativeWindow,
 // 安卓实现恒返回空串：那里没有"可执行文件旁边的资源目录"这个概念。
 void ExeDir (char* out, int outCap);
 
+// 单调毫秒（交换链重建节流、色键扫描节流等）。
+uint64_t TicksMs ();
+
+// 高精度毫秒（只用于诊断计时，不参与逻辑）。
+double NowMs ();
+
+// 窗口客户区尺寸；Android 恒返回 false（用 surface 尺寸即可，没有"窗口边框"概念）。
+bool WindowClientSize (void* nativeWindow, int* outW, int* outH);
+
+// 窗口是否带 layered 样式（Windows 色键透明用）；Android 恒 false。
+bool WindowIsLayered (void* nativeWindow);
+
+// 把"非色键色"的像素合成窗口 region（窗口 region 之外 = 桌面）。
+// px 是 B8G8R8A8 交换链像素。Android 没有窗口 region 概念，直接返回 false 并清 active。
+bool ApplyChromaRegion (void* nativeWindow, const uint8_t* px, int w, int h,
+                        int okR, int okG, int okB, bool* active);
+
+// 清掉窗口 region（如果当前生效）。Android 为空操作。
+void ClearChromaRegion (void* nativeWindow, bool* active);
+
 }
