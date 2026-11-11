@@ -130,6 +130,71 @@ static size_t PendingVertsOf (const std::vector<TexSlot>& tex, const std::vector
     return n;
 }
 
+// ---- 轻量性能统计（VK_PERF=0 关闭；默认每秒一行 [perf]，只走 stderr，不写盘）----
+// 统计口径：一次 BeginFrame = 一个视觉帧；一次 EndFrame = 一次提交（可能一帧多次，
+// 每个离屏目标一次）。draws/pipes/ds/rp 都是"每次提交"累计值，输出时除以视觉帧数。
+struct PerfCounters {
+    uint64_t frames = 0;      // BeginFrame 次数
+    uint64_t submits = 0;     // EndFrame 里真正 vkQueueSubmit 的次数
+    uint64_t rpBegins = 0;    // vkCmdBeginRenderPass 次数
+    uint64_t draws = 0;       // vkCmdDraw 次数
+    uint64_t pipeBinds = 0;   // vkCmdBindPipeline 次数
+    uint64_t dsBinds = 0;     // vkCmdBindDescriptorSets 次数
+    uint64_t verts = 0;       // 提交的顶点数
+    double endMs = 0;         // EndFrame 总耗时（录制+提交+waitIdle）
+    double waitMs = 0;        // 其中 vkQueueWaitIdle 的耗时
+    double maxEndMs = 0;
+    double lastBeginMs = 0;   // 上一帧 BeginFrame 的时间戳
+    double frameMs = 0;       // 相邻 BeginFrame 的墙钟间隔累计
+    double lastPrintMs = 0;
+};
+static PerfCounters g_perf;
+static double PerfNowMs () {
+    using namespace std::chrono;
+    return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+}
+static bool PerfOn () {
+    static int s = -1;
+    if (s < 0) { const char* v = getenv("VK_PERF"); s = (v && v[0] == '0') ? 0 : 1; }
+    return s != 0;
+}
+// 逐帧取证日志（[vk] submit / bbframe / frame= / v6 / [vkfix] 等）默认关闭，
+// VK_DIAG=1 打开；性能测试请保持关闭，避免每帧多次 stderr 写入干扰测量。
+static bool DiagOn () {
+    static int s = -1;
+    if (s < 0) { const char* v = getenv("VK_DIAG"); s = (v && v[0] == '1') ? 1 : 0; }
+    return s != 0;
+}
+static void PerfFrameBegin () {
+    if (!PerfOn()) return;
+    double now = PerfNowMs();
+    if (g_perf.lastBeginMs > 0) g_perf.frameMs += now - g_perf.lastBeginMs;
+    g_perf.lastBeginMs = now;
+    g_perf.frames++;
+}
+static void PerfFlushIfDue () {
+    if (!PerfOn()) return;
+    double now = PerfNowMs();
+    if (g_perf.lastPrintMs <= 0) { g_perf.lastPrintMs = now; return; }
+    double span = now - g_perf.lastPrintMs;
+    if (span < 1000.0 || g_perf.frames == 0) return;
+    double f = (double)g_perf.frames;
+    fprintf(stderr,
+            "[perf] fps=%.1f frame=%.2fms end=%.2fms(max %.2f) wait=%.2fms | "
+            "draws/f=%.1f pipes/f=%.1f ds/f=%.1f rp/f=%.1f submits/f=%.1f verts/f=%.0f\n",
+            f * 1000.0 / span,
+            g_perf.frameMs / f, g_perf.endMs / f, g_perf.maxEndMs,
+            g_perf.waitMs / f,
+            (double)g_perf.draws / f, (double)g_perf.pipeBinds / f,
+            (double)g_perf.dsBinds / f, (double)g_perf.rpBegins / f,
+            (double)g_perf.submits / f, (double)g_perf.verts / f);
+    g_perf.frames = g_perf.submits = g_perf.rpBegins = 0;
+    g_perf.draws = g_perf.pipeBinds = g_perf.dsBinds = g_perf.verts = 0;
+    g_perf.endMs = g_perf.waitMs = g_perf.frameMs = 0;
+    g_perf.maxEndMs = 0;
+    g_perf.lastPrintMs = now;
+}
+
 struct VkRenderer::Impl {
     void* nativeWindow = nullptr;
     int width = 0, height = 0;
@@ -2134,6 +2199,7 @@ void VkRenderer::DrawRaw(uint32_t texId, const float* verts, int vertexCount, co
 }
 
 void VkRenderer::BeginFrame(float r, float g, float b, float a) {
+    PerfFrameBegin();
     BindRenderTarget(0, r, g, b, a);
 }
 
@@ -3862,20 +3928,21 @@ bool VkRenderer::MaybeDumpTextures(uint64_t frameHint) {
 
 void VkRenderer::EndFrame() {
     Impl& o = *impl;
+    const double perfT0 = PerfNowMs();
     // 探针（审计口径）：每个视觉帧只出一次的两份状态快照——渲染器 currentTarget 与 gl_fbo g_currentTarget
-    if (o.presentReq) {
+    if (DiagOn() && o.presentReq) {
         fprintf(stderr, "[vk] efstate f=%llu req=1 open=%d cur=%u gcur=%u bbHeld=%d bbOpen=%d\n",
                 (unsigned long long) g_drawFrame, o.frameOpen ? 1 : 0, o.currentTarget,
                 lime::gl_vk_current_target (), o.bbHeld ? 1 : 0, g_bbOpen);
     }
     if (!o.frameOpen) {
         // 审计要求：不再用 g_bbOpen 门控，每次空 EndFrame 都打，否则"零 noop"无法区分原因
-        fprintf(stderr, "[vk] bbframe close f=%llu target=%u noop=1 BBOPEN=%d req=%d\n",
+        if (DiagOn()) fprintf(stderr, "[vk] bbframe close f=%llu target=%u noop=1 BBOPEN=%d req=%d\n",
                 (unsigned long long) g_drawFrame, o.currentTarget, g_bbOpen, o.presentReq ? 1 : 0);
         return;
     }
     // 探针（只记状态）：后缓冲 close 与 open 是否配对；离屏 close 时后缓冲还开着 = 顶点被并走
-    {
+    if (DiagOn()) {
         size_t pv = PendingVertsOf (o.textures, o.targets);
         if (o.currentTarget == 0) {
             fprintf(stderr, "[vk] bbframe close f=%llu target=0 verts=%zu open=%d\n",
@@ -3885,6 +3952,8 @@ void VkRenderer::EndFrame() {
             fprintf(stderr, "[vk] bbframe close f=%llu target=%u verts=%zu BBOPEN=1 backbufferNotClosed\n",
                     (unsigned long long) g_drawFrame, o.currentTarget, pv);
         }
+    } else {
+        g_bbOpen = 0;
     }
 
     float* dst = o.vbPtr;
@@ -4051,7 +4120,7 @@ void VkRenderer::EndFrame() {
         // 每次提交一条不门控的 summary（含离屏目标），用于把黑帧对齐到具体提交：
         // delsample = 距该目标上次真正写入的帧数（-1 = 从未写过）
         static uint64_t s_submitLog = 0;
-        if (s_submitLog < 30000) {
+        if (DiagOn() && s_submitLog < 30000) {
             long long delsample = -1;
             uint64_t created = 0;
             if (o.currentTarget >= 1000) {
@@ -4092,7 +4161,7 @@ void VkRenderer::EndFrame() {
                 s_t105++;
             }
             s_osum++;
-            if (s_osum % 60 == 0) {
+            if (DiagOn() && s_osum % 60 == 0) {
                 fprintf(stderr,
                         "[vksum] f=%llu t0=%llu t0verts=%llu t0empty=%llu t1004=%llu t1005=%llu draws=%llu"
                         " p1=%llu p2=%llu p3=%llu p4=%llu p5=%llu p6=%llu p7=%llu w1=%llu w5=%llu w6=%llu bbopen=%d\n",
@@ -4107,7 +4176,7 @@ void VkRenderer::EndFrame() {
                         (unsigned long long) g_progWhole[6], g_bbOpen);
             }
         }
-        if (s_frames == 1 || s_frames % 30 == 0 || o.currentTarget == 0) {
+        if (DiagOn() && (s_frames == 1 || s_frames % 30 == 0 || o.currentTarget == 0)) {
             float first[4] = {0, 0, 0, 0};
             if (totalVerts > 0) memcpy(first, o.vbPtr, sizeof(first));
             fprintf(stderr, "[vk] frame=%llu verts=%zu ranges=%zu target=%u first=(%.1f,%.1f,%.2f,%.2f)\n",
@@ -4183,7 +4252,7 @@ void VkRenderer::EndFrame() {
         o.targets[ti].clearPending = false;
         o.targets[ti].cleared = true;
         o.targets[ti].clearedFrame = g_drawFrame;
-        fprintf(stderr, "[vk] offscreen clear tgt=%u rgba=(%.2f,%.2f,%.2f,%.2f) f=%llu\n",
+        if (DiagOn()) fprintf(stderr, "[vk] offscreen clear tgt=%u rgba=(%.2f,%.2f,%.2f,%.2f) f=%llu\n",
                 o.currentTarget, o.targets[ti].pcR, o.targets[ti].pcG,
                 o.targets[ti].pcB, o.targets[ti].pcA, (unsigned long long)g_drawFrame);
     } else {
@@ -4224,6 +4293,7 @@ void VkRenderer::EndFrame() {
     }
 
     g_beginRP(o.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+    if (PerfOn()) { g_perf.rpBegins++; g_perf.verts += (uint64_t)totalVerts; }
     if (totalVerts > 0) {
         // 接线探针（本轮只接不选，一次）：只在 backbuffer pass、且探针管线已建成时，
         // 先绑探针管线再立刻换回固定管线；两次绑定之间没有任何 draw，故不改变像素。
@@ -4448,6 +4518,7 @@ void VkRenderer::EndFrame() {
                             g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pp);
                             boundPipe = pp;
                             s_progSw++;
+                            if (PerfOn()) g_perf.pipeBinds++;
                         }
                         boundLayout = pl;
                         // 上屏笔（tgt=0）的 Y 方向：游戏给后缓冲的矩阵按 GL 的 y-up NDC
@@ -4477,6 +4548,7 @@ void VkRenderer::EndFrame() {
                             g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &ds, 0, nullptr);
                         }
                         g_cmdDraw(o.cmd, (uint32_t)r.count, 1, (uint32_t)r.first, 0);
+                        if (PerfOn()) { g_perf.dsBinds++; g_perf.draws++; }
                         s_progDS++;
                         continue;
                     }
@@ -4485,14 +4557,16 @@ void VkRenderer::EndFrame() {
             if (boundPipe != o.pipeline) {
                 g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeline);
                 boundPipe = o.pipeline;
+                if (PerfOn()) g_perf.pipeBinds++;
             }
             boundLayout = o.pipeLayout;
             // 固定管线用正常（y 向下）视口：上一笔 progpipe 上屏笔可能刚把它切成负高度
             if (o.currentTarget == 0) g_setViewport(o.cmd, 0, 1, &dynVp);
             g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeLayout, 0, 1, &r.set, 0, nullptr);
             g_cmdDraw(o.cmd, (uint32_t)r.count, 1, (uint32_t)r.first, 0);
+            if (PerfOn()) { g_perf.dsBinds++; g_perf.draws++; }
         }
-        if (s_useProg && (g_drawFrame % 120) == 1) {
+        if (s_useProg && DiagOn() && (g_drawFrame % 120) == 1) {
             fprintf(stderr, "[progpipe] use switches=%llu ranges=%zu ds=%llu f=%llu\n",
                     (unsigned long long)s_progSw, ranges.size(),
                     (unsigned long long)s_progDS, (unsigned long long)g_drawFrame);
@@ -4560,7 +4634,11 @@ void VkRenderer::EndFrame() {
     si.commandBufferCount = 1;
     si.pCommandBuffers = &o.cmd;
     g_submit(o.queue, 1, &si, VK_NULL_HANDLE);
-    g_waitIdle(o.queue);
+    {
+        double tw = PerfNowMs();
+        g_waitIdle(o.queue);
+        if (PerfOn()) { g_perf.waitMs += PerfNowMs() - tw; g_perf.submits++; }
+    }
 
     // 本帧命令缓冲已提交：现在才真正销毁被替换的旧纹理，保证本帧早先记录的
     // FrameSeg 仍采样到它们创建时的内容（避免槽位 id 复用造成贴图串层）。
@@ -4619,7 +4697,7 @@ void VkRenderer::EndFrame() {
 
     if (o.currentTarget == 0) {
         // [vkfix] 每帧一行：常量乘数全零折叠成 identity 的笔数 / 总笔数
-        fprintf(stderr, "[vkfix] zero_mult_identity=%d/%d\n",
+        if (DiagOn()) fprintf(stderr, "[vkfix] zero_mult_identity=%d/%d\n",
                 lime::g_vkfixDrawFolded, lime::g_vkfixDrawTotal);
         lime::g_vkfixDrawFolded = 0;
         lime::g_vkfixDrawTotal = 0;
@@ -4628,7 +4706,7 @@ void VkRenderer::EndFrame() {
         if (!willPresent) {
             static uint64_t s_nopres = 0;
             s_nopres++;
-            if (s_nopres <= 20000) {
+            if (DiagOn() && s_nopres <= 20000) {
                 fprintf(stderr, "[vk] nopres n=%llu f=%llu tex=%u verts=%zu load=%d\n",
                         (unsigned long long)s_nopres, (unsigned long long)g_drawFrame,
                         g_bbLastTex, totalVerts, o.bbLoad ? 1 : 0);
@@ -4638,7 +4716,7 @@ void VkRenderer::EndFrame() {
             // 会在 gl_fbo 里另打一条 [glvk] present），用于把黑帧对齐到交换链图。
             static uint64_t s_pres = 0;
             s_pres++;
-            if (s_pres <= 20000) {
+            if (DiagOn() && s_pres <= 20000) {
                 fprintf(stderr, "[vk] pres n=%llu f=%llu img=%u tex=%u verts=%zu load=%d\n",
                         (unsigned long long)s_pres, (unsigned long long)g_drawFrame,
                         o.frameImageIndex, g_bbLastTex, totalVerts, o.bbLoad ? 1 : 0);
@@ -4715,6 +4793,13 @@ void VkRenderer::EndFrame() {
     // 帧号口径与 trace 的 f= 一致：packet 模式用 frameGen，批处理才用 g_drawFrame。
     MaybeDumpTextures(lime::pkt::ExecActive() ? (uint64_t)lime::pkt::SnapshotFrameGen()
                                               : (uint64_t)g_drawFrame);
+
+    if (PerfOn()) {
+        double dt = PerfNowMs() - perfT0;
+        g_perf.endMs += dt;
+        if (dt > g_perf.maxEndMs) g_perf.maxEndMs = dt;
+        PerfFlushIfDue();
+    }
 
     o.frameOpen = false;
     g_bbLastTex = 0;
