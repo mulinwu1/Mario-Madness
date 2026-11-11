@@ -55,6 +55,9 @@ static uint64_t g_progDrawTotal = 0;
 #define MAX_TEXTURES 512
 // packet 路径采样器变体 descriptor set 的上限（纹理 × 采样器组合的缓存容量）
 #define PKT_SET_MAX 512
+// 帧环槽位数：每个槽一套命令缓冲 + fence + 顶点区 + UBO 区。
+// 提交后不再 vkQueueWaitIdle，CPU 录制与 GPU 执行流水起来；槽位复用时才等自己的 fence。
+#define VK_RING 3
 
 // 交换链 extent：安卓常见 ROTATE_90/270，此时 imageExtent 是旋转前的尺寸，
 // 宽高必须和窗口尺寸交换，否则整幅被拉伸。桌面 currentTransform 恒为 IDENTITY，行为不变。
@@ -239,6 +242,13 @@ struct VkRenderer::Impl {
 
     VkCommandPool cmdPool = VK_NULL_HANDLE;
     VkCommandBuffer cmd = VK_NULL_HANDLE;
+    // 帧环：每个槽一套命令缓冲 + fence（提交后不 waitIdle，槽位复用时才等自己的 fence）
+    VkCommandBuffer cmds[VK_RING] = {};
+    VkFence fences[VK_RING] = {};
+    bool fencePending[VK_RING] = {false, false, false};
+    uint32_t slot = 0;
+    // 该槽延迟销毁的纹理：本槽提交完成（fence 触发）后才能真正释放
+    std::vector<uint32_t> slotDestroy[VK_RING];
 
     VkShaderModule vsMod = VK_NULL_HANDLE, fsMod = VK_NULL_HANDLE;
     VkPipelineLayout pipeLayout = VK_NULL_HANDLE;
@@ -250,7 +260,8 @@ struct VkRenderer::Impl {
     VkBuffer vb = VK_NULL_HANDLE;
     VkDeviceMemory vbMem = VK_NULL_HANDLE;
     float* vbPtr = nullptr;
-    size_t vbBytes = 0;
+    size_t vbBytes = 0;            // 单槽顶点区字节数（缓冲总量 = vbBytes * VK_RING）
+    VkDeviceSize vbSlotOff = 0;    // 当前槽在顶点缓冲里的字节偏移
     // 常量顶点属性：loc5(alpha 乘数)/loc6(colorMultiplier)/loc7(colorOffset)。
     // 用 stride=0 的绑定给所有顶点同一组值；loc1 里已经携带逐顶点 alpha。
     VkBuffer attrBuf = VK_NULL_HANDLE;
@@ -259,7 +270,9 @@ struct VkRenderer::Impl {
 
     VkBuffer ubo = VK_NULL_HANDLE;
     VkDeviceMemory uboMem = VK_NULL_HANDLE;
-    float* uboPtr = nullptr;
+    float* uboPtr = nullptr;       // 当前槽的 UBO 区（随槽位切换）
+    float* uboBase = nullptr;      // 整块映射起点
+    uint32_t uboStride = 256;      // 每槽步长（>= minUniformBufferOffsetAlignment）
 
     std::vector<TexSlot> textures;
     // 延迟销毁队列：glTexImage2D 同名重建时先排队，等本帧命令缓冲提交完再真正释放。
@@ -410,6 +423,10 @@ static PFN_vkEndCommandBuffer g_endCB;
 static PFN_vkResetCommandBuffer g_resetCB;
 static PFN_vkQueueSubmit g_submit;
 static PFN_vkQueueWaitIdle g_waitIdle;
+static PFN_vkCreateFence g_createFence;
+static PFN_vkWaitForFences g_waitFences;
+static PFN_vkResetFences g_resetFences;
+static PFN_vkDestroyFence g_destroyFence;
 static PFN_vkAcquireNextImageKHR g_acquire;
 static PFN_vkQueuePresentKHR g_present;
 static PFN_vkCreateShaderModule g_createShader;
@@ -657,6 +674,10 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     g_resetCB = (PFN_vkResetCommandBuffer)o.gipa(o.inst, "vkResetCommandBuffer");
     g_submit = (PFN_vkQueueSubmit)o.gipa(o.inst, "vkQueueSubmit");
     g_waitIdle = (PFN_vkQueueWaitIdle)o.gipa(o.inst, "vkQueueWaitIdle");
+    g_createFence = (PFN_vkCreateFence)o.gipa(o.inst, "vkCreateFence");
+    g_waitFences = (PFN_vkWaitForFences)o.gipa(o.inst, "vkWaitForFences");
+    g_resetFences = (PFN_vkResetFences)o.gipa(o.inst, "vkResetFences");
+    g_destroyFence = (PFN_vkDestroyFence)o.gipa(o.inst, "vkDestroyFence");
     g_acquire = (PFN_vkAcquireNextImageKHR)o.gipa(o.inst, "vkAcquireNextImageKHR");
     g_present = (PFN_vkQueuePresentKHR)o.gipa(o.inst, "vkQueuePresentKHR");
     g_createShader = (PFN_vkCreateShaderModule)o.gipa(o.inst, "vkCreateShaderModule");
@@ -946,13 +967,22 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     VkCommandBufferAllocateInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     cbi.commandPool = o.cmdPool;
     cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cbi.commandBufferCount = 1;
-    allocCB(o.dev, &cbi, &o.cmd);
+    cbi.commandBufferCount = VK_RING;
+    allocCB(o.dev, &cbi, o.cmds);
+    o.cmd = o.cmds[0];
+    // 每个槽一个 fence：初始未触发（还没有任何提交），AcquireSlot 里只有"挂着提交"时才等
+    for (uint32_t i = 0; i < VK_RING; i++) {
+        VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        if (!g_createFence || g_createFence(o.dev, &fci, nullptr, &o.fences[i]) != VK_SUCCESS)
+            fprintf(stderr, "[vk] ring fence create failed slot=%u\n", i);
+    }
+    fprintf(stderr, "[vk] ring slots=%d vbSlotBytes=%zu uboStride=%u\n",
+            VK_RING, (size_t)MAX_SPRITES * 6 * 15 * sizeof(float), o.uboStride);
 
-    // descriptor layout 按实际 SPIR-V：binding0 = UBO，binding1 = 贴图采样器
+    // descriptor layout 按实际 SPIR-V：binding0 = UBO（动态偏移，按帧环槽位），binding1 = 贴图采样器
     VkDescriptorSetLayoutBinding dslb[2]{};
     dslb[0].binding = 0;
-    dslb[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    dslb[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     dslb[0].descriptorCount = 1;
     dslb[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     dslb[1].binding = 1;
@@ -967,7 +997,7 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     VkDescriptorPoolSize dps[2]{};
     dps[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     dps[0].descriptorCount = MAX_TEXTURES * 8;
-    dps[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    dps[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     dps[1].descriptorCount = MAX_TEXTURES * 8;
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     // FREE 位：纹理销毁/重建时要把它占用的 set 还回池里。没有这个位就只能泄漏，
@@ -985,7 +1015,7 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
         VkDescriptorPoolSize vps[2]{};
         vps[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         vps[0].descriptorCount = PKT_SET_MAX;
-        vps[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        vps[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         vps[1].descriptorCount = PKT_SET_MAX;
         VkDescriptorPoolCreateInfo vpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         vpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
@@ -1007,9 +1037,10 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     smpci.maxLod = 1.0f;
     g_createSampler(o.dev, &smpci, nullptr, &o.sampler);
 
-    // ubo
+    // ubo：按帧环槽位分块，每槽 256B（256 一定满足 minUniformBufferOffsetAlignment）
+    o.uboStride = 256;
     VkBufferCreateInfo ubci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    ubci.size = 256;
+    ubci.size = (VkDeviceSize)o.uboStride * VK_RING;
     ubci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
     g_createBuf(o.dev, &ubci, nullptr, &o.ubo);
     VkMemoryRequirements umr{};
@@ -1022,8 +1053,9 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     g_bindBufMem(o.dev, o.ubo, o.uboMem, 0);
     void* up = nullptr;
     g_mapMem(o.dev, o.uboMem, 0, umr.size, 0, &up);
-    o.uboPtr = (float*)up;
-    memset(o.uboPtr, 0, 256);
+    o.uboBase = (float*)up;
+    o.uboPtr = o.uboBase;
+    memset(o.uboBase, 0, (size_t)o.uboStride * VK_RING);
 
     // shaders
     std::string base = ExeDirLocal();
@@ -1191,10 +1223,10 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
         return false;
     }
 
-    // vertex buffer
+    // vertex buffer：按帧环槽位分区，每槽 MAX_SPRITES 个四边形
     o.vbBytes = (size_t)MAX_SPRITES * 6 * 15 * sizeof(float);
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bci.size = o.vbBytes;
+    bci.size = (VkDeviceSize)o.vbBytes * VK_RING;
     bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
     g_createBuf(o.dev, &bci, nullptr, &o.vb);
     VkMemoryRequirements vmr{};
@@ -1336,6 +1368,12 @@ void VkRenderer::Shutdown() {
         if (o.uboMem) o.freeMemory(o.dev, o.uboMem, nullptr);
     }
     if (o.destroyCmdPool) o.destroyCmdPool(o.dev, o.cmdPool, nullptr);
+    if (g_destroyFence) {
+        for (uint32_t i = 0; i < VK_RING; i++) {
+            if (o.fences[i]) g_destroyFence(o.dev, o.fences[i], nullptr);
+            o.fences[i] = VK_NULL_HANDLE;
+        }
+    }
     if (o.destroyDevice) o.destroyDevice(o.dev, nullptr);
     if (o.destroyInstance) o.destroyInstance(o.inst, nullptr);
     o.dev = VK_NULL_HANDLE;
@@ -1532,7 +1570,7 @@ uint32_t VkRenderer::CreateTextureOnce(int w, int h, const unsigned char* rgba) 
         wds[0].dstSet = t.set;
         wds[0].dstBinding = 0;
         wds[0].descriptorCount = 1;
-        wds[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        wds[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         wds[0].pBufferInfo = &dbi;
         wds[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         wds[1].dstSet = t.set;
@@ -2993,7 +3031,7 @@ void* VkRenderer::PktSetFor(uint32_t texId, const PktSamplerState& ss) {
     wds[0].dstSet = set;
     wds[0].dstBinding = 0;
     wds[0].descriptorCount = 1;
-    wds[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    wds[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     wds[0].pBufferInfo = &dbi;
     wds[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     wds[1].dstSet = set;
@@ -3182,6 +3220,8 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
         return false;
     }
 
+    // 帧环：取当前槽（等它上一次提交完成）
+    AcquireSlot();
     g_resetCB(o.cmd, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     VkResult br = g_beginCB(o.cmd, &bi);
@@ -3381,7 +3421,9 @@ bool VkRenderer::PktDraw(const PktDrawDesc& d) {
     int effDepthWrite = (tv.depthWrite == vktuning::KEEP) ? d.state.depthWrite : (tv.depthWrite == vktuning::ON);
     int effStencil = (tv.stencilTest == vktuning::KEEP) ? d.state.stencilTest : (tv.stencilTest == vktuning::ON);
     g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-    g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeLayout, 0, 1, &set, 0, nullptr);
+    // binding0 是动态 UBO：传当前帧环槽位的偏移
+    uint32_t pktDynOff = (uint32_t)o.slot * o.uboStride;
+    g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeLayout, 0, 1, &set, 1, &pktDynOff);
     VkBuffer vbufs[2] = {o.pktVb, o.attrBuf};
     VkDeviceSize voffs[2] = {voff, 0};
     g_bindVB(o.cmd, 0, 2, vbufs, voffs);
@@ -3422,6 +3464,8 @@ void VkRenderer::PktEndTarget() {
     si.pCommandBuffers = &o.cmd;
     g_submit(o.queue, 1, &si, VK_NULL_HANDLE);
     g_waitIdle(o.queue);
+    // 帧环：packet 路径本身全同步，提交完直接轮转到下一个槽
+    o.slot = (o.slot + 1) % VK_RING;
 
     // 离屏目标按批处理同样的口径记录"最后一个真正写过几何的目标"（合成选源用）
     if (t >= 1000 && draws > 0) o.lastGeomTarget = t;
@@ -3616,7 +3660,7 @@ uint32_t VkRenderer::CreateRenderTarget(int w, int h) {
     wds[0].dstSet = t.set;
     wds[0].dstBinding = 0;
     wds[0].descriptorCount = 1;
-    wds[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    wds[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     wds[0].pBufferInfo = &dbi;
     wds[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     wds[1].dstSet = t.set;
@@ -3642,6 +3686,8 @@ void VkRenderer::DestroyRenderTarget(uint32_t id) {
     if (ti >= o.targets.size()) return;
     RenderTarget& t = o.targets[ti];
     if (!t.used) return;
+    // 帧环流水下可能有提交还在用这张图：销毁前彻底等干净（目标销毁很少发生）
+    if (g_waitIdle) g_waitIdle(o.queue);
     fprintf(stderr, "[vk] rt del id=%u %dx%d f=%llu lastWrite=%llu\n", id, t.w, t.h,
             (unsigned long long)g_drawFrame, (unsigned long long)t.lastWriteFrame);
     PktDropSets(id);   // 变体 descriptor set 指向这张图，先还回池里
@@ -3928,6 +3974,37 @@ bool VkRenderer::MaybeDumpTextures(uint64_t frameHint) {
     return dumped > 0;
 }
 
+// 帧环取槽：等该槽上一次提交的 fence（保证命令缓冲/顶点区/UBO 区可安全复用），
+// 并真正释放该槽延迟销毁的纹理。fence 不可用时退回 waitIdle（保守但不流水）。
+void VkRenderer::AcquireSlot() {
+    Impl& o = *impl;
+    WaitSlotFence();
+    const uint32_t s = o.slot;
+    if (!o.slotDestroy[s].empty()) {
+        std::vector<uint32_t> ids;
+        ids.swap(o.slotDestroy[s]);
+        for (uint32_t id : ids) DestroyTextureNow(id);
+    }
+    o.cmd = o.cmds[s];
+    o.uboPtr = o.uboBase + (size_t)s * (o.uboStride / sizeof(float));
+    o.vbSlotOff = (VkDeviceSize)s * o.vbBytes;
+}
+
+void VkRenderer::WaitSlotFence() {
+    Impl& o = *impl;
+    const uint32_t s = o.slot;
+    if (!o.fencePending[s]) return;
+    const double tw = PerfNowMs();
+    if (g_waitFences && g_resetFences && o.fences[s] != VK_NULL_HANDLE) {
+        g_waitFences(o.dev, 1, &o.fences[s], VK_TRUE, UINT64_MAX);
+        g_resetFences(o.dev, 1, &o.fences[s]);
+    } else if (g_waitIdle) {
+        g_waitIdle(o.queue);
+    }
+    o.fencePending[s] = false;
+    if (PerfOn()) g_perf.waitMs += PerfNowMs() - tw;
+}
+
 void VkRenderer::EndFrame() {
     Impl& o = *impl;
     const double perfT0 = PerfNowMs();
@@ -3958,7 +4035,9 @@ void VkRenderer::EndFrame() {
         g_bbOpen = 0;
     }
 
-    float* dst = o.vbPtr;
+    // 帧环：换到下一个槽位录制（等该槽上一次提交的 fence，UBO/顶点区随槽位切换）
+    AcquireSlot();
+    float* dst = o.vbPtr + (size_t)(o.vbSlotOff / sizeof(float));
     // id = 本段采样源的批次号（1..N 贴图，1000+ 离屏槽位）：接自定义管线时要按它取 view/sampler
     struct DrawRange {
         VkDescriptorSet set;
@@ -4180,24 +4259,24 @@ void VkRenderer::EndFrame() {
         }
         if (DiagOn() && (s_frames == 1 || s_frames % 30 == 0 || o.currentTarget == 0)) {
             float first[4] = {0, 0, 0, 0};
-            if (totalVerts > 0) memcpy(first, o.vbPtr, sizeof(first));
+            if (totalVerts > 0) memcpy(first, dst, sizeof(first));
             fprintf(stderr, "[vk] frame=%llu verts=%zu ranges=%zu target=%u first=(%.1f,%.1f,%.2f,%.2f)\n",
                     (unsigned long long)s_frames, totalVerts, ranges.size(), o.currentTarget,
                     first[0], first[1], first[2], first[3]);
             if (o.currentTarget == 0 && totalVerts >= 6) {
                 fprintf(stderr, "[vk] v6=(%.1f,%.1f,%.3f,%.3f) (%.1f,%.1f,%.3f,%.3f) (%.1f,%.1f,%.3f,%.3f) | (%.1f,%.1f,%.3f,%.3f) (%.1f,%.1f,%.3f,%.3f) (%.1f,%.1f,%.3f,%.3f)\n",
-                        o.vbPtr[0], o.vbPtr[1], o.vbPtr[13], o.vbPtr[14],
-                        o.vbPtr[15], o.vbPtr[16], o.vbPtr[28], o.vbPtr[29],
-                        o.vbPtr[30], o.vbPtr[31], o.vbPtr[43], o.vbPtr[44],
-                        o.vbPtr[45], o.vbPtr[46], o.vbPtr[58], o.vbPtr[59],
-                        o.vbPtr[60], o.vbPtr[61], o.vbPtr[73], o.vbPtr[74],
-                        o.vbPtr[75], o.vbPtr[76], o.vbPtr[88], o.vbPtr[89]);
+                        dst[0], dst[1], dst[13], dst[14],
+                        dst[15], dst[16], dst[28], dst[29],
+                        dst[30], dst[31], dst[43], dst[44],
+                        dst[45], dst[46], dst[58], dst[59],
+                        dst[60], dst[61], dst[73], dst[74],
+                        dst[75], dst[76], dst[88], dst[89]);
                 // 第二个四边形（顶点 6..11）：上屏合成有两个 range，只打前 6 个顶点会漏掉主体
                 if (totalVerts >= 12) {
                     fprintf(stderr, "[vk] v6b=(%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f) | (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f)\n",
-                            o.vbPtr[90], o.vbPtr[91], o.vbPtr[105], o.vbPtr[106],
-                            o.vbPtr[120], o.vbPtr[121], o.vbPtr[135], o.vbPtr[136],
-                            o.vbPtr[150], o.vbPtr[151], o.vbPtr[165], o.vbPtr[166]);
+                            dst[90], dst[91], dst[105], dst[106],
+                            dst[120], dst[121], dst[135], dst[136],
+                            dst[150], dst[151], dst[165], dst[166]);
                 }
             }
         }
@@ -4237,6 +4316,15 @@ void VkRenderer::EndFrame() {
         fprintf(stderr, "[vk] begin command buffer failed: %d\n", (int)br);
         o.frameOpen = false;
         return;
+    }
+    // 跨提交依赖：本笔会采样/覆盖上一笔刚写过的目标。帧环不再每笔 waitIdle，
+    // 用一条队列级全屏障把"前一笔写完 → 本笔读/写"的顺序和可见性钉死。
+    {
+        VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        g_cmdBarrier(o.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                     0, 1, &mb, 0, nullptr, 0, nullptr);
     }
     VkClearValue cv{};
     if (clearZero) {
@@ -4343,7 +4431,7 @@ void VkRenderer::EndFrame() {
         }
         g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeline);
         VkBuffer vbufs[2] = {o.vb, o.attrBuf};
-        VkDeviceSize voffs[2] = {0, 0};
+        VkDeviceSize voffs[2] = {o.vbSlotOff, 0};
         g_bindVB(o.cmd, 0, 2, vbufs, voffs);
         // 全新的一次提交：复位每个 program 的动态 UBO 槽位计数（每笔一个槽位）
         lime::gl_shader_reset_uniform_slots();
@@ -4392,8 +4480,8 @@ void VkRenderer::EndFrame() {
                     }
                     float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
                     float a0 = 0, cm[4] = {0, 0, 0, 0}, cf[4] = {0, 0, 0, 0};
-                    if (r.count > 0 && o.vbPtr) {
-                        const float* vp = o.vbPtr + r.first * 15;
+                    if (r.count > 0 && dst) {
+                        const float* vp = dst + r.first * 15;
                         a0 = vp[4];
                         for (int k = 0; k < 4; k++) { cm[k] = vp[5 + k]; cf[k] = vp[9 + k]; }
                         x0 = x1 = vp[0];
@@ -4564,7 +4652,9 @@ void VkRenderer::EndFrame() {
             boundLayout = o.pipeLayout;
             // 固定管线用正常（y 向下）视口：上一笔 progpipe 上屏笔可能刚把它切成负高度
             if (o.currentTarget == 0) g_setViewport(o.cmd, 0, 1, &dynVp);
-            g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeLayout, 0, 1, &r.set, 0, nullptr);
+            // binding0 是动态 UBO：传当前帧环槽位的偏移
+            uint32_t fbDynOff = (uint32_t)o.slot * o.uboStride;
+            g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeLayout, 0, 1, &r.set, 1, &fbDynOff);
             g_cmdDraw(o.cmd, (uint32_t)r.count, 1, (uint32_t)r.first, 0);
             if (PerfOn()) { g_perf.dsBinds++; g_perf.draws++; }
         }
@@ -4635,18 +4725,20 @@ void VkRenderer::EndFrame() {
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
     si.pCommandBuffers = &o.cmd;
-    g_submit(o.queue, 1, &si, VK_NULL_HANDLE);
-    {
-        double tw = PerfNowMs();
-        g_waitIdle(o.queue);
-        if (PerfOn()) { g_perf.waitMs += PerfNowMs() - tw; g_perf.submits++; }
-    }
+    // 帧环：提交后不再 waitIdle，挂该槽的 fence；槽位下一次复用时才等它。
+    VkFence submitFence = o.fences[o.slot];
+    g_submit(o.queue, 1, &si, submitFence);
+    if (PerfOn()) g_perf.submits++;
+    if (submitFence != VK_NULL_HANDLE) o.fencePending[o.slot] = true;
 
-    // 本帧命令缓冲已提交：现在才真正销毁被替换的旧纹理，保证本帧早先记录的
-    // FrameSeg 仍采样到它们创建时的内容（避免槽位 id 复用造成贴图串层）。
+    // 读回（stat/转储）必须等 GPU 完成：只有这两条取证路径会把 waitIdle 加回来。
+    if (doStat) WaitSlotFence();
+
+    // 本帧命令缓冲已提交：被替换的旧纹理挂到该槽的延迟销毁队列，
+    // 等这个槽下一次被取用（fence 已触发，本笔提交确定完成）才真正释放。
     if (!o.pendingTexDestroy.empty()) {
         for (size_t pi = 0; pi < o.pendingTexDestroy.size(); pi++)
-            DestroyTextureNow(o.pendingTexDestroy[pi]);
+            o.slotDestroy[o.slot].push_back(o.pendingTexDestroy[pi]);
         o.pendingTexDestroy.clear();
     }
 
@@ -4734,6 +4826,9 @@ void VkRenderer::EndFrame() {
             uint64_t nowMs = (uint64_t)vkplat::TicksMs();
             bool resizing = (nowMs - o.lastResizeTick) < 400;
             VkResult pr = VK_SUCCESS;
+            // present 之前必须等本次提交执行完（没有 render-finished 信号量，
+            // 用该槽的 fence 等效保证交换链图内容完整）
+            WaitSlotFence();
             if (sizeOK) {
                 o.sizeMismatchSince = 0;
                 VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
@@ -4793,8 +4888,8 @@ void VkRenderer::EndFrame() {
         }
     }
 
-    // 取证转储（批处理路径；packet 路径在 PktEndTarget 里触发）：提交+waitIdle 之后读回。
-    // 帧号口径与 trace 的 f= 一致：packet 模式用 frameGen，批处理才用 g_drawFrame。
+    // 取证转储（批处理路径；packet 路径在 PktEndTarget 里触发）：要先等本笔执行完才能读回。
+    if (TexDumpConfig().on) WaitSlotFence();
     MaybeDumpTextures(lime::pkt::ExecActive() ? (uint64_t)lime::pkt::SnapshotFrameGen()
                                               : (uint64_t)g_drawFrame);
 
@@ -4805,6 +4900,8 @@ void VkRenderer::EndFrame() {
         PerfFlushIfDue();
     }
 
+    // 本槽用完了：下一笔 EndFrame 从下一个槽开录（真正的流水来自这里）
+    o.slot = (o.slot + 1) % VK_RING;
     o.frameOpen = false;
     g_bbLastTex = 0;
     for (auto& t : o.textures) { t.verts.clear(); t.progs.clear(); }
