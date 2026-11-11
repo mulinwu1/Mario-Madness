@@ -125,7 +125,7 @@ jobs:
               -DBUILD_SHARED_LIBS=OFF \
               -DENABLE_GLSLANG_BINARIES=OFF \
               -DENABLE_HLSL=OFF \
-              -DENABLE_OPT=ON \
+              -DENABLE_OPT=OFF \
               -DCMAKE_INSTALL_PREFIX="$PWD/glslang-android"
             cmake --build glslang-build -j"$(nproc)"
             cmake --install glslang-build
