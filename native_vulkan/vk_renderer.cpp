@@ -250,6 +250,25 @@ struct VkRenderer::Impl {
     // 该槽延迟销毁的纹理：本槽提交完成（fence 触发）后才能真正释放
     std::vector<uint32_t> slotDestroy[VK_RING];
 
+    // Phase 0 取证（VK_PASSSTAT=1，默认关）：每槽 2 个 timestamp query 夹住本笔 pass，
+    // 槽位 fence 触发后再读回，所以测量本身不引入等待。默认全零 = 零开销。
+    bool passStat = false;
+    double tsPeriodNs = 1.0;      // 每 tick 的纳秒数（VkPhysicalDeviceLimits.timestampPeriod）
+    VkQueryPool passQueries[VK_RING] = {};
+    bool pendValid[VK_RING] = {};
+    uint64_t pendFrame[VK_RING] = {};
+    uint32_t pendTarget[VK_RING] = {};
+    uint32_t pendExtW[VK_RING] = {}, pendExtH[VK_RING] = {};
+    uint32_t pendRanges[VK_RING] = {};
+    uint32_t pendVerts[VK_RING] = {};
+    uint8_t pendLoad[VK_RING] = {};   // 0=LOAD 1=CLEARP 2=CLEAR0 3=BB
+    uint32_t pendProgMask[VK_RING] = {};  // 本笔用到的自定义 program 位掩码（prog < 32）
+
+    // 雪花取证（VK_SNOWWATCH=1）：每帧回读后缓冲算高频噪声分，超过阈值就自动转储
+    // 当帧所有被采样纹理/目标（配合 VK_DUMP_TEX=<dir>），把"整屏白噪声"钉到具体来源。
+    bool snowWatch = false;
+    bool snowDumpReq = false;
+
     VkShaderModule vsMod = VK_NULL_HANDLE, fsMod = VK_NULL_HANDLE;
     VkPipelineLayout pipeLayout = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
@@ -427,6 +446,12 @@ static PFN_vkCreateFence g_createFence;
 static PFN_vkWaitForFences g_waitFences;
 static PFN_vkResetFences g_resetFences;
 static PFN_vkDestroyFence g_destroyFence;
+// Phase 0：pass GPU 时间戳（VK_PASSSTAT=1 才用）
+static PFN_vkCreateQueryPool g_createQP;
+static PFN_vkDestroyQueryPool g_destroyQP;
+static PFN_vkCmdResetQueryPool g_resetQP;
+static PFN_vkCmdWriteTimestamp g_writeTS;
+static PFN_vkGetQueryPoolResults g_getQP;
 static PFN_vkAcquireNextImageKHR g_acquire;
 static PFN_vkQueuePresentKHR g_present;
 static PFN_vkCreateShaderModule g_createShader;
@@ -678,6 +703,11 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     g_waitFences = (PFN_vkWaitForFences)o.gipa(o.inst, "vkWaitForFences");
     g_resetFences = (PFN_vkResetFences)o.gipa(o.inst, "vkResetFences");
     g_destroyFence = (PFN_vkDestroyFence)o.gipa(o.inst, "vkDestroyFence");
+    g_createQP = (PFN_vkCreateQueryPool)o.gipa(o.inst, "vkCreateQueryPool");
+    g_destroyQP = (PFN_vkDestroyQueryPool)o.gipa(o.inst, "vkDestroyQueryPool");
+    g_resetQP = (PFN_vkCmdResetQueryPool)o.gipa(o.inst, "vkCmdResetQueryPool");
+    g_writeTS = (PFN_vkCmdWriteTimestamp)o.gipa(o.inst, "vkCmdWriteTimestamp");
+    g_getQP = (PFN_vkGetQueryPoolResults)o.gipa(o.inst, "vkGetQueryPoolResults");
     g_acquire = (PFN_vkAcquireNextImageKHR)o.gipa(o.inst, "vkAcquireNextImageKHR");
     g_present = (PFN_vkQueuePresentKHR)o.gipa(o.inst, "vkQueuePresentKHR");
     g_createShader = (PFN_vkCreateShaderModule)o.gipa(o.inst, "vkCreateShaderModule");
@@ -745,6 +775,13 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
         getProps(o.phys, &sp);
         fprintf(stderr, "[vk] device=%s type=%s api=%u.%u.%u\n", sp.deviceName, DeviceTypeName(sp.deviceType),
                 VK_VERSION_MAJOR(sp.apiVersion), VK_VERSION_MINOR(sp.apiVersion), VK_VERSION_PATCH(sp.apiVersion));
+        // Phase 0：timestampPeriod 单位 ns/tick；0 视为不可用，退回 1 只保证不除零
+        o.tsPeriodNs = sp.limits.timestampPeriod > 0.0f ? (double)sp.limits.timestampPeriod : 1.0;
+        const char* ps = getenv("VK_PASSSTAT");
+        o.passStat = (ps && ps[0] == '1') && g_createQP && g_resetQP && g_writeTS && g_getQP;
+        if (ps && ps[0] == '1')
+            fprintf(stderr, "[vk] passstat on=%d period=%.3fns bits64=1\n",
+                    o.passStat ? 1 : 0, o.tsPeriodNs);
     }
 
     float prio = 1.0f;
@@ -932,7 +969,9 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     {
         const char* v = getenv("VK_BBSTAT");
         const char* d = getenv("VK_DUMP_PRESENTS");
-        o.statWanted = (v && v[0] == '1') || (d && d[0] == '1');
+        const char* sn = getenv("VK_SNOWWATCH");
+        o.snowWatch = (sn && sn[0] == '1');
+        o.statWanted = (v && v[0] == '1') || (d && d[0] == '1') || o.snowWatch;
         if (o.statWanted || o.ckEnabled) {
             // 色键扫描要覆盖最大窗口（全屏段 1920x1080），按屏幕尺寸分配。
             size_t needW = (size_t)o.extent.width;
@@ -975,6 +1014,18 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
         VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         if (!g_createFence || g_createFence(o.dev, &fci, nullptr, &o.fences[i]) != VK_SUCCESS)
             fprintf(stderr, "[vk] ring fence create failed slot=%u\n", i);
+    }
+    // Phase 0：每槽一个 2-query 时间戳池（pass 前/后各写一次）
+    if (o.passStat) {
+        for (uint32_t i = 0; i < VK_RING; i++) {
+            VkQueryPoolCreateInfo qpi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+            qpi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            qpi.queryCount = 2;
+            if (g_createQP(o.dev, &qpi, nullptr, &o.passQueries[i]) != VK_SUCCESS) {
+                fprintf(stderr, "[vk] passstat query pool create failed slot=%u\n", i);
+                o.passQueries[i] = VK_NULL_HANDLE;
+            }
+        }
     }
     fprintf(stderr, "[vk] ring slots=%d vbSlotBytes=%zu uboStride=%u\n",
             VK_RING, (size_t)MAX_SPRITES * 6 * 15 * sizeof(float), o.uboStride);
@@ -1372,6 +1423,12 @@ void VkRenderer::Shutdown() {
         for (uint32_t i = 0; i < VK_RING; i++) {
             if (o.fences[i]) g_destroyFence(o.dev, o.fences[i], nullptr);
             o.fences[i] = VK_NULL_HANDLE;
+        }
+    }
+    if (g_destroyQP) {
+        for (uint32_t i = 0; i < VK_RING; i++) {
+            if (o.passQueries[i]) g_destroyQP(o.dev, o.passQueries[i], nullptr);
+            o.passQueries[i] = VK_NULL_HANDLE;
         }
     }
     if (o.destroyDevice) o.destroyDevice(o.dev, nullptr);
@@ -3714,6 +3771,8 @@ struct TexDumpCfg {
     double atSec = -1.0;    // VK_DUMP_AT_SEC：启动后按墙钟秒数触发（优先于 frame）
     std::vector<uint32_t> ids;  // VK_DUMP_IDS=5,6,7,13（显式清单，绕过自动判定）
     bool idsSet = false;
+    std::string trigger;  // VK_DUMP_TRIGGER：该文件出现时才转（手动触发）
+    bool snowAuto = false;  // VK_SNOWWATCH：只有噪声探测命中时才转（自动抓雪花）
 };
 
 static TexDumpCfg& TexDumpConfig () {
@@ -3733,6 +3792,14 @@ static TexDumpCfg& TexDumpConfig () {
             const char* a = getenv("VK_DUMP_AT_SEC");
             if (a && a[0]) {
                 c.atSec = atof(a);
+            }
+            const char* tg = getenv("VK_DUMP_TRIGGER");
+            if (tg && tg[0]) {
+                c.trigger = tg;
+            }
+            const char* sw = getenv("VK_SNOWWATCH");
+            if (sw && sw[0] == '1') {
+                c.snowAuto = true;
             }
             const char* s = getenv("VK_DUMP_IDS");
             if (s && s[0]) {
@@ -3772,7 +3839,19 @@ bool VkRenderer::MaybeDumpTextures(uint64_t frameHint) {
     // 命中口径：VK_DUMP_AT_SEC 优先（按墙钟秒数，避免加载/菜单帧率过高提前触发）；
     // 否则给 VK_DUMP_FRAME 就等"当前帧 >= 目标帧"的第一次收尾；只给 VK_DUMP_IDS
     // 就在第一次收尾直接转；都没给就第一帧收尾转。
-    if (cfg.atSec >= 0.0) {
+    // VK_DUMP_TRIGGER=<文件>：文件存在才转（外部手动触发，便于"雪花出现时按一下截图"）。
+    // VK_SNOWWATCH=1：只有噪声探测命中（o.snowDumpReq）才转——自动抓雪花帧。
+    if (cfg.snowAuto) {
+        if (!o.snowDumpReq) return false;
+    } else if (!cfg.trigger.empty()) {
+#if defined(_WIN32)
+        if (GetFileAttributesA(cfg.trigger.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+#else
+        FILE* tf = fopen(cfg.trigger.c_str(), "rb");
+        if (!tf) return false;
+        fclose(tf);
+#endif
+    } else if (cfg.atSec >= 0.0) {
         static const auto t0 = std::chrono::steady_clock::now();
         double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         if (el < cfg.atSec) return false;
@@ -4001,6 +4080,27 @@ void VkRenderer::WaitSlotFence() {
     } else if (g_waitIdle) {
         g_waitIdle(o.queue);
     }
+    // Phase 0（VK_PASSSTAT=1）：fence 触发 = 本笔 pass 真正跑完，时间戳可读。
+    // 在这里读回，测量本身不额外引入等待。顺带打出 pass 图元数据（目标/尺寸/负载模式/图元数）。
+    if (o.passStat && o.pendValid[s]) {
+        o.pendValid[s] = false;
+        if (o.passQueries[s] != VK_NULL_HANDLE && g_getQP) {
+            uint64_t ts[2] = {0, 0};
+            VkResult qr = g_getQP(o.dev, o.passQueries[s], 0, 2, sizeof(ts), ts,
+                                  sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+            static const char* kLoad[4] = {"LOAD", "CLEARP", "CLEAR0", "BB"};
+            if (qr == VK_SUCCESS) {
+                double ms = (double)(ts[1] - ts[0]) * o.tsPeriodNs / 1e6;
+                fprintf(stderr, "[pass] f=%llu tgt=%u ext=%ux%u load=%s ranges=%u verts=%u progs=0x%x ms=%.3f\n",
+                        (unsigned long long)o.pendFrame[s], o.pendTarget[s],
+                        o.pendExtW[s], o.pendExtH[s], kLoad[o.pendLoad[s] & 3],
+                        o.pendRanges[s], o.pendVerts[s], o.pendProgMask[s], ms);
+            } else {
+                fprintf(stderr, "[pass] f=%llu tgt=%u result=%d\n",
+                        (unsigned long long)o.pendFrame[s], o.pendTarget[s], (int)qr);
+            }
+        }
+    }
     o.fencePending[s] = false;
     if (PerfOn()) g_perf.waitMs += PerfNowMs() - tw;
 }
@@ -4201,19 +4301,21 @@ void VkRenderer::EndFrame() {
         // 每次提交一条不门控的 summary（含离屏目标），用于把黑帧对齐到具体提交：
         // delsample = 距该目标上次真正写入的帧数（-1 = 从未写过）
         static uint64_t s_submitLog = 0;
-        if (DiagOn() && s_submitLog < 30000) {
-            long long delsample = -1;
-            uint64_t created = 0;
-            if (o.currentTarget >= 1000) {
-                uint32_t ti = o.currentTarget - 1000;
-                if (ti < o.targets.size() && o.targets[ti].used) {
-                    created = o.targets[ti].createdFrame;
-                    if (o.targets[ti].lastWriteFrame != 0) {
-                        delsample = (long long)(s_frames - o.targets[ti].lastWriteFrame);
-                    }
-                    if (totalVerts > 0) o.targets[ti].lastWriteFrame = s_frames;
+        // 注意：lastWriteFrame 是首次使用清屏判定的输入，必须无条件维护，
+        // 不能像以前一样塞在 DiagOn 里——否则 VK_DIAG=0 时每个离屏 pass 都会被当成"首次使用"。
+        long long delsample = -1;
+        uint64_t created = 0;
+        if (o.currentTarget >= 1000) {
+            uint32_t ti = o.currentTarget - 1000;
+            if (ti < o.targets.size() && o.targets[ti].used) {
+                created = o.targets[ti].createdFrame;
+                if (o.targets[ti].lastWriteFrame != 0) {
+                    delsample = (long long)(s_frames - o.targets[ti].lastWriteFrame);
                 }
+                if (totalVerts > 0) o.targets[ti].lastWriteFrame = s_frames;
             }
+        }
+        if (DiagOn() && s_submitLog < 30000) {
             char srcs[256] = {0};
             {
                 size_t n = (batchIds.size() < 16) ? batchIds.size() : 16;
@@ -4283,11 +4385,23 @@ void VkRenderer::EndFrame() {
     }
     bool clearZero = false;
     bool clearPendingUse = false;
+    uint32_t progMask = 0;   // Phase 0：本笔用到哪些自定义 program（prog < 32 的位掩码）
     if (o.currentTarget >= 1000) {
         uint32_t ti = o.currentTarget - 1000;
         if (ti < o.targets.size() && o.targets[ti].used) {
             RenderTarget& rt = o.targets[ti];
-            if (rt.clearPending && rt.rpClear && rt.fbClear) {
+            if (!rt.cleared && rt.lastWriteFrame == 0 && rt.rpClear && rt.fbClear) {
+                // 首次使用：GL 驱动会把新建纹理当 0 初始化，Vulkan 不会。
+                // 若首笔走 LOAD，没被精灵覆盖的区域就是显存里的随机噪声（雪花屏）。
+                // 等价 GL 语义：首用强制清成 (0,0,0,0)。
+                fb = rt.fbClear;
+                rp = rt.rpClear;
+                clearZero = true;
+                rt.cleared = true;      // 只清这一次；不标记会导致每次 pass 都清（黑闪/丢内容）
+                rt.clearedFrame = g_drawFrame;
+                if (DiagOn()) fprintf(stderr, "[vk] target first-use clear tgt=%u %dx%d f=%llu\n",
+                        o.currentTarget, rt.w, rt.h, (unsigned long long)g_drawFrame);
+            } else if (rt.clearPending && rt.rpClear && rt.fbClear) {
                 // 游戏这一帧对这个目标发过 glClear（apitrace 实测：原版每帧都清 (0,0,0,0)）：
                 // 走 CLEAR pass，清屏色用它给的 rgba，清完再画，等价于 GL 的整幅替换。
                 fb = rt.fbClear;
@@ -4303,6 +4417,15 @@ void VkRenderer::EndFrame() {
             } else {
                 fb = rt.fb;
                 rp = rt.rp;
+                // 取证：既没清过、也从没被写过，却要 LOAD → Vulkan 下是未定义显存内容
+                if (!rt.cleared && rt.lastWriteFrame == 0) {
+                    static uint64_t s_lb = 0;
+                    if (s_lb < 50) {
+                        fprintf(stderr, "[vk] rt load-before-write tgt=%u %dx%d f=%llu\n",
+                                o.currentTarget, rt.w, rt.h, (unsigned long long)g_drawFrame);
+                        s_lb++;
+                    }
+                }
             }
             ext = {(uint32_t)rt.w, (uint32_t)rt.h};
         }
@@ -4325,6 +4448,11 @@ void VkRenderer::EndFrame() {
         mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
         g_cmdBarrier(o.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                      0, 1, &mb, 0, nullptr, 0, nullptr);
+    }
+    // Phase 0（VK_PASSSTAT=1）：本槽时间戳池复位，pass 起点打第一针（必须在 render pass 之外）
+    if (o.passStat && o.passQueries[o.slot] != VK_NULL_HANDLE) {
+        g_resetQP(o.cmd, o.passQueries[o.slot], 0, 2);
+        g_writeTS(o.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, o.passQueries[o.slot], 0);
     }
     VkClearValue cv{};
     if (clearZero) {
@@ -4639,6 +4767,7 @@ void VkRenderer::EndFrame() {
                         }
                         g_cmdDraw(o.cmd, (uint32_t)r.count, 1, (uint32_t)r.first, 0);
                         if (PerfOn()) { g_perf.dsBinds++; g_perf.draws++; }
+                        if (r.prog < 32) progMask |= (1u << r.prog);
                         s_progDS++;
                         continue;
                     }
@@ -4666,6 +4795,11 @@ void VkRenderer::EndFrame() {
     }
     g_endRP(o.cmd);
 
+    // Phase 0：pass 终点针（BOTTOM_OF_PIPE = pass 命令全部完成时写入）
+    if (o.passStat && o.passQueries[o.slot] != VK_NULL_HANDLE) {
+        g_writeTS(o.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, o.passQueries[o.slot], 1);
+    }
+
     // 取证 VK_BBSTAT=1（默认关）：present 前把后缓冲拷到主机缓冲，供亮度统计。
     // 只在本层 target=0 且有几何时做；barrier 走 PRESENT_SRC -> TRANSFER_SRC -> PRESENT_SRC。
     // 色键扫描：只有窗口带 WS_EX_LAYERED 且距上次扫描 >=120ms 才回读，避免每帧回读。
@@ -4682,7 +4816,10 @@ void VkRenderer::EndFrame() {
             if (nowCk - o.ckLastTick >= 120) { o.ckLastTick = nowCk; ckScan = true; }
         }
     }
-    bool doStat = (o.statBuf != VK_NULL_HANDLE && o.statPtr && o.currentTarget == 0 && totalVerts > 0 &&
+    // 雪花探测也要覆盖"空后缓冲"（verts=0 的 present）：整屏白噪声很可能就是
+    // 一张什么都没画的交换链图被 present 出去，所以 snowWatch 时不受 totalVerts 限制。
+    bool doStat = (o.statBuf != VK_NULL_HANDLE && o.statPtr && o.currentTarget == 0 &&
+                   (totalVerts > 0 || (o.snowWatch && finalPresent)) &&
                    (size_t)o.extent.width * (size_t)o.extent.height * 4 <= o.statBytes) &&
                   (o.statWanted || ckScan);
     if (doStat) {
@@ -4731,6 +4868,19 @@ void VkRenderer::EndFrame() {
     if (PerfOn()) g_perf.submits++;
     if (submitFence != VK_NULL_HANDLE) o.fencePending[o.slot] = true;
 
+    // Phase 0：登记本笔 pass 的元数据，槽位 fence 触发时读回并打 [pass]（含时间戳）
+    if (o.passStat && o.passQueries[o.slot] != VK_NULL_HANDLE) {
+        o.pendValid[o.slot] = true;
+        o.pendFrame[o.slot] = g_drawFrame;
+        o.pendTarget[o.slot] = o.currentTarget;
+        o.pendExtW[o.slot] = ext.width;
+        o.pendExtH[o.slot] = ext.height;
+        o.pendRanges[o.slot] = (uint32_t)ranges.size();
+        o.pendVerts[o.slot] = (uint32_t)totalVerts;
+        o.pendLoad[o.slot] = clearZero ? 2 : (clearPendingUse ? 1 : (o.currentTarget == 0 ? 3 : 0));
+        o.pendProgMask[o.slot] = progMask;
+    }
+
     // 读回（stat/转储）必须等 GPU 完成：只有这两条取证路径会把 waitIdle 加回来。
     if (doStat) WaitSlotFence();
 
@@ -4763,10 +4913,39 @@ void VkRenderer::EndFrame() {
         }
         static uint64_t s_stat = 0;
         s_stat++;
+        const double meanV = cnt ? sum / (double)cnt : 0.0;
+        // 雪花探测：相邻像素亮度差均值（白噪声 ≈ 80+，正常画面通常 < 30）
+        if (o.snowWatch) {
+            const size_t W = (size_t)o.extent.width, H = (size_t)o.extent.height;
+            double hf = 0.0;
+            size_t hn = 0;
+            for (size_t yy = 0; yy + 2 < H; yy += 3) {
+                for (size_t xx = 0; xx + 2 < W; xx += 3) {
+                    size_t i0 = (yy * W + xx) * 4;
+                    size_t i1 = (yy * W + xx + 2) * 4;
+                    int a = ((int)px[i0] + px[i0 + 1] + px[i0 + 2]) / 3;
+                    int b = ((int)px[i1] + px[i1 + 1] + px[i1 + 2]) / 3;
+                    hf += (double)(a > b ? a - b : b - a);
+                    hn++;
+                }
+            }
+            const double score = hn ? hf / (double)hn : 0.0;
+            static uint64_t s_sw = 0;
+            s_sw++;
+            if (!o.snowDumpReq && score > 45.0 && meanV > 70.0) {
+                o.snowDumpReq = true;
+                fprintf(stderr, "[snow] hit n=%llu f=%llu score=%.2f mean=%.2f ext=%zux%zu\n",
+                        (unsigned long long)s_sw, (unsigned long long)g_drawFrame,
+                        score, meanV, W, H);
+            } else if (s_sw <= 20000 && (s_sw % 120) == 0) {
+                fprintf(stderr, "[snow] n=%llu f=%llu score=%.2f mean=%.2f\n",
+                        (unsigned long long)s_sw, (unsigned long long)g_drawFrame, score, meanV);
+            }
+        }
         if (s_stat <= 20000) {
             fprintf(stderr, "[vk] bbstat n=%llu f=%llu mean=%.2f nb=%.2f img=%u load=%d final=%d\n",
                     (unsigned long long)s_stat, (unsigned long long)g_drawFrame,
-                    cnt ? sum / (double)cnt : 0.0, cnt ? 100.0 * (double)nb / (double)cnt : 0.0,
+                    meanV, cnt ? 100.0 * (double)nb / (double)cnt : 0.0,
                     o.frameImageIndex, o.bbLoad ? 1 : 0, finalPresent ? 1 : 0);
         }
         // 取证 VK_DUMP_PRESENTS=1（默认关）：落盘前 24 张交换链图 BMP，供与窗口截图比对
@@ -4810,6 +4989,11 @@ void VkRenderer::EndFrame() {
             // 会在 gl_fbo 里另打一条 [glvk] present），用于把黑帧对齐到交换链图。
             static uint64_t s_pres = 0;
             s_pres++;
+            // Phase 0：视觉帧边界标记（[pass] 行按 f= 归属到这个 p 区间）
+            if (o.passStat) {
+                fprintf(stderr, "[passmark] p=%llu f=%llu\n",
+                        (unsigned long long)s_pres, (unsigned long long)g_drawFrame);
+            }
             if (DiagOn() && s_pres <= 20000) {
                 fprintf(stderr, "[vk] pres n=%llu f=%llu img=%u tex=%u verts=%zu load=%d\n",
                         (unsigned long long)s_pres, (unsigned long long)g_drawFrame,
@@ -4904,6 +5088,11 @@ void VkRenderer::EndFrame() {
     o.slot = (o.slot + 1) % VK_RING;
     o.frameOpen = false;
     g_bbLastTex = 0;
+    // 触发式转储：每个视觉帧重新累积采样清单，避免把整场跑过的几百张纹理都转出来
+    if (TexDumpConfig().on && (TexDumpConfig().snowAuto || !TexDumpConfig().trigger.empty()) &&
+        finalPresent && o.currentTarget == 0) {
+        o.sampled.clear();
+    }
     for (auto& t : o.textures) { t.verts.clear(); t.progs.clear(); }
     for (auto& t : o.targets) { t.verts.clear(); t.progs.clear(); }
     o.segs.clear();
