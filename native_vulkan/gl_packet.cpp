@@ -854,8 +854,13 @@ static bool ExecuteDraw (const vkpkt::WirePacket& w, const vkpkt::DrawRecord& re
         for (int k = 0; k < 4; k++) off[k] = rec.attrs[3].constValue[k];
     }
     float alphaConst = 1.0f;
-    if (rec.attrs[1].kind == vkpkt::ATTR_CONSTANT) alphaConst *= rec.attrs[1].constValue[0];
-    if (rec.attrs[5].kind == vkpkt::ATTR_CONSTANT) alphaConst *= rec.attrs[5].constValue[0];
+    // [vkfix 2026-11-11] 逐顶点 alpha 数组已带最终 alpha（长条实测 loc5 数组 = 0.6），
+    // 此时不能再乘 loc1 常量 alpha——Lime 常把同一个 0.6 同时放进 loc1 常量，
+    // 乘两次会让长条/溅射变成 0.36，看起来更暗更透。只有没有数组时才用常量。
+    if (alphaIdx < 0) {
+        if (rec.attrs[1].kind == vkpkt::ATTR_CONSTANT) alphaConst *= rec.attrs[1].constValue[0];
+        if (rec.attrs[5].kind == vkpkt::ATTR_CONSTANT) alphaConst *= rec.attrs[5].constValue[0];
+    }
     if (alphaIdx < 0) { aMin = aMax = alphaConst; }
 
     std::vector<float> packed((size_t)w.count * 15);
