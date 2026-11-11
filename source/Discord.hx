@@ -1,5 +1,6 @@
 package;
 
+#if desktop
 import Sys.sleep;
 import discord_rpc.DiscordRpc;
 
@@ -101,3 +102,19 @@ class DiscordClient
 		// trace('Discord RPC Updated. Arguments: $details, $state, $smallImageKey, $hasStartTimestamp, $endTimestamp');
 	}
 }
+#else
+// 安卓等非桌面目标：discord_rpc 库不存在，这里给出同签名的空实现，
+// 让 PlayState/MMOptions/TitleState 等处的无条件调用可以直接编译。
+class DiscordClient
+{
+	public function new() {}
+
+	public static function start() {}
+
+	public static function shutdown() {}
+
+	public static function initialize() {}
+
+	public static function changePresence(details:String, state:Null<String>, ?largeImage:String = "icon", ?smallImageKey:String, ?hasStartTimestamp:Bool, ?endTimestamp:Float) {}
+}
+#end
