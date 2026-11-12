@@ -1,4 +1,4 @@
-#include "vk_packet.h"
+﻿#include "vk_packet.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -158,7 +158,8 @@ bool ParseWire (const uint8_t* bytes, uint32_t nbytes, WirePacket* out,
     }
     WirePacket w;
     memcpy(&w, bytes, kWireBytes);
-    if (w.reserved0 != 0 || w.reserved1 != 0 || w.reserved2 != 0 || w.reserved3 != 0) {
+    // offset 60 已改为 texName（老 exe 写 0，新 exe 写主纹理名），不再要求为 0。
+    if (w.reserved0 != 0 || w.reserved1 != 0 || w.reserved2 != 0) {
         if (err) snprintf(err, errCap, "reserved_nonzero");
         return false;
     }
