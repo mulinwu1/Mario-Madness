@@ -289,14 +289,8 @@ import lime.math.Vector2;
 	@:noCompletion private var __vertexConstants:Float32Array;
 
 	#if openfl_vk_pkt
+	// 隐式 clear 事件标记（写进 packet flags.bit0），仅记录用
 	@:noCompletion private var __vkImplicitClear:Bool = false;
-	@:noCompletion private var __vkViewportX:Int = 0;
-	@:noCompletion private var __vkViewportY:Int = 0;
-	@:noCompletion private var __vkViewportW:Int = 0;
-	@:noCompletion private var __vkViewportH:Int = 0;
-	@:noCompletion private static var __vkInited:Bool = false;
-	// 本笔 draw 内状态是否已刷到 GL（隐式 clear 前的 flush 之后，draw 自己的 flush 可跳过）
-	@:noCompletion private var __vkStateFlushed:Bool = false;
 	#end
 
 	@:noCompletion private function new(stage:Stage, contextState:Context3DState = null, stage3D:Stage3D = null)
@@ -539,7 +533,7 @@ import lime.math.Vector2;
 		__setGLScissorTest(false);
 		#if openfl_vk_pkt
 		// 记录点：clear 是事件不是状态；此处 scissor 已被强制关闭、三个 mask 已强制 true
-		__vkEmitClear(VKDrawSink.packClearColor(red, green, blue, alpha), depth, mask & 7, 523, __vkImplicitClear, true);
+		__vkEmitClear(VKDrawSink.packClearColor(red, green, blue, alpha), depth, mask & 7, 523, __vkImplicitClear);
 		#end
 		gl.clear(clearMask);
 	}
@@ -1210,9 +1204,6 @@ import lime.math.Vector2;
 	**/
 	public function drawTriangles(indexBuffer:IndexBuffer3D, firstIndex:Int = 0, numTriangles:Int = -1):Void
 	{
-		#if openfl_vk_pkt
-		__vkStateFlushed = false;
-		#end
 		#if !openfl_disable_display_render
 		if (__state.renderToTexture == null)
 		{
@@ -1235,11 +1226,7 @@ import lime.math.Vector2;
 			#end
 		}
 
-		#if openfl_vk_pkt
-		__vkFlushDraw();
-		#else
 		__flushGL();
-		#end
 		#end
 
 		if (__state.program != null)
@@ -2059,9 +2046,6 @@ import lime.math.Vector2;
 
 	@:noCompletion private function __drawTriangles(firstIndex:Int = 0, count:Int):Void
 	{
-		#if openfl_vk_pkt
-		__vkStateFlushed = false;
-		#end
 		#if !openfl_disable_display_render
 		if (__state.renderToTexture == null)
 		{
@@ -2083,11 +2067,7 @@ import lime.math.Vector2;
 			#end
 		}
 
-		#if openfl_vk_pkt
-		__vkFlushDraw();
-		#else
 		__flushGL();
-		#end
 		#end
 
 		if (__state.program != null)
@@ -2492,22 +2472,10 @@ import lime.math.Vector2;
 				#end
 				var x = __stage3D == null ? 0 : Std.int(__stage3D.x);
 				var y = Std.int((__stage.window.height * __stage.window.scale) - scaledBackBufferHeight - (__stage3D == null ? 0 : __stage3D.y));
-				#if openfl_vk_pkt
-				__vkViewportX = x;
-				__vkViewportY = y;
-				__vkViewportW = scaledBackBufferWidth;
-				__vkViewportH = scaledBackBufferHeight;
-				#end
 				gl.viewport(x, y, scaledBackBufferWidth, scaledBackBufferHeight);
 			}
 			else
 			{
-				#if openfl_vk_pkt
-				__vkViewportX = 0;
-				__vkViewportY = 0;
-				__vkViewportW = backBufferWidth;
-				__vkViewportH = backBufferHeight;
-				#end
 				gl.viewport(0, 0, backBufferWidth, backBufferHeight);
 			}
 		}
@@ -2535,12 +2503,6 @@ import lime.math.Vector2;
 				height = cubeTexture.__size;
 			}
 
-			#if openfl_vk_pkt
-			__vkViewportX = 0;
-			__vkViewportY = 0;
-			__vkViewportW = width;
-			__vkViewportH = height;
-			#end
 			gl.viewport(0, 0, width, height);
 		}
 	}
@@ -2581,15 +2543,6 @@ import lime.math.Vector2;
 	// ------------------------------------------------------------------
 
 	#if openfl_vk_pkt
-	@:noCompletion private static function __vkInit():Void
-	{
-		if (__vkInited) return;
-		__vkInited = true;
-		#if (lime_cffi && !macro)
-		VKPktNative.init();
-		#end
-	}
-
 	@:noCompletion private function __vkFlags(implicitClear:Bool):Int
 	{
 		var flags = 0;
@@ -2636,92 +2589,12 @@ import lime.math.Vector2;
 		return VKDrawSink.packRtParams(false, 0, 0, __state.backBufferEnableDepthAndStencil);
 	}
 
-	@:noCompletion private function __vkScissorRect():Array<Int>
-	{
-		var contextHeight = 0;
-		if (__stage != null && __stage.window != null)
-		{
-			contextHeight = Std.int(__stage.window.height * __stage.window.scale);
-		}
-
-		return VKDrawSink.resolveScissor(__contextState.__enableGLScissorTest, __state.scissorRectangle.x, __state.scissorRectangle.y,
-			__state.scissorRectangle.width, __state.scissorRectangle.height, (__state.renderToTexture == null && __stage3D == null), contextHeight);
-	}
-
-	@:noCompletion private function __vkViewportRect():Array<Int>
-	{
-		return [__vkViewportX, __vkViewportY, __vkViewportW, __vkViewportH];
-	}
-
-	/**
-		当前 program 声明的 sampler 数（native `gl_shader_sampler_count` 同口径）。
-		GLSL：`__glslSamplerNames` 以 uniform location 为下标（稀疏），非 null 项即声明的 sampler；
-		AGAL：sampler 寄存器使用掩码的置位数。未链接的 program 记 0（native 也返回 0）。
-	**/
-	@:noCompletion private function __vkSamplerCount():Int
-	{
-		var program = __state.program;
-		if (program == null || program.__glProgram == null) return 0;
-
-		if (program.__format == Context3DProgramFormat.AGAL)
-		{
-			var mask = program.__agalSamplerUsageMask;
-			var n = 0;
-			while (mask != 0)
-			{
-				if ((mask & 1) != 0) n++;
-				mask >>>= 1;
-			}
-			return n;
-		}
-
-		var names = program.__glslSamplerNames;
-		if (names == null) return 0;
-		var n = 0;
-		var limit = (names.length > 64) ? 64 : names.length;
-		for (i in 0...limit)
-		{
-			if (names[i] != null) n++;
-		}
-		return n;
-	}
-
-	@:noCompletion private function __vkTextureNames():Array<Int>
-	{
-		var names:Array<Int> = [];
-		var textures = __state.textures;
-		if (textures != null)
-		{
-			for (i in 0...textures.length)
-			{
-				var texture = textures[i];
-				if (texture == null || texture.__textureID == null)
-				{
-					names.push(-1);
-				}
-				else
-				{
-					names.push(untyped texture.__textureID.id);
-				}
-			}
-		}
-
-		// 长度以当前 program 的 sampler 列表为准：__state.textures 跨 program 只增不清，
-		// 直接用数组长度会在程序切换后多出上一 program 的尾项（native GatherTex 同口径）。
-		return VKDrawSink.samplerSlots(names, __vkSamplerCount());
-	}
-
-	@:noCompletion private function __vkBlendName():String
-	{
-		return VKDrawSink.blendName(__contextState.__enableGLBlend, __contextState.__glBlendEquation,
-			__getGLBlend(__contextState.blendSourceRGBFactor), __getGLBlend(__contextState.blendDestinationRGBFactor));
-	}
-
 	@:noCompletion private function __vkEmitDraw(kind:Int, indexBuffer:IndexBuffer3D, first:Int, count:Int, srcLine:Int):Void
 	{
-		__vkInit();
+		// 关闭时只花一次静态 Bool 判断：不抓状态、不分配、不碰 native。
+		if (!VKDrawSink.active()) return;
 
-		var s = new VKDrawSnapshot();
+		var s = VKDrawSink.snapshot();
 		s.kind = kind;
 		s.flags = __vkFlags(false);
 		s.program = __vkProgramId();
@@ -2733,73 +2606,36 @@ import lime.math.Vector2;
 		s.count = count;
 		s.rtParams = __vkTargetParams();
 		s.srcLine = srcLine;
-		s.blendName = __vkBlendName();
-		s.depthEnabled = __contextState.__enableGLDepthTest;
-		s.depthWrite = __contextState.depthMask;
-		s.scissor = __vkScissorRect();
-		s.viewport = __vkViewportRect();
-		s.textures = __vkTextureNames();
+		s.clearColor = 0;
+		s.clearDepth = 1.0;
+		s.clearMask = 0;
 
 		VKDrawSink.emit(s);
 	}
 
 	/**
-		clear 记录前把逻辑状态刷到 GL：native 的 blend/program/纹理取自 GL 镜像，
-		而 clear 本身不做 __flushGL（隐式 clear 更是发生在 __flushGL 之前）。
-		本笔 draw 内只刷一次，draw 自己的 flush 由 __vkFlushDraw 跳过。
+		clear 记录点。**不调用 `__flushGL()`** —— v2 的 native 只记账、不抓 GL 状态，
+		clear 也不再需要"先flush 再记录"。GL 状态何时下发完全由原渲染流程决定。
 	**/
-	@:noCompletion private function __vkFlushForClear():Void
+	@:noCompletion private function __vkEmitClear(color:Int, depth:Float, mask:Int, srcLine:Int, implicitClear:Bool):Void
 	{
-		if (__vkStateFlushed) return;
-		__flushGL();
-		__vkStateFlushed = true;
-	}
+		if (!VKDrawSink.active()) return;
 
-	/** draw 的记录点前 flush：隐式 clear 已刷过则跳过，避免同一笔重复 __flushGL。 */
-	@:noCompletion private function __vkFlushDraw():Void
-	{
-		if (__vkStateFlushed)
-		{
-			__vkStateFlushed = false;
-			return;
-		}
-		__flushGL();
-	}
-
-	/**
-		@param flushFirst true=记录前先 `__flushGL()`（Context3D.clear）；
-		false=调用点刚做过 `__flushGL()`（OpenGLRenderer 的 4 个 raw clear），只标记已同步。
-	**/
-	@:noCompletion private function __vkEmitClear(color:Int, depth:Float, mask:Int, srcLine:Int, implicitClear:Bool, flushFirst:Bool):Void
-	{
-		__vkInit();
-
-		if (flushFirst)
-		{
-			__vkFlushForClear();
-		}
-		else
-		{
-			__vkStateFlushed = true;
-		}
-
-		var s = new VKDrawSnapshot();
+		var s = VKDrawSink.snapshot();
 		s.kind = 2;
 		s.flags = __vkFlags(implicitClear);
 		s.program = __vkProgramId();
 		s.progFormat = __vkProgramFormat();
 		s.fbo = __vkFramebufferId();
+		s.ibo = 0;
+		s.vbo = 0;
+		s.first = 0;
+		s.count = 0;
 		s.clearColor = color;
 		s.clearDepth = depth;
 		s.clearMask = mask;
 		s.srcLine = srcLine;
 		s.rtParams = __vkTargetParams();
-		s.blendName = __vkBlendName();
-		s.depthEnabled = __contextState.__enableGLDepthTest;
-		s.depthWrite = __contextState.depthMask;
-		s.scissor = __vkScissorRect();
-		s.viewport = __vkViewportRect();
-		s.textures = __vkTextureNames();
 
 		VKDrawSink.emit(s);
 	}
@@ -2808,15 +2644,6 @@ import lime.math.Vector2;
 	@:noCompletion private function __vkEndFrame(animTime:Float):Void
 	{
 		VKDrawSink.endFrame(animTime);
-	}
-
-	/** OpenGLRenderer.setViewport 绕过 __flushGLViewport，需单独同步视口。 */
-	@:noCompletion private function __vkSetViewport(x:Int, y:Int, w:Int, h:Int):Void
-	{
-		__vkViewportX = x;
-		__vkViewportY = y;
-		__vkViewportW = w;
-		__vkViewportH = h;
 	}
 	#end
 
