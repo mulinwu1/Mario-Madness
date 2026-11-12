@@ -235,8 +235,14 @@ jobs:
           $buildStart = (Get-Date).ToUniversalTime()
           Add-Content -Path $env:GITHUB_ENV -Value "VKPKT_BUILD_START=$($buildStart.ToString('o'))"
           $outDir = "export\release\windows"
+          # 清空大资源目录避免 CI 处理 1.8GB 小文件（OOM/超时根因），但 fonts 必须保留：
+          # FPS 左上角字体走 Asset 嵌入，清掉会 getFont=null 回退默认字体（字体花）。
           Get-ChildItem 'assets' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            Get-ChildItem $_.FullName -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            if ($_.Name -eq 'fonts') {
+              Write-Host "assets/$($_.Name) -> kept"
+            } else {
+              Get-ChildItem $_.FullName -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            }
           }
           $hx = (Get-Command haxelib).Source
           Remove-Item build.log, build.err, empty.stdin -ErrorAction SilentlyContinue
