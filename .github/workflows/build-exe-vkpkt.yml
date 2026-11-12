@@ -192,6 +192,16 @@ jobs:
             }
             Write-Host "patched: $t"
           }
+          # Windows 默认不会在"被加载 DLL 的目录"里解析依赖，只会看加载器目录和 PATH：
+          # 再放一份到 neko.exe 旁边，并把各 ndll 目录加进 PATH（供后续 lime build 步骤）。
+          if ($shim) {
+            $nekoDir = Split-Path (Get-Command neko).Source -Parent
+            Copy-Item $shim.FullName (Join-Path $nekoDir 'lime_glslang.dll') -Force
+            Write-Host "shim copied to neko dir: $nekoDir"
+          }
+          $ndllDirs = @($targets | ForEach-Object { Split-Path $_ -Parent } | Select-Object -Unique)
+          foreach ($d in $ndllDirs) { Add-Content -Path $env:GITHUB_PATH -Value $d }
+          Write-Host "ndll dirs on PATH: $($ndllDirs -join '; ')"
 
       # discord_rpc 的 native 源码 haxelib 包里缺失，需要手工补齐（与既有构建一致）
       - name: Patch discord_rpc native sources
