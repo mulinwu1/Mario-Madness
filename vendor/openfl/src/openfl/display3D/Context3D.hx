@@ -1996,7 +1996,7 @@ import lime.math.Vector2;
 			// 状态机，直接把 FBO 名交给渲染器；符号缺失/参数非法时回退原路径。
 			if (VKPktNative.backendTargetEnabled())
 			{
-				var fbo:Int = (framebuffer == null) ? 0 : (cast framebuffer : Int);
+				var fbo:Int = (framebuffer == null) ? 0 : untyped framebuffer.id;
 				if (VKPktNative.bindDrawFbo(fbo))
 				{
 					__contextState.__currentGLFramebuffer = framebuffer;
