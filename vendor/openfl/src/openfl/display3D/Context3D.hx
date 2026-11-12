@@ -1993,8 +1993,7 @@ import lime.math.Vector2;
 		{
 			#if openfl_vk_pkt
 			// 2a 直连（VK_BACKEND=1 或含 target）：跳过 glBindFramebuffer 的通用 GL
-			// 状态机，直接把 FBO 名交给渲染器；native 侧语义与 GL 绑定一一对应。
-			// 符号缺失/参数非法时返回 false，回退原路径。
+			// 状态机，直接把 FBO 名交给渲染器；符号缺失/参数非法时回退原路径。
 			if (VKPktNative.backendTargetEnabled())
 			{
 				var fbo:Int = (framebuffer == null) ? 0 : (cast framebuffer : Int);
@@ -2658,56 +2657,33 @@ import lime.math.Vector2;
 		当前 program 声明的 sampler 数（native `gl_shader_sampler_count` 同口径）。
 		GLSL：`__glslSamplerNames` 以 uniform location 为下标（稀疏），非 null 项即声明的 sampler；
 		AGAL：sampler 寄存器使用掩码的置位数。未链接的 program 记 0（native 也返回 0）。
-		program 已链接但上述元数据未填（AGAL 掩码为 0 / GLSL 名字表为空）时，
-		退化为"当前已绑定的非空纹理槽数"——纯日志兜底（WirePacket 不含纹理字段，
-		见 VKDrawSink.writePacket），避免 `slots=` 恒为 `-`。
 	**/
 	@:noCompletion private function __vkSamplerCount():Int
 	{
 		var program = __state.program;
-		var declared = 0;
-
-		if (program != null && program.__glProgram != null)
-		{
-			if (program.__format == Context3DProgramFormat.AGAL)
-			{
-				var mask = program.__agalSamplerUsageMask;
-				while (mask != 0)
-				{
-					if ((mask & 1) != 0) declared++;
-					mask >>>= 1;
-				}
-			}
-			else
-			{
-				var names = program.__glslSamplerNames;
-				if (names != null)
-				{
-					var limit = (names.length > 64) ? 64 : names.length;
-					for (i in 0...limit)
-					{
-						if (names[i] != null) declared++;
-					}
-				}
-			}
-		}
-
-		if (declared > 0) return declared;
-
-		// native 对未链接 program 也返回 0，这里保持同口径
 		if (program == null || program.__glProgram == null) return 0;
 
-		var bound = 0;
-		var textures = __state.textures;
-		if (textures != null)
+		if (program.__format == Context3DProgramFormat.AGAL)
 		{
-			for (i in 0...textures.length)
+			var mask = program.__agalSamplerUsageMask;
+			var n = 0;
+			while (mask != 0)
 			{
-				var texture = textures[i];
-				if (texture != null && texture.__textureID != null) bound++;
+				if ((mask & 1) != 0) n++;
+				mask >>>= 1;
 			}
+			return n;
 		}
-		return (bound > 8) ? 8 : bound;
+
+		var names = program.__glslSamplerNames;
+		if (names == null) return 0;
+		var n = 0;
+		var limit = (names.length > 64) ? 64 : names.length;
+		for (i in 0...limit)
+		{
+			if (names[i] != null) n++;
+		}
+		return n;
 	}
 
 	@:noCompletion private function __vkTextureNames():Array<Int>
@@ -2741,54 +2717,6 @@ import lime.math.Vector2;
 			__getGLBlend(__contextState.blendSourceRGBFactor), __getGLBlend(__contextState.blendDestinationRGBFactor));
 	}
 
-	// -------- dwrite 探针（exe 侧，纯日志） --------
-	// 打开 VK_TRACE_DRAW 后，在 VK_TRACE_FRAME 命中的帧里，把
-	// 记录侧缓存值（__contextState.depthMask）与 GL 真值（glGetIntegerv(GL_DEPTH_WRITEMASK)）
-	// 并排打印；每帧最多 VK_TRACE_MAX 行。默认关闭时不产生任何 GL 查询。
-	static var __dwriteProbeFrame:Int = -1; // -1=开关未读；0=关闭；>0=目标帧
-	static var __dwriteProbeLeft:Int = 0;
-
-	@:noCompletion private function __vkProbeDwrite(cached:Bool):Void
-	{
-		#if sys
-		if (__dwriteProbeFrame == -1)
-		{
-			__dwriteProbeFrame = 0;
-			var on = Sys.getEnv("VK_TRACE_DRAW");
-			if (on != null && on.length > 0 && on != "0")
-			{
-				var frEnv = Sys.getEnv("VK_TRACE_FRAME");
-				var fr:Null<Int> = (frEnv != null && frEnv.length > 0) ? Std.parseInt(frEnv) : null;
-				__dwriteProbeFrame = (fr != null && fr > 0) ? fr : 5;
-				var mxEnv = Sys.getEnv("VK_TRACE_MAX");
-				var mx:Null<Int> = (mxEnv != null && mxEnv.length > 0) ? Std.parseInt(mxEnv) : null;
-				__dwriteProbeLeft = (mx != null && mx > 0) ? mx : 64;
-			}
-		}
-		if (__dwriteProbeFrame <= 0) return;
-		if (VKDrawSink.frameGen != __dwriteProbeFrame) return;
-		if (__dwriteProbeLeft <= 0) return;
-		__dwriteProbeLeft--;
-
-		var truth = __vkBoolOf(gl.getParameter(gl.DEPTH_WRITEMASK));
-		var tag = (truth == cached) ? "ok" : "MISMATCH";
-		Sys.stderr().writeString("[dwrite] f=" + VKDrawSink.frameGen
-			+ " s=" + (VKDrawSink.seq + 1)
-			+ " cached=" + (cached ? 1 : 0)
-			+ " gl=" + (truth ? 1 : 0)
-			+ " " + tag + "\n");
-		Sys.stderr().flush();
-		#end
-	}
-
-	static function __vkBoolOf(v:Dynamic):Bool
-	{
-		if (v == null) return false;
-		if (v == true) return true;
-		var b = Std.parseFloat(Std.string(v));
-		return (b != null && b != 0);
-	}
-
 	@:noCompletion private function __vkEmitDraw(kind:Int, indexBuffer:IndexBuffer3D, first:Int, count:Int, srcLine:Int):Void
 	{
 		__vkInit();
@@ -2811,7 +2739,6 @@ import lime.math.Vector2;
 		s.scissor = __vkScissorRect();
 		s.viewport = __vkViewportRect();
 		s.textures = __vkTextureNames();
-		__vkProbeDwrite(s.depthWrite);
 
 		VKDrawSink.emit(s);
 	}
