@@ -70,14 +70,20 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           gh run download ${{ inputs.ndll_run_id }} -n lime-vulkan-ndll -D lime-vulkan-artifact
-          if (-not (Test-Path 'lime-vulkan-artifact\lime.ndll')) { throw 'lime.ndll not found in downloaded artifact' }
+          $hit = @(Get-ChildItem 'lime-vulkan-artifact' -Recurse -Filter 'lime.ndll' -File -ErrorAction SilentlyContinue)
+          if ($hit.Count -eq 0) { throw 'lime.ndll not found in downloaded artifact (recursive)' }
 
       # ndll 必须真的含 packet 执行路径，否则 exe 能编出来但运行永远 draws=0
       - name: Assert ndll has packet exec path
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $src = (Resolve-Path "lime-vulkan-artifact\lime.ndll").Path
+          # artifact 布局可能因 build-lime-vulkan 的打包方式而变化（根目录 或 lime-src/ndll/...），
+          # 统一按递归查找，避免 Resolve-Path 写死路径导致整条 exe 构建失败。
+          $hit = @(Get-ChildItem 'lime-vulkan-artifact' -Recurse -Filter 'lime.ndll' -File -ErrorAction SilentlyContinue)
+          if ($hit.Count -eq 0) { throw 'lime.ndll not found under lime-vulkan-artifact (recursive)' }
+          $src = $hit[0].FullName
+          Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_LIME_NDLL=$src"
           $txt = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($src))
           if (([regex]::Matches($txt,'vkCreateInstance')).Count -lt 1) { throw 'artifact ndll is not a Vulkan build' }
           foreach ($sym in @('lime_vk_pkt_emit','lime_vk_pkt_mode','[pkt] draw')) {
@@ -159,11 +165,12 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $src = (Resolve-Path "lime-vulkan-artifact\lime.ndll").Path
+          $src = (Get-ChildItem 'lime-vulkan-artifact' -Recurse -Filter 'lime.ndll' -File | Select-Object -First 1).FullName
+          if (-not $src) { throw 'lime.ndll not found under lime-vulkan-artifact (recursive)' }
           Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_LIME_NDLL=$src"
           # glslang shim 只影响“运行时能否跑”，不影响本 job 编 exe；artifact 里没有就警告继续，
           # 本地部署时由现成的 lime_glslang.dll 补齐
-          $shim = (Resolve-Path "lime-vulkan-artifact\lime_glslang.dll" -ErrorAction SilentlyContinue)
+          $shim = (Get-ChildItem 'lime-vulkan-artifact' -Recurse -Filter 'lime_glslang.dll' -File -ErrorAction SilentlyContinue | Select-Object -First 1)
           if ($shim) { Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_LIME_SHIM=$($shim.Path)" }
           else { Write-Host 'WARN: lime_glslang.dll not in artifact; packaging will rely on the local shim' }
           $devFile = "$env:USERPROFILE\haxelib\.dev\lime"
