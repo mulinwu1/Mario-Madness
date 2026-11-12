@@ -3523,6 +3523,28 @@ bool VkRenderer::PktDraw(const PktDrawDesc& d) {
         s_includeAll = (v && v[0] == '1') ? 1 : 0;
     }
     if (!s_includeAll && s_useProgPipe == 1 && (d.program == 1 || d.program == 7)) useProgramPipe = false;
+    // 诊断 VK_PKT_PROGPIPE_SKIP=1,7：把列出的 program 强制退回固定管线（A/B 二分用）。
+    {
+        static signed char s_skip[256];
+        static bool s_skipInit = false;
+        if (!s_skipInit) {
+            s_skipInit = true;
+            const char* v = getenv("VK_PKT_PROGPIPE_SKIP");
+            if (v && v[0]) {
+                const char* p = v;
+                while (*p) {
+                    while (*p && (*p == ',' || *p == ' ')) p++;
+                    if (!*p) break;
+                    char* e = nullptr;
+                    long n = strtol(p, &e, 10);
+                    if (e == p) break;
+                    if (n >= 0 && n < 256) s_skip[n] = 1;
+                    p = e;
+                }
+            }
+        }
+        if (d.program >= 0 && d.program < 256 && s_skip[d.program]) useProgramPipe = false;
+    }
     VkPipeline pipe = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;
     VkDescriptorSet bindSet = set;
@@ -3600,10 +3622,11 @@ bool VkRenderer::PktDraw(const PktDrawDesc& d) {
                     const float* m = (const float*)d.uniform;
                     fprintf(stderr,
                             "[pkt] progdbg prog=%d off=%d pipe=%p ds=%p vw=%p uo=%u usz=%u dyn=%d sampler=%d "
-                            "n=%d v0=%.1f,%.1f uv=%.3f,%.3f m0=%.3f m5=%.3f m12=%.3f m13=%.3f\n",
+                            "n=%d v0=%.1f,%.1f uv=%.3f,%.3f a0=%.3f cm0=%.2f m0=%.3f m5=%.3f m12=%.3f m13=%.3f\n",
                             d.program, off ? 1 : 0, (void*)pp, (void*)ds, (void*)vw, uo,
                             (unsigned)d.uniformSize, hasDyn ? 1 : 0, okS ? 1 : 0,
                             d.vertexCount, d.verts[0], d.verts[1], d.verts[13], d.verts[14],
+                            d.verts[4], d.verts[5],
                             m[0], m[5], m[12], m[13]);
                 }
                 // 诊断 VK_PKT_PROGUNIF=1：打印该 program 前 2 笔的完整 uniform 字，
