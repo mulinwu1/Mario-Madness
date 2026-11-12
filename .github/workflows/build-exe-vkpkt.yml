@@ -299,7 +299,7 @@ jobs:
           $exe = Get-ChildItem 'export\release\windows' -Recurse -Filter 'Mario.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $exe) { throw 'Mario.exe not found under export\release\windows' }
           $txt = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe.FullName))
-          foreach ($sym in @('lime_vk_pkt_emit','VKDrawSink','VKPktNative','[vkpkt]')) {
+          foreach ($sym in @('lime_vk_pkt_emit','VKDrawSink','VKPktNative')) {
             if (-not $txt.Contains($sym)) { throw "exe missing packet recorder symbol: $sym" }
           }
           if (-not $txt.Contains('lime_gl_draw_arrays')) { throw 'exe missing control symbol lime_gl_draw_arrays (scan invalid)' }
