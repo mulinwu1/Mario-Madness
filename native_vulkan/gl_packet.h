@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // packet 解码运行时（gl_packet.cpp）与 GL 状态镜像之间的窄接口。
 //
@@ -44,6 +44,9 @@ bool SnapshotBuffer (int name, const uint8_t** data, uint32_t* bytes);
 
 // 执行路径是否在工作（VK_PKT_EXEC=1）。GL 侧据此跳过对应绘制，避免同一笔画两遍。
 bool ExecActive ();
+
+// 按 packet 立即执行一笔（内部再 ParseWire 一次）。仅在 ExecActive() 为真时由 emit 调用。
+bool ExecPacketRaw (const uint8_t* bytes, uint32_t nbytes);
 
 // 当前 packet 帧代（就是 trace 里的 f=）。取证转储（VK_DUMP_TEX）用它对齐"该帧"。
 uint32_t SnapshotFrameGen ();
