@@ -1161,6 +1161,12 @@ int SnapshotTexBound (int unit) {
     return g_texBound[(size_t)unit];
 }
 
+// 当前 active texture unit 上的绑定。批处理 DrawRaw 就是按这个取采样源；
+// packet 执行路径必须同口径，否则多 sampler 的 program 会拿到别的 unit 的残留纹理。
+int SnapshotTexBoundActive () {
+    return S_STATE_getBoundTexture();
+}
+
 uint32_t SnapshotTexVk (int glName) {
     return S_STATE_getTextureId(glName);
 }
