@@ -235,15 +235,10 @@ jobs:
           $buildStart = (Get-Date).ToUniversalTime()
           Add-Content -Path $env:GITHUB_ENV -Value "VKPKT_BUILD_START=$($buildStart.ToString('o'))"
           $outDir = "export\release\windows"
-          # 清空大资源目录避免 CI 处理 1.8GB 小文件（OOM/超时根因），但 fonts 必须保留：
-          # FPS 左上角字体走 Asset 嵌入，清掉会 getFont=null 回退默认字体（字体花）。
-          Get-ChildItem 'assets' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            if ($_.Name -eq 'fonts') {
-              Write-Host "assets/$($_.Name) -> kept"
-            } else {
-              Get-ChildItem $_.FullName -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-            }
-          }
+          # 不清空 assets：PRELOAD_ALL 需要完整资源才能把字体/资源编进 exe。
+          # 历史依据：run 42894747485 同样不清空，正常出包、字体正确。
+          $assetMb = [math]::Round(((Get-ChildItem 'assets' -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum) / 1MB, 1)
+          Write-Host "assets kept as-is: ${assetMb}MB"
           $hx = (Get-Command haxelib).Source
           Remove-Item build.log, build.err, empty.stdin -ErrorAction SilentlyContinue
           New-Item -ItemType File -Path empty.stdin | Out-Null
