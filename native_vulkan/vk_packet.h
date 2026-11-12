@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // WirePacket / DrawRecord 的纯格式层。
 //
@@ -103,7 +103,7 @@ struct alignas(8) WirePacket {
     uint8_t progFormat;     // 56
     uint8_t reserved1;      // 57
     uint16_t reserved2;     // 58
-    uint32_t reserved3;     // 60
+    uint32_t texName;       // 60  发射时刻的主采样纹理 GL 名（0 = 老 exe，未记录）
 
 };
 
