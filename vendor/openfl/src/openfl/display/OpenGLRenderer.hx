@@ -383,10 +383,6 @@ class OpenGLRenderer extends DisplayObjectRenderer
 	public function setViewport():Void
 	{
 		__gl.viewport(__offsetX, __offsetY, __displayWidth, __displayHeight);
-
-		#if openfl_vk_pkt
-		__context3D.__vkSetViewport(__offsetX, __offsetY, __displayWidth, __displayHeight);
-		#end
 	}
 
 	/**
@@ -782,7 +778,7 @@ class OpenGLRenderer extends DisplayObjectRenderer
 					__context3D.__flushGL();
 					__gl.clearColor(0, 0, 0, 1);
 					#if openfl_vk_pkt
-					__context3D.__vkEmitClear(0xFF000000, 1.0, 1, 780, false, false);
+					__context3D.__vkEmitClear(0xFF000000, 1.0, 1, 780, false);
 					#end
 					__gl.clear(__gl.COLOR_BUFFER_BIT);
 					// __context3D.clear (0, 0, 0, 1, 0, 0, Context3DClearMask.COLOR);
@@ -794,7 +790,7 @@ class OpenGLRenderer extends DisplayObjectRenderer
 					__context3D.__flushGL();
 					__gl.clearColor(0, 0, 0, 1);
 					#if openfl_vk_pkt
-					__context3D.__vkEmitClear(0xFF000000, 1.0, 1, 789, false, false);
+					__context3D.__vkEmitClear(0xFF000000, 1.0, 1, 789, false);
 					#end
 					__gl.clear(__gl.COLOR_BUFFER_BIT);
 					// __context3D.clear (0, 0, 0, 1, 0, 0, Context3DClearMask.COLOR);
@@ -809,7 +805,7 @@ class OpenGLRenderer extends DisplayObjectRenderer
 					__context3D.__flushGL();
 					__gl.clearColor(0, 0, 0, 1);
 					#if openfl_vk_pkt
-					__context3D.__vkEmitClear(0xFF000000, 1.0, 1, 801, false, false);
+					__context3D.__vkEmitClear(0xFF000000, 1.0, 1, 801, false);
 					#end
 					__gl.clear(__gl.COLOR_BUFFER_BIT);
 					// __context3D.clear (0, 0, 0, 1, 0, 0, Context3DClearMask.COLOR);
@@ -821,7 +817,7 @@ class OpenGLRenderer extends DisplayObjectRenderer
 					__context3D.__flushGL();
 					__gl.clearColor(0, 0, 0, 1);
 					#if openfl_vk_pkt
-					__context3D.__vkEmitClear(0xFF000000, 1.0, 1, 810, false, false);
+					__context3D.__vkEmitClear(0xFF000000, 1.0, 1, 810, false);
 					#end
 					__gl.clear(__gl.COLOR_BUFFER_BIT);
 					// __context3D.clear (0, 0, 0, 1, 0, 0, Context3DClearMask.COLOR);
