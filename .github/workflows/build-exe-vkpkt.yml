@@ -137,9 +137,11 @@ jobs:
           $fork = (Resolve-Path 'vendor\openfl').Path
           haxelib dev openfl $fork
           $lines = @(haxelib path openfl)
-          Write-Host "haxelib path openfl -> $($lines -join '; ')"
-          if (-not ($lines[0] -match 'vendor\\openfl\\src')) {
-            throw "openfl does not resolve to vendor/openfl/src: $($lines[0])"
+          $joined = $lines -join '; '
+          Write-Host "haxelib path openfl -> $joined"
+          # haxelib 4 会把 --macro 行放在最前面，不能只看第 0 行
+          if (-not ($joined -match 'vendor[\\/]openfl[\\/]src')) {
+            throw "openfl does not resolve to vendor/openfl/src: $joined"
           }
           Add-Content -Path $env:GITHUB_ENV -Value "OPENFL_VKPKT_FORK=$fork"
 
