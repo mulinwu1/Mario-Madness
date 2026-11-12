@@ -3221,10 +3221,11 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
     bool wantLoadClear = colorClear && id >= 1000 && tv0.offscreenClear == vktuning::CLEAR_LOADOP;
     // 诊断路径：vkCmdClearColorImage（nvoglv64 上 0xc0000005，正式跑不用，仅 imgcmd 模式可达）
     bool wantImgCmdClear = colorClear && id >= 1000 && tv0.offscreenClear == vktuning::CLEAR_IMGCMD;
-    // 同目标重绑时的"真清除"：OpenFL 每次 glClear 都会再 Bind，之前这类 clear 全被丢弃，
-    // 画布永远不清。独立开关，不依赖 offscreen_clear（避开 image 那条路径的崩溃绑定）。
+    // 离屏目标的 clear 包必须真的清（GL 语义）：packet 路径曾依赖 offscreen_rebind_clear
+    // （部署 ini=0），把所有离屏 clear 丢掉 → 目标纹理跨帧累积成不透明黑，合成时盖住背景层。
+    // 只保留 imgcmd 诊断路径的互斥，避免与 vkCmdClearColorImage 分支重复清。
     bool wantRebindClear = (clearMask & 1) && id >= 1000
-                           && tv0.offscreenRebindClear == vktuning::ON;
+                           && tv0.offscreenClear != vktuning::CLEAR_IMGCMD;
     // 要清就走"loadOp=CLEAR 的整幅 pass"（不碰 vkCmdClearColorImage）：同一 pass 内先清后画，
     // 颜色取包里 rgb，等价于整幅替换，且不依赖任何图像布局记录。
     bool wantPassClear = wantImageClear || wantLoadClear || wantRebindClear;
