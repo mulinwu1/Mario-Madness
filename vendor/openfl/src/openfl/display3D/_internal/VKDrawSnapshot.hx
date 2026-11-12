@@ -1,11 +1,7 @@
 package openfl.display3D._internal;
 
 /**
-	一笔 draw/clear 的已解析快照（v2 精简版）。
-
-	只保留 WirePacket（spec §3）真正携带的字段。状态类字段（blend/depth/scissor/
-	viewport/textures）由 native 在收到 packet 的那一刻从 GL 状态镜像抓取，
-	Haxe 侧不再重复抓一遍 —— 旧版为此每笔 draw 分配字符串和数组，是记录器的主要开销来源。
+	一笔 draw/clear 的已解析快照。Context3D 在记录点填好，VKDrawSink 只负责序列化。
 **/
 class VKDrawSnapshot
 {
@@ -23,6 +19,16 @@ class VKDrawSnapshot
 	public var clearMask:Int = 0;
 	public var srcLine:Int = 0;
 	public var rtParams:Int = 0;
+	/** 发射这一刻的主采样纹理（GL 名）；packet 自带，执行侧不再猜 GL 状态。 */
+	public var texName:Int = 0;
+
+	// 仅日志字段
+	public var blendName:String = "none";
+	public var depthEnabled:Bool = false;
+	public var depthWrite:Bool = false;
+	public var scissor:Array<Int> = [0, 0, 0, 0];
+	public var viewport:Array<Int> = [0, 0, 0, 0];
+	public var textures:Array<Int> = [];
 
 	public function new() {}
 }
