@@ -182,7 +182,16 @@ jobs:
           if (-not (Test-Path $limeRoot)) { throw "haxelib lime not found: $limeRoot" }
           $targets = @(Get-ChildItem "$limeRoot\ndll" -Recurse -Filter 'lime.ndll' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
           if ($targets.Count -eq 0) { throw 'no lime.ndll under haxelib lime' }
-          foreach ($t in $targets) { Copy-Item $src $t -Force; Write-Host "patched: $t" }
+          foreach ($t in $targets) {
+            Copy-Item $src $t -Force
+            # lime.ndll 依赖 lime_glslang.dll（load 期就解析），必须放在同一目录，
+            # 否则 lime build 里的图标转换（neko 加载 ndll）会失败。
+            if ($shim) {
+              $dstShim = Join-Path (Split-Path $t -Parent) 'lime_glslang.dll'
+              Copy-Item $shim.FullName $dstShim -Force
+            }
+            Write-Host "patched: $t"
+          }
 
       # discord_rpc 的 native 源码 haxelib 包里缺失，需要手工补齐（与既有构建一致）
       - name: Patch discord_rpc native sources
