@@ -118,6 +118,8 @@ PKT_PRIM_LINES = [
     "DEFINE_PRIME2 (lime_vk_pkt_emit);",
     "DEFINE_PRIME0 (lime_vk_pkt_utag);",
     "DEFINE_PRIME2 (lime_vk_pkt_frame);",
+    # 2a 直连：Haxe 侧跳过 glBindFramebuffer 的通用 GL 状态机，直接把 FBO 名交给渲染器
+    "DEFINE_PRIME1 (lime_vk_bind_draw_fbo);",
 ]
 if "lime_vk_pkt_mode" not in text:
     prim_anchor = "\tDEFINE_PRIME4v (lime_gl_wait_sync);"
