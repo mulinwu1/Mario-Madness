@@ -2726,14 +2726,21 @@ import lime.math.Vector2;
 		s.scissor = __vkScissorRect();
 		s.viewport = __vkViewportRect();
 		s.textures = __vkTextureNames();
-		// packet 自带主纹理：执行侧不再从 GL 状态猜（clear 之后第一笔会拿到旧绑定）
+		// packet 自带主纹理：执行侧不再从 GL 状态猜（clear 之后第一笔会拿到旧绑定）。
+		// 不走 __vkTextureNames()：它以 program 的 sampler 元数据截断，2D 程序元数据为空时
+		// 整表被截成空、texName 恒 0；这里直接扫逻辑纹理表取第一个有效纹理。
 		s.texName = 0;
-		for (texture in s.textures)
+		var boundTextures = __state.textures;
+		if (boundTextures != null)
 		{
-			if (texture >= 0)
+			for (i in 0...boundTextures.length)
 			{
-				s.texName = texture;
-				break;
+				var boundTexture = boundTextures[i];
+				if (boundTexture != null && boundTexture.__textureID != null)
+				{
+					s.texName = untyped boundTexture.__textureID.id;
+					break;
+				}
 			}
 		}
 
