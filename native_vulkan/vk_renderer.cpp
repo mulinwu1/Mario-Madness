@@ -3691,15 +3691,24 @@ bool VkRenderer::PktDraw(const PktDrawDesc& d) {
         g_cmdDraw(o.cmd, (uint32_t)d.vertexCount, 1, 0, 0);
     }
     o.pktDraws++;
-    fprintf(stderr, "[pkt] draw tgt=%u i=%llu prog=%d tex=%u set=%p pipe=%p cmd=%s n=%d vbOff=%llu ibOff=%llu "
-            "state=blend%d(%u,%u) depth%d/%d stencil%d cull%d vp=%d sc=%d\n",
-            o.pktTarget, (unsigned long long)o.pktDraws, d.program, d.texId, (void*)set, (void*)pipe,
-            indexed ? (use32 ? "vkCmdDrawIndexed(u32)" : "vkCmdDrawIndexed(u16)") : "vkCmdDraw",
-            indexed ? d.indexCount : d.vertexCount,
-            (unsigned long long)voff, (unsigned long long)ioff,
-            (int)d.state.blendEnabled, (unsigned)d.state.blendSrc, (unsigned)d.state.blendDst,
-            effDepthTest, effDepthWrite, effStencil, (int)d.state.cullMode,
-            d.viewport.valid ? 1 : 0, d.scissor.valid ? 1 : 0);
+    // 逐笔日志默认关（VK_PKT_TRACE=1 才打）：packet 路径一帧上万笔，
+    // 全量 fprintf 会让日志涨到几十 MB 并明显拖慢包路径。
+    static int s_pktTrace = -1;
+    if (s_pktTrace < 0) {
+        const char* v = getenv("VK_PKT_TRACE");
+        s_pktTrace = (v && v[0] == '1') ? 1 : 0;
+    }
+    if (s_pktTrace) {
+        fprintf(stderr, "[pkt] draw tgt=%u i=%llu prog=%d tex=%u set=%p pipe=%p cmd=%s n=%d vbOff=%llu ibOff=%llu "
+                "state=blend%d(%u,%u) depth%d/%d stencil%d cull%d vp=%d sc=%d\n",
+                o.pktTarget, (unsigned long long)o.pktDraws, d.program, d.texId, (void*)set, (void*)pipe,
+                indexed ? (use32 ? "vkCmdDrawIndexed(u32)" : "vkCmdDrawIndexed(u16)") : "vkCmdDraw",
+                indexed ? d.indexCount : d.vertexCount,
+                (unsigned long long)voff, (unsigned long long)ioff,
+                (int)d.state.blendEnabled, (unsigned)d.state.blendSrc, (unsigned)d.state.blendDst,
+                effDepthTest, effDepthWrite, effStencil, (int)d.state.cullMode,
+                d.viewport.valid ? 1 : 0, d.scissor.valid ? 1 : 0);
+    }
     return true;
 }
 
