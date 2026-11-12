@@ -1323,9 +1323,10 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     o.textures.resize(MAX_TEXTURES);
 
     // 接线（本轮只接不选）：把设备上下文交给 gl_shader，让它能自己建管线。
-    // 离屏管线必须有离屏 render pass：建一条与目标兼容的（R8G8B8A8、单附件、单 subpass，
-    // 兼容性只看格式/样本数/附件数，loadOp 与 finalLayout 不参与比较），否则
-    // gl_shader_build_pipeline(prog, layout, true) 会全部失败，滤镜链退回兜底。
+    // 离屏管线必须有离屏 render pass：建一条与 packet 目标 pass **完全兼容**的。
+    // 注意 Vulkan 8.3 的兼容性判定包含 initialLayout/finalLayout（不包含 loadOp/storeOp）：
+    // packet 目标 pass 用 initial=SHADER_READ_ONLY / final=SHADER_READ_ONLY，
+    // 这里必须一致，否则 program 管线与 PktBeginTarget 的 pass 不兼容 → 整屏黑。
     {
         VkRenderPass offRP = VK_NULL_HANDLE;
         VkAttachmentDescription att{};
@@ -1333,7 +1334,7 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
         att.samples = VK_SAMPLE_COUNT_1_BIT;
         att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        att.initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         att.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         VkAttachmentReference ref{};
         ref.attachment = 0;
@@ -3469,18 +3470,120 @@ bool VkRenderer::PktDraw(const PktDrawDesc& d) {
         g_setScissor(o.cmd, 0, 1, &dsc);
     }
 
-    // 管线变体按状态选：默认状态复用 Init 建的那条（兜底），缺的变体才新建并缓存。
-    VkPipeline pipe = (VkPipeline)(uintptr_t)PktPipelineFor(d.state);
-    if (!pipe) return false;
-
     const vktuning::Values& tv = vktuning::Get();
     int effDepthTest = (tv.depthTest == vktuning::KEEP) ? d.state.depthTest : (tv.depthTest == vktuning::ON);
     int effDepthWrite = (tv.depthWrite == vktuning::KEEP) ? d.state.depthWrite : (tv.depthWrite == vktuning::ON);
     int effStencil = (tv.stencilTest == vktuning::KEEP) ? d.state.stencilTest : (tv.stencilTest == vktuning::ON);
+
+    // 优先按游戏 program 自己的 Vulkan 管线绘制：滤镜（NTSC/Bloom/TVStatic）和自定义
+    // GLSL 只有这条路径会真正执行；固定管线只能近似基础精灵。常量块用批处理同款的
+    // 动态偏移槽位上传，保证同一 target 内多笔互不覆盖。
+    // 注意：program 管线当前还有兼容性问题（整屏黑），默认关；调通后把默认值改成 1。
+    static int s_useProgPipe = -1;
+    if (s_useProgPipe < 0) {
+        const char* v = getenv("VK_PKT_PROGPIPE");
+        s_useProgPipe = (v && v[0] == '1') ? 1 : 0;
+    }
+    VkPipeline pipe = VK_NULL_HANDLE;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkDescriptorSet bindSet = set;
+    uint32_t dynOff = 0;
+    bool hasDyn = true;
+    if (s_useProgPipe && d.program > 0 && d.uniform && d.uniformSize > 0) {
+        bool off = (o.pktTarget >= 1000);
+        int pg = d.program;
+        // packet 路径接管后批处理路径不再执行，program 管线必须在这里懒构建。
+        // 顶点布局与批处理完全一致（60B：pos4 / alpha / mult4 / off4 / uv2）。
+        if (pg > 0 && pg < 256 && lime::gl_shader_pipeline(pg, off) == VK_NULL_HANDLE) {
+            static signed char s_fail[256][2] = {{0}};
+            int slot = off ? 1 : 0;
+            if (s_fail[pg][slot] == 0) {
+                bool ok = false;
+                if (lime::gl_shader_program_has_attribute(pg, 5)) {
+                    static const lime::GLShaderVertexAttribute s_va5[6] = {
+                        {0, 0, 109 /* R32G32B32A32_SFLOAT */, 0},
+                        {1, 1, 100 /* R32_SFLOAT */, 0},
+                        {5, 0, 100, 16},
+                        {6, 0, 109, 20},
+                        {7, 0, 109, 36},
+                        {4, 0, 103 /* R32G32_SFLOAT */, 52},
+                    };
+                    lime::GLShaderVertexLayout lay5{0, 60, s_va5, 6};
+                    ok = lime::gl_shader_build_pipeline(pg, &lay5, off);
+                } else {
+                    static const lime::GLShaderVertexAttribute s_va[5] = {
+                        {0, 0, 103 /* R32G32_SFLOAT */, 0},
+                        {1, 0, 100 /* R32_SFLOAT */, 16},
+                        {2, 0, 109 /* R32G32B32A32_SFLOAT */, 20},
+                        {3, 0, 109, 36},
+                        {4, 0, 103, 52},
+                    };
+                    lime::GLShaderVertexLayout lay{0, 60, s_va, 5};
+                    ok = lime::gl_shader_build_pipeline(pg, &lay, off);
+                }
+                if (!ok) s_fail[pg][slot] = -1;
+                fprintf(stderr, "[pkt] progpipe build prog=%d off=%d ok=%d pipe=%p\n",
+                        pg, off ? 1 : 0, ok ? 1 : 0, (void*)lime::gl_shader_pipeline(pg, off));
+            }
+        }
+        VkPipeline pp = (VkPipeline)(uintptr_t)lime::gl_shader_pipeline(d.program, off);
+        VkPipelineLayout pl = (VkPipelineLayout)(uintptr_t)lime::gl_shader_pipeline_layout(d.program);
+        VkDescriptorSet ds = (VkDescriptorSet)(uintptr_t)lime::gl_shader_descriptor_set(d.program, off);
+        if (pp && pl && ds) {
+            VkImageView vw = VK_NULL_HANDLE;
+            VkSampler sp = VK_NULL_HANDLE;
+            if (d.texId >= 1000) {
+                uint32_t ti = d.texId - 1000;
+                if (ti < o.targets.size() && o.targets[ti].used) vw = o.targets[ti].view;
+                for (size_t k = 0; k < o.textures.size(); k++) {
+                    if (o.textures[k].used && o.textures[k].sampler) { sp = o.textures[k].sampler; break; }
+                }
+            } else if (d.texId > 0 && d.texId <= o.textures.size()) {
+                vw = o.textures[d.texId - 1].view;
+                sp = o.textures[d.texId - 1].sampler;
+            }
+            if (vw != VK_NULL_HANDLE) {
+                uint32_t uo = lime::gl_shader_upload_uniform_slot(d.program, d.uniform, d.uniformSize);
+                if (uo == 0xFFFFFFFFu) uo = 0;
+                bool okS = lime::gl_shader_write_sampler(d.program, off, "bitmap", vw, sp);
+                if (!okS) lime::gl_shader_write_sampler(d.program, off, "openfl_Texture", vw, sp);
+                pipe = pp;
+                layout = pl;
+                bindSet = ds;
+                dynOff = uo;
+                hasDyn = (lime::gl_shader_uniform_buffer_size(d.program) > 0);
+                // 诊断：前 6 笔打出管线/UBO/矩阵/顶点首值，区分"几何被裁掉"与"UBO 全 0"。
+                static int s_dbg = 0;
+                if (s_dbg < 6) {
+                    s_dbg++;
+                    const float* m = (const float*)d.uniform;
+                    fprintf(stderr,
+                            "[pkt] progdbg prog=%d off=%d pipe=%p ds=%p vw=%p uo=%u usz=%u dyn=%d sampler=%d "
+                            "n=%d v0=%.1f,%.1f uv=%.3f,%.3f m0=%.3f m5=%.3f m12=%.3f m13=%.3f\n",
+                            d.program, off ? 1 : 0, (void*)pp, (void*)ds, (void*)vw, uo,
+                            (unsigned)d.uniformSize, hasDyn ? 1 : 0, okS ? 1 : 0,
+                            d.vertexCount, d.verts[0], d.verts[1], d.verts[13], d.verts[14],
+                            m[0], m[5], m[12], m[13]);
+                }
+            }
+        }
+    }
+    if (!pipe) {
+        // 回退：固定管线（与旧行为逐字一致）
+        pipe = (VkPipeline)(uintptr_t)PktPipelineFor(d.state);
+        if (!pipe) return false;
+        layout = o.pipeLayout;
+        bindSet = set;
+        dynOff = (uint32_t)o.slot * o.uboStride;
+        hasDyn = true;
+    }
+
     g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-    // binding0 是动态 UBO：传当前帧环槽位的偏移
-    uint32_t pktDynOff = (uint32_t)o.slot * o.uboStride;
-    g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipeLayout, 0, 1, &set, 1, &pktDynOff);
+    if (hasDyn) {
+        g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &bindSet, 1, &dynOff);
+    } else {
+        g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &bindSet, 0, nullptr);
+    }
     VkBuffer vbufs[2] = {o.pktVb, o.attrBuf};
     VkDeviceSize voffs[2] = {voff, 0};
     g_bindVB(o.cmd, 0, 2, vbufs, voffs);
