@@ -902,11 +902,23 @@ bool ExecuteDraw(const vkpkt::WirePacket& w)
 
 	uint32_t rtImage = gl_vk_fbo_target((int)w.fbo);
 
-	// clear 行：pass 已经在 BindRenderTarget 打开，这里幂等对齐
+	// clear 行：clear 是事件，颜色以包内 clearColor（RGBA8，R 在低字节）为准；
+	// GL 状态只在退化的非 clear 包上兜底（与 vk_packet.cpp 的物化口径一致）。
 	if (w.count <= 0)
 	{
 		float cc[4] = {0, 0, 0, 0};
-		glstate::GetClearColor(cc);
+		if (w.kind == vkpkt::KIND_CLEAR)
+		{
+			const uint32_t c = w.clearColor;
+			cc[0] = (float)((c >> 0) & 0xFF) / 255.0f;
+			cc[1] = (float)((c >> 8) & 0xFF) / 255.0f;
+			cc[2] = (float)((c >> 16) & 0xFF) / 255.0f;
+			cc[3] = (float)((c >> 24) & 0xFF) / 255.0f;
+		}
+		else
+		{
+			glstate::GetClearColor(cc);
+		}
 		bool colorClear = (w.clearMask & vkpkt::CLEAR_COLOR) != 0;
 		return r->PktBeginTarget(rtImage, cc[0], cc[1], cc[2], cc[3], colorClear, w.clearMask);
 	}
