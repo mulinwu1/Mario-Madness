@@ -36,6 +36,9 @@ bool SnapshotAttr (int index, AttrSnap* out);
 // 第 unit 个纹理单元当前绑定的 GL 纹理名（0 = 未绑定）。
 int SnapshotTexBound (int unit);
 
+// 当前 active texture unit 上绑定的 GL 纹理名（与批处理 DrawRaw 同口径）。
+int SnapshotTexBoundActive ();
+
 // GL 纹理名 → VkRenderer texture id（离屏别名同样适用）。
 uint32_t SnapshotTexVk (int glName);
 
