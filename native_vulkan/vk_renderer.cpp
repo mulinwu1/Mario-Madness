@@ -3146,7 +3146,8 @@ static bool TraceClearWant () {
     if (!on) return false;
     // 按帧单独计数：clear 行不再吃"整局一次"的预算，菜单/后期帧也能拿到自己的 clear 行
     if (gen != g_drawFrame) { gen = g_drawFrame; used = 0; }
-    if (used >= mx) return false;
+    // VK_TRACE_MAX=0 表示不限量（packet 路径的 g_drawFrame 不递增，限量会让菜单段永久静音）
+    if (mx > 0 && used >= mx) return false;
     used++;
     return true;
 }
@@ -3801,6 +3802,9 @@ void VkRenderer::PktEndTarget() {
     if (t == 0 && o.presentReq) {
         o.presentReq = false;
         o.pktPendingPresent = true;
+        // 取证：延后翻页后 present 恒 false，旧的 `if (present)` 转储永远不触发；
+        // 这里在真正的 flip 收尾处（GPU 已 waitIdle）补一次采样纹理转储。
+        MaybeDumpTextures((uint64_t)lime::pkt::SnapshotFrameGen());
     }
     if (present && !o.pktBbFinalPresent) {
         // 单次上屏的累积模式：本笔 pass 结束在 COLOR_ATTACHMENT_OPTIMAL，
