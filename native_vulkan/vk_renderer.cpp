@@ -311,6 +311,11 @@ struct VkRenderer::Impl {
     bool bbHeld = false;
     // packet 路径的 target=0 pass 是否以 PRESENT_SRC 收尾（单次上屏：只有它结束才能 present）
     bool pktBbFinalPresent = true;
+    // packet 路径：本视觉帧是否已经清过屏（第一次上屏 pass 才 CLEAR，之后 LOAD 累积）
+    bool bbFrameCleared = false;
+    // packet 路径：presentReq 已置位但还没真正翻页（延后到下一次上屏 pass 开始前，
+    // 这样同一视觉帧里 flip 之后才到的合成层也能落在同一张图上一起翻）。
+    bool pktPendingPresent = false;
     bool bbLoad = false;
     bool presentReq = false;
     // 交换链脏标记：present/acquire 返回 OUT_OF_DATE 或 SUBOPTIMAL 后置位，
@@ -3265,29 +3270,82 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
             if (RecreateSwapchain()) o.swapDirty = false;
             else return false;
         }
+        // 延后翻页：上一次上屏 pass 结束时就请求了 present，但游戏在 flip 之后还会再合成
+        // 一层（背景层）。这里在开新 pass 之前先把已经累积好的那张图翻出去，再取新图。
+        if (o.pktPendingPresent && o.bbHeld && !o.pktOpen && o.frameImageIndex < o.swapImages.size()) {
+            VkCommandBuffer cb = VK_NULL_HANDLE;
+            VkCommandBufferAllocateInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            cbi.commandPool = o.cmdPool;
+            cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cbi.commandBufferCount = 1;
+            ((PFN_vkAllocateCommandBuffers)g_gipa(o.inst, "vkAllocateCommandBuffers"))(o.dev, &cbi, &cb);
+            if (cb) {
+                VkCommandBufferBeginInfo cbb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                g_beginCB(cb, &cbb);
+                VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                b.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+                b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.image = o.swapImages[o.frameImageIndex];
+                b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                b.dstAccessMask = 0;
+                g_cmdBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &b);
+                g_endCB(cb);
+                VkSubmitInfo bsi{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                bsi.commandBufferCount = 1;
+                bsi.pCommandBuffers = &cb;
+                g_submit(o.queue, 1, &bsi, VK_NULL_HANDLE);
+                g_waitIdle(o.queue);
+                ((PFN_vkFreeCommandBuffers)g_gipa(o.inst, "vkFreeCommandBuffers"))(o.dev, o.cmdPool, 1, &cb);
+                VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+                pi.swapchainCount = 1;
+                pi.pSwapchains = &o.swapchain;
+                pi.pImageIndices = &o.frameImageIndex;
+                VkResult pr = g_present(o.queue, &pi);
+                if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) o.swapDirty = true;
+                static uint64_t s_pp = 0;
+                if (s_pp++ < 6) {
+                    fprintf(stderr, "[pkt] present deferred->flushed f=%llu img=%u r=%d\n",
+                            (unsigned long long)g_drawFrame, o.frameImageIndex, (int)pr);
+                }
+            }
+            o.bbHeld = false;
+            o.presentReq = false;
+            o.pktPendingPresent = false;
+            o.bbFrameCleared = false;
+        }
         const bool singlePresent = (o.renderPassLoad != VK_NULL_HANDLE &&
                                     o.renderPassLoadKeep != VK_NULL_HANDLE &&
                                     o.renderPassKeep != VK_NULL_HANDLE);
         // 单次上屏（与批处理同口径）：一个视觉帧里游戏会对 target=0 合成多次
         // （FBO 切换 + ContextFlip）。旧行为每次都 acquire 新图，后一次 CLEAR 把前一次
         // 合成的内容整幅抹掉，表现是"只看到最后一层、随后整屏黑"。
-        // 这里一律用"结束在 COLOR_ATTACHMENT_OPTIMAL"的 pass 累积，真正的 present
-        // 统一由 RequestPresent()（ContextFlip）触发。
-        if (singlePresent && o.bbHeld) {
+        // 规范要点：initialLayout=UNDEFINED 会丢弃整张图内容，所以只有本视觉帧的
+        // 第一次上屏 pass 允许 CLEAR，之后一律 LOAD 累积；present 只在真实 flip 时做。
+        bool firstOfFrame = !o.bbFrameCleared;
+        o.bbFrameCleared = true;
+        if (singlePresent && o.bbHeld && !firstOfFrame) {
             rp = o.renderPassLoadKeep;
             fb = o.framebuffersLoadKeep[o.frameImageIndex];
         } else {
-            VkResult ar = g_acquire(o.dev, o.swapchain, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE,
-                                    &o.frameImageIndex);
-            if (ar == VK_SUBOPTIMAL_KHR && WindowSizeMatchesExtent() && !InResizeAnimation()) o.swapDirty = true;
-            if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
-                if (!InResizeAnimation()) o.swapDirty = true;
-                fprintf(stderr, "[pkt] begin target=0 ok=0 acquire_err=%d\n", (int)ar);
-                TraceClearLog(0, r, g, b, a, 0, "acquire_err", clearMask);
-                return false;
+            if (!o.bbHeld) {
+                VkResult ar = g_acquire(o.dev, o.swapchain, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE,
+                                        &o.frameImageIndex);
+                if (ar == VK_SUBOPTIMAL_KHR && WindowSizeMatchesExtent() && !InResizeAnimation()) o.swapDirty = true;
+                if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
+                    if (!InResizeAnimation()) o.swapDirty = true;
+                    fprintf(stderr, "[pkt] begin target=0 ok=0 acquire_err=%d\n", (int)ar);
+                    TraceClearLog(0, r, g, b, a, 0, "acquire_err", clearMask);
+                    return false;
+                }
+                o.bbHeld = true;
+                o.bbLoad = false;
             }
-            o.bbHeld = true;
-            o.bbLoad = false;
             rp = singlePresent ? o.renderPassKeep : o.renderPass;
             fb = singlePresent ? o.framebuffersKeep[o.frameImageIndex]
                                : o.framebuffers[o.frameImageIndex];
@@ -3383,8 +3441,8 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
     o.pktOpen = true;
     o.pktTarget = id;
     o.pktTargetExt = ext;
-    fprintf(stderr, "[pkt] begin target=%u rp=%p fb=%p ext=%ux%u vp=%d,%d,%d,%d sc=%d,%d,%d,%d clear=%.2f,%.2f,%.2f,%.2f policy=vp:%s,sc:%s\n",
-            id, (void*)rp, (void*)fb, ext.width, ext.height,
+    fprintf(stderr, "[pkt] begin target=%u rp=%p fb=%p img=%u held=%d ext=%ux%u vp=%d,%d,%d,%d sc=%d,%d,%d,%d clear=%.2f,%.2f,%.2f,%.2f policy=vp:%s,sc:%s\n",
+            id, (void*)rp, (void*)fb, o.frameImageIndex, o.bbHeld ? 1 : 0, ext.width, ext.height,
             (int)vp.x, (int)vp.y, (int)vp.width, (int)vp.height,
             (int)sc.offset.x, (int)sc.offset.y, (int)sc.extent.width, (int)sc.extent.height,
             r, g, b, a,
@@ -3736,7 +3794,13 @@ void VkRenderer::PktEndTarget() {
     // 离屏目标按批处理同样的口径记录"最后一个真正写过几何的目标"（合成选源用）
     if (t >= 1000 && draws > 0) o.lastGeomTarget = t;
 
-    bool present = (t == 0 && o.presentReq);
+    // packet 路径延后翻页：flip 之后游戏还会再合成一层（背景层），如果在这里立刻 present，
+    // 那一层就永远上不了屏。改为标记 pending，由下一次上屏 pass 开始前统一翻页。
+    bool present = false;
+    if (t == 0 && o.presentReq) {
+        o.presentReq = false;
+        o.pktPendingPresent = true;
+    }
     if (present && !o.pktBbFinalPresent) {
         // 单次上屏的累积模式：本笔 pass 结束在 COLOR_ATTACHMENT_OPTIMAL，
         // present 前补一次 CA -> PRESENT_SRC 的布局转换（此时队列已 idle）。
@@ -3870,6 +3934,7 @@ void VkRenderer::PktEndTarget() {
         }
         o.bbHeld = false;
         o.presentReq = false;
+        o.bbFrameCleared = false;   // 新视觉帧：下一次上屏 pass 重新 CLEAR
     }
     fprintf(stderr, "[pkt] end target=%u draws=%llu present=%d img=%u\n",
             t, (unsigned long long)draws, present ? 1 : 0, o.frameImageIndex);
@@ -5123,6 +5188,26 @@ void VkRenderer::EndFrame() {
                     (unsigned long long)s_progDS, (unsigned long long)g_drawFrame);
         }
     }
+    // 诊断 VK_BB_TRACE=1：打印本帧 target=0 的绘制顺序（program / 采样目标 / 顶点数），
+    // 用来对比批处理与 packet 路径的合成分层顺序。
+    {
+        static int s_bbTrace = -1;
+        if (s_bbTrace < 0) {
+            const char* v = getenv("VK_BB_TRACE");
+            s_bbTrace = (v && v[0] == '1') ? 1 : 0;
+        }
+        if (s_bbTrace && o.currentTarget == 0) {
+            fprintf(stderr, "[bbtrace] f=%llu rp=%s n=%zu:", (unsigned long long)g_drawFrame,
+                    (rp == o.renderPass) ? "CLEAR/UNDEF" :
+                    (rp == o.renderPassLoad) ? "LOAD(CA->PRESENT)" :
+                    (rp == o.renderPassKeep) ? "KEEP(UNDEF->CA)" : "LOADKEEP(CA->CA)",
+                    ranges.size());
+            for (size_t i = 0; i < ranges.size() && i < 12; i++)
+                fprintf(stderr, " [%zu]p%u tex%u n%zu", i, (unsigned)ranges[i].prog,
+                        ranges[i].id, ranges[i].count);
+            fprintf(stderr, "\n");
+        }
+    }
     g_endRP(o.cmd);
 
     // Phase 0：pass 终点针（BOTTOM_OF_PIPE = pass 命令全部完成时写入）
@@ -5285,8 +5370,17 @@ void VkRenderer::EndFrame() {
             s_dump = (dv && dv[0] == '1') ? 1 : 0;
         }
         if (s_dump) {
+            // VK_DUMP_PRESENT_WARM=<帧号>：跳过前面的帧再开始落盘（默认 0 = 从第一帧开始），
+            // 用来抓"热身之后"的稳定画面，而不是加载期的前 24 帧。
+            static uint64_t s_warm = 0;
+            static bool s_warmInit = false;
+            if (!s_warmInit) {
+                s_warmInit = true;
+                const char* wv = getenv("VK_DUMP_PRESENT_WARM");
+                if (wv && wv[0]) s_warm = (uint64_t)strtoull(wv, nullptr, 10);
+            }
             static uint64_t s_dumped = 0;
-            if (s_dumped < 24) {
+            if (s_dumped < 24 && g_drawFrame >= s_warm) {
                 char name[160];
                 snprintf(name, sizeof(name), "vk_pres_%02llu_f%llu_mean%.0f.bmp",
                          (unsigned long long)s_dumped, (unsigned long long)g_drawFrame,
