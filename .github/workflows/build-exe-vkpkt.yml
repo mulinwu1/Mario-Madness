@@ -22,7 +22,8 @@ jobs:
 
   build-vkpkt:
     needs: build-lime-vulkan
-    if: ${{ always() && (inputs.ndll_run_id == '' || needs.build-lime-vulkan.result == 'success') }}
+    # 给了 ndll_run_id 时前置 job 是 skipped，不能要求它 success
+    if: ${{ always() && (inputs.ndll_run_id != '' || needs.build-lime-vulkan.result == 'success') }}
     runs-on: windows-latest
     timeout-minutes: 180
     env:
