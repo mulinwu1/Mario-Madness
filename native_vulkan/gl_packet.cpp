@@ -1,5 +1,6 @@
 ﻿#include "gl_packet.h"
 #include "vk_packet.h"
+#include "gl_state.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -103,6 +104,112 @@ bool LogEveryFrame()
 	return g_l.logFrame == 1;
 }
 
+// ---------------------------------------------------------------- 状态快照（阶段 ①）
+//
+// 只读：全部来自 gl_state 的镜像查询，不写任何 GL 状态、不分配。
+// 开关 VK_PKT_STATE=1；可选 VK_PKT_STATE_FRAME=<帧号> 只打指定帧，
+// VK_PKT_STATE_MAX=<n> 每帧最多打 n 笔（默认 32，防日志洪水）。
+//
+// 注意：QueryInteger 只对本模块认识的 pname 调用（先 HandlesPname），
+// 否则会写入 GL_INVALID_ENUM 污染 glGetError。
+
+int g_stateMode = -1; // -1 未探测；0 关；1 开
+int g_stateFrame = -1; // -1 所有帧
+int g_stateMax = 32;
+int g_stateUsed = 0;
+
+bool StateWant(uint32_t frameGen)
+{
+	if (g_stateMode < 0)
+	{
+		const char* v = getenv("VK_PKT_STATE");
+		g_stateMode = (v && v[0] == '1') ? 1 : 0;
+		const char* vf = getenv("VK_PKT_STATE_FRAME");
+		if (vf && vf[0]) g_stateFrame = atoi(vf);
+		const char* vm = getenv("VK_PKT_STATE_MAX");
+		if (vm && vm[0]) g_stateMax = atoi(vm);
+		if (g_stateMode)
+		{
+			fprintf(stderr, "[vkpkt] state on frame=%d max=%d\n", g_stateFrame, g_stateMax);
+		}
+	}
+	if (!g_stateMode) return false;
+	if (g_stateFrame >= 0 && (int)frameGen != g_stateFrame) return false;
+	if (g_stateUsed >= g_stateMax) return false;
+	g_stateUsed++;
+	return true;
+}
+
+int Q1(int pname, int fallback)
+{
+	if (!glstate::HandlesPname(pname)) return fallback;
+	int v = fallback;
+	if (glstate::QueryInteger(pname, &v, 1) == 0) return fallback;
+	return v;
+}
+
+const char* BlendName(int enabled, int eq, int src, int dst)
+{
+	static char buf[32];
+	if (!enabled) return "none";
+	switch (eq)
+	{
+		case 0x800A: return "subtract";
+		case 0x800B: return "reverse_subtract";
+		case 0x8007: return "min";
+		case 0x8008: return "max";
+		default: break;
+	}
+	if (eq == 0x8006)
+	{
+		if (src == 0x0001 && dst == 0x0001) return "add";
+		if (src == 0x0302 && dst == 0x0303) return "alpha";
+		if (src == 0x0001 && dst == 0x0303) return "premultiplied";
+	}
+	snprintf(buf, sizeof(buf), "x%04x:%04x:%04x", src, dst, eq);
+	return buf;
+}
+
+// 字段口径对齐 docs/draw_packet_spec.md §10。
+void PrintState(const vkpkt::WirePacket& w)
+{
+	const int GL_BLEND = 0x0BE2;
+	const int GL_DEPTH_TEST = 0x0B71;
+	const int GL_PNAME_BLEND_SRC_RGB = 0x80C9;
+	const int GL_PNAME_BLEND_DST_RGB = 0x80C8;
+	const int GL_PNAME_BLEND_EQ_RGB = 0x8009;
+	const int GL_PNAME_DEPTH_WRITEMASK = 0x0B72;
+
+	int blendOn = glstate::IsEnabled(GL_BLEND) ? 1 : 0;
+	int src = Q1(GL_PNAME_BLEND_SRC_RGB, 0x0001);
+	int dst = Q1(GL_PNAME_BLEND_DST_RGB, 0x0000);
+	int eq = Q1(GL_PNAME_BLEND_EQ_RGB, 0x8006);
+	int depth = glstate::IsEnabled(GL_DEPTH_TEST) ? 1 : 0;
+	int dwrite = Q1(GL_PNAME_DEPTH_WRITEMASK, 1) ? 1 : 0;
+
+	int sc[4] = {0, 0, 0, 0};
+	glstate::GetScissorBox(sc);
+	int vp[4] = {0, 0, 0, 0};
+	glstate::GetViewportBox(vp);
+	int cm[4] = {1, 1, 1, 1};
+	glstate::GetColorMask(cm);
+
+	int isClear = (w.kind == vkpkt::KIND_CLEAR);
+	int n = isClear ? 0 : w.count;
+	int v0 = (w.kind == vkpkt::KIND_DRAW_ARRAYS) ? w.first : -1;
+	int idx = (w.kind == vkpkt::KIND_DRAW_ELEMENTS) ? w.count : -1;
+
+	fprintf(stderr,
+			"[vkpkt] f=%u s=%u prog=%u rt=%u prim=tris n=%d v0=%d idx=%d "
+			"blend=%s depth=%d dwrite=%d scissor=%d,%d,%d,%d viewport=%d,%d,%d,%d cm=%d%d%d%d\n",
+			(unsigned)w.frameGen, (unsigned)w.seq, (unsigned)w.program, (unsigned)w.fbo,
+			n, v0, idx,
+			BlendName(blendOn, eq, src, dst), depth, dwrite,
+			sc[0], sc[1], sc[2], sc[3],
+			vp[0], vp[1], vp[2], vp[3],
+			cm[0], cm[1], cm[2], cm[3]);
+}
+
 } // namespace
 
 // 执行路径恒关：GL 侧永远不会因为 packet 而跳过自己的绘制。
@@ -158,6 +265,7 @@ int lime_vk_pkt_frame(int frameGen, double animTime)
 	g_l.totalFrames++;
 	PrintFrame("end");
 	ResetFrameCounters();
+	g_stateUsed = 0;
 	return 0;
 }
 
@@ -198,6 +306,7 @@ int lime_vk_pkt_emit(double pointer, int bytes)
 		PrintFrame("rollover");
 		g_l.frameGen = w.frameGen;
 		ResetFrameCounters();
+		g_stateUsed = 0;
 	}
 
 	if (w.seq != g_l.nextSeq) g_l.frameSeqErr++;
@@ -221,6 +330,9 @@ int lime_vk_pkt_emit(double pointer, int bytes)
 	g_l.lastProgram = w.program;
 	g_l.lastFbo = w.fbo;
 	g_l.totalPackets++;
+
+	// 阶段 ①：只读状态快照（VK_PKT_STATE=1 才生效）
+	if (StateWant(w.frameGen)) PrintState(w);
 
 	return 1;
 }
