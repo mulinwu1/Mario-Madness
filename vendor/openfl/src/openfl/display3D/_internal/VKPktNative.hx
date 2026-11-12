@@ -112,18 +112,6 @@ class VKPktNative
 		}
 		// 只缺 frame 可以忍（帧摘要没有，但 packet 照记）；缺 emit 就没有记录的意义。
 		if (__emit == null) __dead = true;
-		if (!__dead)
-		{
-			// 启用握手：同时保证 `[vkpkt]` 字面量进 exe（CI 用它确认记录器真的编进去了）。
-			#if sys
-			try
-			{
-				Sys.stderr().writeString("[vkpkt] recorder armed\n");
-				Sys.stderr().flush();
-			}
-			catch (e:Dynamic) {}
-			#end
-		}
 		#else
 		__dead = true;
 		#end
