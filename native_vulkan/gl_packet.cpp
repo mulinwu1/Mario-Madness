@@ -991,7 +991,33 @@ bool ExecuteDraw(const vkpkt::WirePacket& w)
 	{
 		AttrSnap s;
 		if (SnapshotAttr(1, &s) && !s.enabled && s.constSet) alphaConst *= s.constValue[0];
-		if (SnapshotAttr(5, &s) && !s.enabled && s.constSet) alphaConst *= s.constValue[0];
+		// loc5 只有在该 program 真的声明了它时才参与乘法。否则那是未使用槽位的默认常量
+		// （constSet=1、值 0），会把 alpha 乘成 0：prog=1 上屏整屏黑、prog=7 噪点消失
+		// 都是这个原因（prog=1 的顶点着色器只声明了 loc1 的 openfl_Alpha）。
+		if (w.program > 0 && gl_shader_program_has_attribute((int)w.program, 5)
+			&& SnapshotAttr(5, &s) && !s.enabled && s.constSet)
+			alphaConst *= s.constValue[0];
+	}
+
+	// 诊断：每个 program 的 alpha 来源（hasA=顶点属性 / alphaConst=常量）。
+	// 上屏（prog=1）用 program 管线时整屏黑，就是这里取到 0 导致的。
+	{
+		static signed char s_aDbg[256] = {0};
+		if (w.program > 0 && w.program < 256 && !s_aDbg[w.program])
+		{
+			s_aDbg[w.program] = 1;
+			AttrSnap s1, s5;
+			bool ok1 = SnapshotAttr(1, &s1) != 0;
+			bool ok5 = SnapshotAttr(5, &s5) != 0;
+			fprintf(stderr,
+					"[pktalpha] prog=%u hasA=%d slot=%d alphaConst=%.3f "
+					"loc1(ok=%d en=%d set=%d v=%.3f) loc5(ok=%d en=%d set=%d v=%.3f)\n",
+					(unsigned)w.program, hasA ? 1 : 0, alphaSlot, alphaConst,
+					ok1 ? 1 : 0, ok1 ? (s1.enabled ? 1 : 0) : -1, ok1 ? (s1.constSet ? 1 : 0) : -1,
+					ok1 ? s1.constValue[0] : 0.0f,
+					ok5 ? 1 : 0, ok5 ? (s5.enabled ? 1 : 0) : -1, ok5 ? (s5.constSet ? 1 : 0) : -1,
+					ok5 ? s5.constValue[0] : 0.0f);
+		}
 	}
 
 	std::vector<float> px((size_t)w.count), py((size_t)w.count);
