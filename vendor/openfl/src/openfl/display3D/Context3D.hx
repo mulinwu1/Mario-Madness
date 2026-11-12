@@ -7,7 +7,7 @@ import openfl.display3D._internal.GLFramebuffer;
 import openfl.display3D._internal.GLTexture;
 import openfl.display3D._internal.VKDrawSink;
 import openfl.display3D._internal.VKDrawSnapshot;
-#if (openfl_vk_pkt && lime_cffi && !macro)
+#if openfl_vk_pkt
 import openfl.display3D._internal.VKPktNative;
 #end
 import openfl.display._internal.SamplerState;
