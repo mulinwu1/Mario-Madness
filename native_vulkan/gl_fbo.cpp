@@ -474,6 +474,17 @@ void lime_gl_bind_framebuffer (int target, int framebuffer) {
     if (target == K_FRAMEBUFFER) g_boundReadFbo = framebuffer;
 }
 
+// 2a 直连：Haxe 侧（VK_BACKEND=1 或含 target）跳到这一个入口，语义与
+// lime_gl_bind_framebuffer (K_FRAMEBUFFER, framebuffer) 完全一致，只是不再经过
+// 通用 GL 状态机。返回 1 = 已处理，0 = 参数非法（调用方回退 GL 路径）。
+int lime_vk_bind_draw_fbo (int framebuffer) {
+    if (framebuffer < 0) return 0;
+    if (framebuffer != 0 && !IsFboName (framebuffer)) return 0;
+    BindDrawFbo (framebuffer);
+    g_boundReadFbo = framebuffer;
+    return 1;
+}
+
 void lime_gl_framebuffer_texture2D (int target, int attachment, int textarget,
                                     int texture, int level) {
     int fboName = BoundFboName (target);
