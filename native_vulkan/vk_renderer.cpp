@@ -309,6 +309,8 @@ struct VkRenderer::Impl {
     VkRenderPass renderPassKeep = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> framebuffersKeep;
     bool bbHeld = false;
+    // packet 路径的 target=0 pass 是否以 PRESENT_SRC 收尾（单次上屏：只有它结束才能 present）
+    bool pktBbFinalPresent = true;
     bool bbLoad = false;
     bool presentReq = false;
     // 交换链脏标记：present/acquire 返回 OUT_OF_DATE 或 SUBOPTIMAL 后置位，
@@ -2677,7 +2679,11 @@ void VkRenderer::PresentTarget() {
 }
 
 void VkRenderer::RequestPresent() {
-    impl->presentReq = true;
+    Impl& o = *impl;
+    // packet 执行路径：gl_fbo 在 PktEndTarget() 之前调这里（此时 pass 还开着），
+    // 所以这里只置标记；真正的 CA -> PRESENT_SRC 转换和 vkQueuePresentKHR
+    // 由 PktEndTarget() 在 pass 收尾、队列 idle 之后完成。
+    o.presentReq = true;
 }
 
 // 批处理路径的离屏清屏：gl_vk_handle_clear 真的执行过 glClear 时打标，
@@ -3259,19 +3265,40 @@ bool VkRenderer::PktBeginTarget(uint32_t id, float r, float g, float b, float a,
             if (RecreateSwapchain()) o.swapDirty = false;
             else return false;
         }
-        VkResult ar = g_acquire(o.dev, o.swapchain, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE,
-                                &o.frameImageIndex);
-        if (ar == VK_SUBOPTIMAL_KHR && WindowSizeMatchesExtent() && !InResizeAnimation()) o.swapDirty = true;
-        if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
-            if (!InResizeAnimation()) o.swapDirty = true;
-            fprintf(stderr, "[pkt] begin target=0 ok=0 acquire_err=%d\n", (int)ar);
-            TraceClearLog(0, r, g, b, a, 0, "acquire_err", clearMask);
-            return false;
+        const bool singlePresent = (o.renderPassLoad != VK_NULL_HANDLE &&
+                                    o.renderPassLoadKeep != VK_NULL_HANDLE &&
+                                    o.renderPassKeep != VK_NULL_HANDLE);
+        // 单次上屏（与批处理同口径）：一个视觉帧里游戏会对 target=0 合成多次
+        // （FBO 切换 + ContextFlip）。旧行为每次都 acquire 新图，后一次 CLEAR 把前一次
+        // 合成的内容整幅抹掉，表现是"只看到最后一层、随后整屏黑"。
+        // 这里一律用"结束在 COLOR_ATTACHMENT_OPTIMAL"的 pass 累积，真正的 present
+        // 统一由 RequestPresent()（ContextFlip）触发。
+        if (singlePresent && o.bbHeld) {
+            rp = o.renderPassLoadKeep;
+            fb = o.framebuffersLoadKeep[o.frameImageIndex];
+        } else {
+            VkResult ar = g_acquire(o.dev, o.swapchain, UINT64_MAX, VK_NULL_HANDLE, VK_NULL_HANDLE,
+                                    &o.frameImageIndex);
+            if (ar == VK_SUBOPTIMAL_KHR && WindowSizeMatchesExtent() && !InResizeAnimation()) o.swapDirty = true;
+            if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
+                if (!InResizeAnimation()) o.swapDirty = true;
+                fprintf(stderr, "[pkt] begin target=0 ok=0 acquire_err=%d\n", (int)ar);
+                TraceClearLog(0, r, g, b, a, 0, "acquire_err", clearMask);
+                return false;
+            }
+            o.bbHeld = true;
+            o.bbLoad = false;
+            rp = singlePresent ? o.renderPassKeep : o.renderPass;
+            fb = singlePresent ? o.framebuffersKeep[o.frameImageIndex]
+                               : o.framebuffers[o.frameImageIndex];
         }
-        o.bbHeld = true;
-        o.bbLoad = false;
-        fb = o.framebuffers[o.frameImageIndex];
-        rp = o.renderPass;
+        // singlePresent 关（或 keep pass 缺失）时沿用旧行为：pass 以 PRESENT_SRC 收尾，当场 present
+        o.pktBbFinalPresent = !singlePresent;
+        if (!fb || !rp) {
+            fb = o.framebuffers[o.frameImageIndex];
+            rp = o.renderPass;
+            o.pktBbFinalPresent = true;   // 没有 keep pass 时退回"每次 acquire 每次 present"
+        }
     }
     if (!fb || !rp) {
         fprintf(stderr, "[pkt] begin target=%u ok=0 fb=%p rp=%p\n", id, (void*)fb, (void*)rp);
@@ -3579,6 +3606,26 @@ bool VkRenderer::PktDraw(const PktDrawDesc& d) {
                             d.vertexCount, d.verts[0], d.verts[1], d.verts[13], d.verts[14],
                             m[0], m[5], m[12], m[13]);
                 }
+                // 诊断 VK_PKT_PROGUNIF=1：打印该 program 前 2 笔的完整 uniform 字，
+                // 用来确认 iTime/strengthMulti 等尾字段在快照里是不是真实值（默认关）。
+                static int s_unifDbg = -1;
+                if (s_unifDbg < 0) {
+                    const char* v = getenv("VK_PKT_PROGUNIF");
+                    s_unifDbg = (v && v[0] == '1') ? 1 : 0;
+                }
+                if (s_unifDbg && d.program > 0 && d.program < 256) {
+                    static signed char s_dbgU[256] = {0};
+                    if (s_dbgU[d.program] < 2) {
+                        s_dbgU[d.program]++;
+                        int n = (int)(d.uniformSize / 4u);
+                        if (n > 40) n = 40;
+                        const float* uf = (const float*)d.uniform;
+                        fprintf(stderr, "[pkt] progUnif prog=%d usz=%u n=%d:",
+                                d.program, (unsigned)d.uniformSize, (int)(d.uniformSize / 4u));
+                        for (int i = 0; i < n; i++) fprintf(stderr, " %.4g", uf[i]);
+                        fprintf(stderr, "\n");
+                    }
+                }
             }
         }
     }
@@ -3658,7 +3705,128 @@ void VkRenderer::PktEndTarget() {
     if (t >= 1000 && draws > 0) o.lastGeomTarget = t;
 
     bool present = (t == 0 && o.presentReq);
+    if (present && !o.pktBbFinalPresent) {
+        // 单次上屏的累积模式：本笔 pass 结束在 COLOR_ATTACHMENT_OPTIMAL，
+        // present 前补一次 CA -> PRESENT_SRC 的布局转换（此时队列已 idle）。
+        VkCommandBuffer cb = VK_NULL_HANDLE;
+        VkCommandBufferAllocateInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        cbi.commandPool = o.cmdPool;
+        cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbi.commandBufferCount = 1;
+        ((PFN_vkAllocateCommandBuffers)g_gipa(o.inst, "vkAllocateCommandBuffers"))(o.dev, &cbi, &cb);
+        if (cb) {
+            VkCommandBufferBeginInfo cbb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            g_beginCB(cb, &cbb);
+            VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            b.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image = o.swapImages[o.frameImageIndex];
+            b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            b.dstAccessMask = 0;
+            g_cmdBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &b);
+            g_endCB(cb);
+            VkSubmitInfo tsi{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            tsi.commandBufferCount = 1;
+            tsi.pCommandBuffers = &cb;
+            g_submit(o.queue, 1, &tsi, VK_NULL_HANDLE);
+            g_waitIdle(o.queue);
+            ((PFN_vkFreeCommandBuffers)g_gipa(o.inst, "vkFreeCommandBuffers"))(o.dev, o.cmdPool, 1, &cb);
+        }
+    }
     if (present) {
+        // 诊断 VK_PKT_BBSTAT=1（默认关）：present 前回读交换链图并打印亮度均值，
+        // 用来区分"合成没画上去"和"画了但 present/窗口黑"。布局：pass finalLayout=PRESENT_SRC。
+        static int s_bbStat = -1;
+        if (s_bbStat < 0) {
+            const char* v = getenv("VK_PKT_BBSTAT");
+            s_bbStat = (v && v[0] == '1') ? 1 : 0;
+        }
+        static VkBuffer s_bbBuf = VK_NULL_HANDLE;
+        static VkDeviceMemory s_bbMem = VK_NULL_HANDLE;
+        static void* s_bbPtr = nullptr;
+        static size_t s_bbBytes = 0;
+        size_t bbBytes = (size_t)o.extent.width * (size_t)o.extent.height * 4u;
+        if (s_bbStat && !s_bbBuf && bbBytes > 0) {
+            VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            bci.size = (VkDeviceSize)bbBytes;
+            bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            if (g_createBuf(o.dev, &bci, nullptr, &s_bbBuf) == VK_SUCCESS) {
+                VkMemoryRequirements mr{};
+                g_getBufReqs(o.dev, s_bbBuf, &mr);
+                VkPhysicalDeviceMemoryProperties mp{};
+                ((PFN_vkGetPhysicalDeviceMemoryProperties)g_gipa(o.inst, "vkGetPhysicalDeviceMemoryProperties"))(o.phys, &mp);
+                VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+                mai.allocationSize = mr.size;
+                mai.memoryTypeIndex = FindMemType(mp, mr.memoryTypeBits,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                if (g_allocMem(o.dev, &mai, nullptr, &s_bbMem) == VK_SUCCESS) {
+                    g_bindBufMem(o.dev, s_bbBuf, s_bbMem, 0);
+                    g_mapMem(o.dev, s_bbMem, 0, mr.size, 0, &s_bbPtr);
+                    s_bbBytes = bbBytes;
+                }
+            }
+        }
+        if (s_bbStat && s_bbPtr && s_bbBytes >= bbBytes) {
+            VkCommandBuffer cb = VK_NULL_HANDLE;
+            VkCommandBufferAllocateInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            cbi.commandPool = o.cmdPool;
+            cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cbi.commandBufferCount = 1;
+            ((PFN_vkAllocateCommandBuffers)g_gipa(o.inst, "vkAllocateCommandBuffers"))(o.dev, &cbi, &cb);
+            if (cb) {
+                VkCommandBufferBeginInfo cbb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                g_beginCB(cb, &cbb);
+                VkImageMemoryBarrier b1{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                b1.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+                b1.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                b1.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b1.image = o.swapImages[o.frameImageIndex];
+                b1.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                b1.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                b1.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                g_cmdBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &b1);
+                VkBufferImageCopy region{};
+                region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                region.imageExtent = {o.extent.width, o.extent.height, 1};
+                g_cmdCopyImgToBuf(cb, o.swapImages[o.frameImageIndex], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                  s_bbBuf, 1, &region);
+                VkImageMemoryBarrier b2 = b1;
+                b2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                b2.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+                b2.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                b2.dstAccessMask = 0;
+                g_cmdBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &b2);
+                g_endCB(cb);
+                VkSubmitInfo bsi{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                bsi.commandBufferCount = 1;
+                bsi.pCommandBuffers = &cb;
+                g_submit(o.queue, 1, &bsi, VK_NULL_HANDLE);
+                g_waitIdle(o.queue);
+                ((PFN_vkFreeCommandBuffers)g_gipa(o.inst, "vkFreeCommandBuffers"))(o.dev, o.cmdPool, 1, &cb);
+                const uint8_t* px = (const uint8_t*)s_bbPtr;
+                double sum = 0.0; size_t cnt = 0, nb = 0;
+                for (size_t p = 0; p < (size_t)o.extent.width * o.extent.height; p += 97) {
+                    const uint8_t* q = px + p * 4;
+                    int v = ((int)q[0] + (int)q[1] + (int)q[2]) / 3;
+                    sum += v; cnt++; if (v >= 8) nb++;
+                }
+                fprintf(stderr, "[pkt] bbstat f=%llu img=%u mean=%.2f nb=%.1f%% draws=%llu\n",
+                        (unsigned long long)g_drawFrame, o.frameImageIndex,
+                        cnt ? sum / (double)cnt : 0.0,
+                        cnt ? 100.0 * (double)nb / (double)cnt : 0.0,
+                        (unsigned long long)draws);
+            }
+        }
         VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
         pi.swapchainCount = 1;
         pi.pSwapchains = &o.swapchain;
