@@ -13,6 +13,9 @@ void lime_gl_bind_buffer (int target, int buffer);
 void lime_gl_bind_buffer_base (int target, int index, int buffer);
 void lime_gl_bind_buffer_range (int target, int index, int buffer, double offset, int size);
 void lime_gl_bind_framebuffer (int target, int framebuffer);
+// 2a 直连入口：Haxe 侧（VK_BACKEND 含 target 时）跳过通用 GL 绑定，直接切渲染目标。
+// 语义等价 lime_gl_bind_framebuffer (FRAMEBUFFER, framebuffer)。
+int lime_vk_bind_draw_fbo (int framebuffer);
 void lime_gl_bind_renderbuffer (int target, int renderbuffer);
 void lime_gl_bind_sampler (int unit, int sampler);
 void lime_gl_bind_texture (int target, int texture);
