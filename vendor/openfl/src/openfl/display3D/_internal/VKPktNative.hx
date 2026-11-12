@@ -22,8 +22,36 @@ class VKPktNative
 	static var __emit:Dynamic = null;
 	static var __utag:Dynamic = null;
 	static var __frame:Dynamic = null;
+	// 2a 直连：跳过 glBindFramebuffer（通用 GL 状态机），直接把 FBO 名交给渲染器
+	static var __bindFbo:Dynamic = null;
+	static var __backendTarget:Null<Bool> = null;
 
 	static var __ready:Bool = false;
+
+	/** 运行时开关 VK_BACKEND=1 或含 "target" 时启用渲染目标直连。默认关=走原 GL 路径。 **/
+	public static function backendTargetEnabled():Bool
+	{
+		if (__backendTarget == null)
+		{
+			var on = false;
+			try
+			{
+				var v = Sys.getEnv("VK_BACKEND");
+				on = (v != null) && (v == "1" || v.indexOf("target") >= 0);
+			}
+			catch (e:Dynamic) {}
+			__backendTarget = on;
+		}
+		return __backendTarget;
+	}
+
+	/** 返回 true = 已直连；false = 调用方应回退 gl.bindFramebuffer。 **/
+	public static function bindDrawFbo(fbo:Int):Bool
+	{
+		if (!__ready) init();
+		if (__bindFbo == null) return false;
+		return intOf(__bindFbo(fbo)) != 0;
+	}
 
 	public static function init():Void
 	{
@@ -42,6 +70,16 @@ class VKPktNative
 		catch (e:Dynamic)
 		{
 			return;
+		}
+
+		// 2a 直连符号单独加载：旧 ndll 没有它时不能连累上面的 packet 通道
+		try
+		{
+			__bindFbo = CFFI.load("lime", "lime_vk_bind_draw_fbo", 1, true);
+		}
+		catch (e:Dynamic)
+		{
+			__bindFbo = null;
 		}
 
 		VKDrawSink.nativeMode = function():Int
