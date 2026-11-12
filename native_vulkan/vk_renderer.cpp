@@ -3479,17 +3479,30 @@ bool VkRenderer::PktDraw(const PktDrawDesc& d) {
     // GLSL 只有这条路径会真正执行；固定管线只能近似基础精灵。常量块用批处理同款的
     // 动态偏移槽位上传，保证同一 target 内多笔互不覆盖。
     // 注意：program 管线当前还有兼容性问题（整屏黑），默认关；调通后把默认值改成 1。
-    static int s_useProgPipe = -1;
-    if (s_useProgPipe < 0) {
+    // VK_PKT_PROGPIPE=1 全部 program 走 program 管线；=2..7 只让指定 program 走（二分定位用）。
+    static int s_useProgPipe = -2;
+    if (s_useProgPipe == -2) {
         const char* v = getenv("VK_PKT_PROGPIPE");
-        s_useProgPipe = (v && v[0] == '1') ? 1 : 0;
+        s_useProgPipe = (v && v[0]) ? atoi(v) : 0;
     }
+    bool useProgramPipe = (s_useProgPipe == 1) ||
+                          (s_useProgPipe > 1 && s_useProgPipe == d.program);
+    // 已知问题：prog=1（上屏合成）与 prog=7（TVStatic）的 program 管线输出全黑，
+    // 二分实测其余 2/4/5/6 正常。全部模式下先排除这两个，避免整屏黑。
+    // 诊断期开关 VK_PKT_PROGPIPE_ALL=1 可以强制包含它们（取 progdbg 数据用）。
+    static int s_includeAll = -1;
+    if (s_includeAll < 0) {
+        const char* v = getenv("VK_PKT_PROGPIPE_ALL");
+        s_includeAll = (v && v[0] == '1') ? 1 : 0;
+    }
+    if (!s_includeAll && s_useProgPipe == 1 && (d.program == 1 || d.program == 7)) useProgramPipe = false;
     VkPipeline pipe = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;
     VkDescriptorSet bindSet = set;
     uint32_t dynOff = 0;
     bool hasDyn = true;
-    if (s_useProgPipe && d.program > 0 && d.uniform && d.uniformSize > 0) {
+    bool pipeIsProgram = false;
+    if (useProgramPipe && d.program > 0 && d.uniform && d.uniformSize > 0) {
         bool off = (o.pktTarget >= 1000);
         int pg = d.program;
         // packet 路径接管后批处理路径不再执行，program 管线必须在这里懒构建。
@@ -3546,16 +3559,17 @@ bool VkRenderer::PktDraw(const PktDrawDesc& d) {
                 uint32_t uo = lime::gl_shader_upload_uniform_slot(d.program, d.uniform, d.uniformSize);
                 if (uo == 0xFFFFFFFFu) uo = 0;
                 bool okS = lime::gl_shader_write_sampler(d.program, off, "bitmap", vw, sp);
-                if (!okS) lime::gl_shader_write_sampler(d.program, off, "openfl_Texture", vw, sp);
+                if (!okS) okS = lime::gl_shader_write_sampler(d.program, off, "openfl_Texture", vw, sp);
                 pipe = pp;
                 layout = pl;
                 bindSet = ds;
                 dynOff = uo;
                 hasDyn = (lime::gl_shader_uniform_buffer_size(d.program) > 0);
-                // 诊断：前 6 笔打出管线/UBO/矩阵/顶点首值，区分"几何被裁掉"与"UBO 全 0"。
-                static int s_dbg = 0;
-                if (s_dbg < 6) {
-                    s_dbg++;
+                pipeIsProgram = true;
+                // 诊断：每个 program 首次出现时打一次管线/UBO/矩阵/顶点首值。
+                static signed char s_dbg[256] = {0};
+                if (d.program > 0 && d.program < 256 && !s_dbg[d.program]) {
+                    s_dbg[d.program] = 1;
                     const float* m = (const float*)d.uniform;
                     fprintf(stderr,
                             "[pkt] progdbg prog=%d off=%d pipe=%p ds=%p vw=%p uo=%u usz=%u dyn=%d sampler=%d "
@@ -3579,6 +3593,19 @@ bool VkRenderer::PktDraw(const PktDrawDesc& d) {
     }
 
     g_bindPipe(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    // program 管线的顶点 shader 输出 GL 语义的 y-up NDC，而 Vulkan 视口 y-down：
+    // 上屏（target=0）时用负高度视口翻一次（批处理路径同样做法）；离屏目标不翻。
+    if (pipeIsProgram && o.pktTarget == 0 && d.viewport.valid && o.pktTargetExt.height > 0) {
+        float th = (float)o.pktTargetExt.height;
+        VkViewport nvp;
+        nvp.x = (float)d.viewport.x;
+        nvp.y = th - (float)d.viewport.y;
+        nvp.width = (float)d.viewport.w;
+        nvp.height = -(float)d.viewport.h;
+        nvp.minDepth = 0.0f;
+        nvp.maxDepth = 1.0f;
+        g_setViewport(o.cmd, 0, 1, &nvp);
+    }
     if (hasDyn) {
         g_bindDS(o.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &bindSet, 1, &dynOff);
     } else {
@@ -3594,9 +3621,9 @@ bool VkRenderer::PktDraw(const PktDrawDesc& d) {
         g_cmdDraw(o.cmd, (uint32_t)d.vertexCount, 1, 0, 0);
     }
     o.pktDraws++;
-    fprintf(stderr, "[pkt] draw tgt=%u i=%llu tex=%u set=%p pipe=%p cmd=%s n=%d vbOff=%llu ibOff=%llu "
+    fprintf(stderr, "[pkt] draw tgt=%u i=%llu prog=%d tex=%u set=%p pipe=%p cmd=%s n=%d vbOff=%llu ibOff=%llu "
             "state=blend%d(%u,%u) depth%d/%d stencil%d cull%d vp=%d sc=%d\n",
-            o.pktTarget, (unsigned long long)o.pktDraws, d.texId, (void*)set, (void*)pipe,
+            o.pktTarget, (unsigned long long)o.pktDraws, d.program, d.texId, (void*)set, (void*)pipe,
             indexed ? (use32 ? "vkCmdDrawIndexed(u32)" : "vkCmdDrawIndexed(u16)") : "vkCmdDraw",
             indexed ? d.indexCount : d.vertexCount,
             (unsigned long long)voff, (unsigned long long)ioff,
