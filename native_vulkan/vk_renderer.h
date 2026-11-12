@@ -72,6 +72,11 @@ struct PktDrawDesc {
     PktSamplerState sampler;
     PktRect viewport;
     PktRect scissor;
+    // 游戏 program + 该笔的完整常量块。两者都有时优先走 program 自己的 Vulkan 管线
+    // （滤镜 NTSC/Bloom/TVStatic 只有这条路径会真正执行）；否则回退固定管线。
+    int program;
+    const uint8_t* uniform;
+    uint32_t uniformSize;
 };
 
 class VkRenderer {
