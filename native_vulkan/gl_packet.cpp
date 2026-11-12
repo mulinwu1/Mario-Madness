@@ -924,17 +924,77 @@ bool ExecuteDraw(const vkpkt::WirePacket& w)
 	}
 	if (w.kind != vkpkt::KIND_DRAW_ELEMENTS && w.kind != vkpkt::KIND_DRAW_ARRAYS) return false;
 
-	// 采样源：第一个能解析到 Vk 纹理的槽
+	// 采样源：优先与批处理 DrawRaw 同口径 —— 当前 active unit 上的绑定
+	// （g_texBound[g_activeUnit]）。按 program 声明的 sampler unit 取会撞上
+	// 该 unit 的残留绑定（菜单砖墙被 TV 噪声顶替即此因）。
 	int texName = 0;
 	uint32_t vkTex = 0;
+	// 1) 包内自带的主纹理名（新 exe）：发射那一刻的记录，不受执行时 GL 残余状态影响。
+	if (w.texName > 0)
+	{
+		uint32_t id = SnapshotTexVk((int)w.texName);
+		if (id)
+		{
+			texName = (int)w.texName;
+			vkTex = id;
+			static int s_wireTrace = -1;
+			if (s_wireTrace < 0)
+			{
+				const char* v = getenv("VK_PKT_TRACE");
+				s_wireTrace = (v && v[0] == '1') ? 1 : 0;
+			}
+			if (s_wireTrace)
+			{
+				fprintf(stderr, "[vkexec] wire prog=%u rt=%u gl=%u vk=%u n=%d\n",
+						(unsigned)w.program, rtImage, (unsigned)w.texName, (unsigned)id, (int)w.count);
+			}
+		}
+	}
+	// 2) 老 exe（wire.texName=0）兜底：与批处理同口径的 active unit 绑定
+	{
+		int activeName = vkTex ? 0 : SnapshotTexBoundActive();
+		if (activeName > 0)
+		{
+			uint32_t id = SnapshotTexVk(activeName);
+			if (id)
+			{
+				texName = activeName;
+				vkTex = id;
+				static int s_actTrace = -1;
+				if (s_actTrace < 0)
+				{
+					const char* v = getenv("VK_PKT_TRACE");
+					s_actTrace = (v && v[0] == '1') ? 1 : 0;
+				}
+				if (s_actTrace)
+				{
+					fprintf(stderr, "[vkexec] active prog=%u rt=%u gl=%d vk=%u n=%d\n",
+							(unsigned)w.program, rtImage, activeName, (unsigned)id, (int)w.count);
+				}
+			}
+		}
+	}
 	int samplerCount = (w.program > 0) ? gl_shader_sampler_count((int)w.program) : 0;
-	for (int i = 0; i < samplerCount && i < 8; i++)
+	for (int i = 0; !vkTex && i < samplerCount && i < 8; i++)
 	{
 		int unit = gl_shader_sampler_unit((int)w.program, i);
 		if (unit < 0 || unit > 7) continue;
 		int name = SnapshotTexBound(unit);
 		if (name <= 0) continue;
 		uint32_t id = SnapshotTexVk(name);
+		// 诊断（VK_PKT_TRACE=1）：记录"执行这一刻"真实解析到的 GL 纹理名/Vk id，
+		// 用来和批处理 [bbtrace] 的 tex 对比，定位合成取错纹理的问题。
+		static int s_texTrace = -1;
+		if (s_texTrace < 0)
+		{
+			const char* v = getenv("VK_PKT_TRACE");
+			s_texTrace = (v && v[0] == '1') ? 1 : 0;
+		}
+		if (s_texTrace)
+		{
+			fprintf(stderr, "[vkexec] slot=%d prog=%u rt=%u unit=%d gl=%d vk=%u n=%d\n",
+					i, (unsigned)w.program, rtImage, unit, name, (unsigned)id, (int)w.count);
+		}
 		if (id)
 		{
 			texName = name;
