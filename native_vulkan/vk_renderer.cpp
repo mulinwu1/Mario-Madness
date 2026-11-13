@@ -36,6 +36,8 @@ extern "C" void gl_vk_on_texture_destroyed(uint32_t vkId);
 // gl_fbo 侧的当前目标（只读探针用，定义在 lime 命名空间的 gl_fbo.cpp:706）
 namespace lime { uint32_t gl_vk_current_target (); }
 namespace lime { extern int g_vkfixDrawTotal; extern int g_vkfixDrawFolded; }
+// 前向声明：部分编译单元里 gl_packet.h 的声明不可见（MSVC 报 C3861），这里兜底。
+namespace lime { namespace pkt { uint32_t SnapshotFrameGen (); } }
 
 // 接线探针（本轮只接不选）：gl_shader 自己建的管线。它不参与任何 draw，
 // 只在 render pass 开头绑一次、紧接着换回固定管线（两次绑定之间没有 draw）。
@@ -767,6 +769,11 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
         VkPhysicalDeviceProperties pp{};
         getProps(d, &pp);
         int score = DeviceTypeScore(pp.deviceType);
+        {
+            // 诊断开关：VK_FORCE_INTEL=1 时跳过独显，走核显 Vulkan
+            const char* fi = getenv("VK_FORCE_INTEL");
+            if (fi && fi[0] == '1' && pp.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) score = -1;
+        }
         if (score > bestScore) { bestScore = score; best = d; bestQueue = qi; }
     }
     if (!best) {
