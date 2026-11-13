@@ -13,6 +13,7 @@
 
 #include "gl_vk_bridge.h"   // 内含 gl_compat.h
 #include "gl_vk_contract.h"
+#include "gl_query_state.h"
 #include "vk_renderer.h"
 #include "vk_tuning.h"      // mip 生成开关（vk_tuning.ini，默认 off）
 
@@ -63,11 +64,18 @@ enum {
     K_UNPACK_SKIP_PIXELS = 0x0CF4,
     K_UNPACK_IMAGE_HEIGHT = 0x806E,
     K_UNPACK_SKIP_IMAGES = 0x806D,
+    K_UNPACK_FLIP_Y_WEBGL = 0x9240,
+    K_UNPACK_PREMULTIPLY_ALPHA_WEBGL = 0x9241,
+    K_UNPACK_COLORSPACE_CONVERSION_WEBGL = 0x9243,
+    K_BROWSER_DEFAULT_WEBGL = 0x9244,
 
     K_PACK_ALIGNMENT = 0x0D05,
     K_PACK_ROW_LENGTH = 0x0D02,
     K_PACK_SKIP_ROWS = 0x0D03,
     K_PACK_SKIP_PIXELS = 0x0D04,
+
+    K_GENERATE_MIPMAP_HINT = 0x8192,
+    K_DONT_CARE = 0x1100,
 
     K_UNSIGNED_BYTE = 0x1401,
     K_UNSIGNED_SHORT_5_6_5 = 0x8363,
@@ -121,6 +129,13 @@ int g_packAlignment = 4;
 int g_packRowLength = 0;
 int g_packSkipRows = 0;
 int g_packSkipPixels = 0;
+
+// WebGL 兼容 pixelStore 状态。当前上传路径还没有按 flip/premultiply 做像素变换，
+// 这里先按 GL 语义记录，查询能返回真实设置值；实际上传语义作为后续缺口单列。
+int g_unpackFlipY = 0;
+int g_unpackPremultiplyAlpha = 0;
+int g_unpackColorspaceConversion = K_BROWSER_DEFAULT_WEBGL;
+int g_generateMipmapHint = K_DONT_CARE;
 
 // ---------------------------------------------------------------- 小工具
 int BoundTextureName () {
@@ -349,6 +364,11 @@ void lime_gl_pixel_storei (int pname, int param) {
         case K_UNPACK_ROW_LENGTH: g_unpackRowLength = (param > 0) ? param : 0; break;
         case K_UNPACK_SKIP_ROWS: g_unpackSkipRows = (param > 0) ? param : 0; break;
         case K_UNPACK_SKIP_PIXELS: g_unpackSkipPixels = (param > 0) ? param : 0; break;
+        case K_UNPACK_FLIP_Y_WEBGL: g_unpackFlipY = param ? 1 : 0; break;
+        case K_UNPACK_PREMULTIPLY_ALPHA_WEBGL: g_unpackPremultiplyAlpha = param ? 1 : 0; break;
+        case K_UNPACK_COLORSPACE_CONVERSION_WEBGL:
+            g_unpackColorspaceConversion = param;
+            break;
         case K_PACK_ALIGNMENT:
             if (param == 1 || param == 2 || param == 4 || param == 8) g_packAlignment = param;
             break;
@@ -356,6 +376,31 @@ void lime_gl_pixel_storei (int pname, int param) {
         case K_PACK_SKIP_ROWS: g_packSkipRows = (param > 0) ? param : 0; break;
         case K_PACK_SKIP_PIXELS: g_packSkipPixels = (param > 0) ? param : 0; break;
         default: break;   // UNPACK_IMAGE_HEIGHT / SKIP_IMAGES 只对 3D 有效，忽略
+    }
+}
+
+void lime_gl_hint (int target, int mode) {
+    // glHint 只是提示；这里只记录 GENERATE_MIPMAP_HINT，供 glGetIntegerv 查询。
+    if (target == K_GENERATE_MIPMAP_HINT) g_generateMipmapHint = mode;
+}
+
+// ---------------------------------------------------------------- gl_query
+bool gl_vk_query_pixel_store (int pname, int* value) {
+    if (!value) return false;
+    switch (pname) {
+        case K_PACK_ALIGNMENT: *value = g_packAlignment; return true;
+        case K_UNPACK_ALIGNMENT: *value = g_unpackAlignment; return true;
+        case K_PACK_ROW_LENGTH: *value = g_packRowLength; return true;
+        case K_UNPACK_ROW_LENGTH: *value = g_unpackRowLength; return true;
+        case K_PACK_SKIP_ROWS: *value = g_packSkipRows; return true;
+        case K_UNPACK_SKIP_ROWS: *value = g_unpackSkipRows; return true;
+        case K_PACK_SKIP_PIXELS: *value = g_packSkipPixels; return true;
+        case K_UNPACK_SKIP_PIXELS: *value = g_unpackSkipPixels; return true;
+        case K_UNPACK_FLIP_Y_WEBGL: *value = g_unpackFlipY; return true;
+        case K_UNPACK_PREMULTIPLY_ALPHA_WEBGL: *value = g_unpackPremultiplyAlpha; return true;
+        case K_UNPACK_COLORSPACE_CONVERSION_WEBGL: *value = g_unpackColorspaceConversion; return true;
+        case K_GENERATE_MIPMAP_HINT: *value = g_generateMipmapHint; return true;
+        default: return false;
     }
 }
 

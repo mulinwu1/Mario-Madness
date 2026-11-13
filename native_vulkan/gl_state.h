@@ -182,9 +182,14 @@ bool DrawModeNeedsEmulation(int glMode);
 bool HandlesPname(int pname);
 // 多分量 pname 的标量版本按 GL 语义只回第一个分量。
 bool QueryBoolean(int pname, bool* out);
-// 返回写入的 int 个数，0 表示不支持（同时记 GL_INVALID_ENUM）。
+// GLboolean 字节向量（1 字节/分量）。返回写入分量数；
+// 0 表示不支持或调用方 maxCount 不足（不支持时同时记 GL_INVALID_ENUM）。
+int QueryBooleanv(int pname, unsigned char* out, int maxCount);
+// 返回写入的 int 个数；0 表示不支持或 maxCount 不足（不支持时同时记 GL_INVALID_ENUM）。
+// 整数状态直接返回；浮点状态按 GL 语义四舍五入到最近整数后返回。
 int QueryInteger(int pname, int* out, int maxCount);
-// 返回写入的 float 个数，0 表示不支持（同时记 GL_INVALID_ENUM）。
+// 返回写入的 float 个数；0 表示不支持或 maxCount 不足（不支持时同时记 GL_INVALID_ENUM）。
+// 浮点状态直接返回；整数状态按数值转换成 float 后返回。
 int QueryFloat(int pname, float* out, int maxCount);
 
 void GetClearColor(float out[4]);

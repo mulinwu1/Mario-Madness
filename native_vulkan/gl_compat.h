@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <system/CFFI.h>
 #include <system/CFFIPointer.h>
 

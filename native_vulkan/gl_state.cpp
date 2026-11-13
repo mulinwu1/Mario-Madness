@@ -1,5 +1,7 @@
 ﻿#include "gl_state.h"
 
+#include <climits>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <unordered_set>
@@ -968,7 +970,9 @@ bool HandlesPname(int pname) {
     return false;
 }
 
-int QueryInteger(int pname, int* out, int maxCount) {
+// 内部原始查询：只查本类型，不记 GL 错误。
+// 返回 -1 表示 pname 不属于本类型；0 表示调用方缓冲区不足；>0 是写入分量数。
+static int QueryIntegerRaw(int pname, int* out, int maxCount) {
     if (!out || maxCount <= 0) return 0;
 
     // 先按能力开关处理
@@ -1018,12 +1022,11 @@ int QueryInteger(int pname, int* out, int maxCount) {
             for (int i = 0; i < 4; i++) out[i] = g_state.viewportBox[i];
             return 4;
         default:
-            SetError(kInvalidEnum);
-            return 0;
+            return -1;
     }
 }
 
-int QueryFloat(int pname, float* out, int maxCount) {
+static int QueryFloatRaw(int pname, float* out, int maxCount) {
     if (!out || maxCount <= 0) return 0;
     switch (pname) {
         case kPnameDepthClearValue: out[0] = g_state.clearDepth; return 1;
@@ -1045,26 +1048,84 @@ int QueryFloat(int pname, float* out, int maxCount) {
             out[1] = g_state.depthRange[1];
             return 2;
         default:
-            SetError(kInvalidEnum);
-            return 0;
+            return -1;
     }
+}
+
+static int FloatToInt(float value) {
+    // GL 对浮点状态的整数查询按“四舍五入到最近整数”处理；非有限值没有定义，
+    // 这里统一回 0，避免 UB 或把 NaN 变成一个随机大数。超范围先钳到 int 边界。
+    if (!std::isfinite(value)) return 0;
+    if (value <= (float)INT_MIN) return INT_MIN;
+    if (value >= (float)INT_MAX) return INT_MAX;
+    return (int)std::lround(value);
+}
+
+int QueryInteger(int pname, int* out, int maxCount) {
+    if (!out || maxCount <= 0) return 0;
+
+    int n = QueryIntegerRaw(pname, out, maxCount);
+    if (n >= 0) return n;  // 本类型可查（0 = 缓冲区不足）
+
+    // pname 是浮点状态：按 GL 语义转换后写入，而不是记 INVALID_ENUM。
+    float fv[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    n = QueryFloatRaw(pname, fv, 4);
+    if (n <= 0) {
+        if (n < 0) SetError(kInvalidEnum);
+        return 0;
+    }
+    if (n > maxCount) return 0;
+    for (int i = 0; i < n; i++) out[i] = FloatToInt(fv[i]);
+    return n;
+}
+
+int QueryFloat(int pname, float* out, int maxCount) {
+    if (!out || maxCount <= 0) return 0;
+
+    int n = QueryFloatRaw(pname, out, maxCount);
+    if (n >= 0) return n;
+
+    int iv[4] = {0, 0, 0, 0};
+    n = QueryIntegerRaw(pname, iv, 4);
+    if (n <= 0) {
+        if (n < 0) SetError(kInvalidEnum);
+        return 0;
+    }
+    if (n > maxCount) return 0;
+    for (int i = 0; i < n; i++) out[i] = (float)iv[i];
+    return n;
+}
+
+int QueryBooleanv(int pname, unsigned char* out, int maxCount) {
+    if (!out || maxCount <= 0) return 0;
+
+    int iv[4] = {0, 0, 0, 0};
+    int n = QueryIntegerRaw(pname, iv, 4);
+    if (n >= 0) {
+        if (n == 0) return 0;
+        if (n > maxCount) return 0;
+        for (int i = 0; i < n; i++) out[i] = iv[i] ? 1 : 0;
+        return n;
+    }
+
+    float fv[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    n = QueryFloatRaw(pname, fv, 4);
+    if (n > 0) {
+        if (n > maxCount) return 0;
+        for (int i = 0; i < n; i++) out[i] = fv[i] != 0.0f ? 1 : 0;
+        return n;
+    }
+    if (n < 0) SetError(kInvalidEnum);
+    return 0;
 }
 
 bool QueryBoolean(int pname, bool* out) {
     if (!out) return false;
-    int iv[4] = {0, 0, 0, 0};
-    int n = QueryInteger(pname, iv, 4);
-    if (n > 0) {
-        *out = iv[0] != 0;
-        return true;
-    }
-    float fv[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    n = QueryFloat(pname, fv, 4);
-    if (n > 0) {
-        *out = fv[0] != 0.0f;
-        return true;
-    }
-    return false;
+    unsigned char b[4] = {0, 0, 0, 0};
+    int n = QueryBooleanv(pname, b, 4);
+    if (n <= 0) return false;
+    *out = b[0] != 0;
+    return true;
 }
 
 void GetClearColor(float out[4]) {

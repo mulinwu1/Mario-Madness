@@ -413,6 +413,11 @@ struct VkRenderer::Impl {
     VkExtent2D pktTargetExt = {0, 0};
     float clearR = 0, clearG = 0, clearB = 0, clearA = 1;
     const char* lastError = "";
+
+    // 只读能力快照 + 独立 ready。ready 只在 Init 全成功后置 true，
+    // 避免上层用 dev/renderer 指针非空来猜“后端可用”。
+    VkDeviceCaps deviceCaps;
+    bool ready = false;
 };
 
 // ---- global function pointers (single instance) ----
@@ -600,8 +605,14 @@ VkRenderer::~VkRenderer() {
 
 const char* VkRenderer::LastError() const { return impl->lastError; }
 
+bool VkRenderer::IsReady() const { return impl->ready; }
+
+const VkDeviceCaps& VkRenderer::Caps() const { return impl->deviceCaps; }
+
 bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     Impl& o = *impl;
+    o.ready = false;
+    o.deviceCaps = VkDeviceCaps();
     o.nativeWindow = nativeWindow;
     o.width = width;
     o.height = height;
@@ -643,6 +654,8 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
 
     auto enumDev = (PFN_vkEnumeratePhysicalDevices)o.gipa(o.inst, "vkEnumeratePhysicalDevices");
     auto getProps = (PFN_vkGetPhysicalDeviceProperties)o.gipa(o.inst, "vkGetPhysicalDeviceProperties");
+    auto getFeatures = (PFN_vkGetPhysicalDeviceFeatures)o.gipa(o.inst, "vkGetPhysicalDeviceFeatures");
+    auto getFormatProps = (PFN_vkGetPhysicalDeviceFormatProperties)o.gipa(o.inst, "vkGetPhysicalDeviceFormatProperties");
     auto getMemProps = (PFN_vkGetPhysicalDeviceMemoryProperties)o.gipa(o.inst, "vkGetPhysicalDeviceMemoryProperties");
     auto getQFP = (PFN_vkGetPhysicalDeviceQueueFamilyProperties)o.gipa(o.inst, "vkGetPhysicalDeviceQueueFamilyProperties");
     auto getSurfSupport = (PFN_vkGetPhysicalDeviceSurfaceSupportKHR)o.gipa(o.inst, "vkGetPhysicalDeviceSurfaceSupportKHR");
@@ -804,15 +817,86 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
     qci.queueCount = 1;
     qci.pQueuePriorities = &prio;
     const char* dexts[] = {"VK_KHR_swapchain"};
+    // 2A 不启用可选 feature：这里显式传全 false，caps 只报“已启用”的能力，
+    // 不能把设备支持但没开的 samplerAnisotropy / wideLines 当成可用。
+    VkPhysicalDeviceFeatures enabledFeatures{};
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
+    dci.pEnabledFeatures = &enabledFeatures;
     dci.enabledExtensionCount = 1;
     dci.ppEnabledExtensionNames = dexts;
     if (createDevice(o.phys, &dci, nullptr, &o.dev) != VK_SUCCESS) { o.lastError = "device failed"; return false; }
 
     auto getQueue = (PFN_vkGetDeviceQueue)o.gipa(o.inst, "vkGetDeviceQueue");
     getQueue(o.dev, o.qidx, 0, &o.queue);
+
+    // ---- 只读能力快照：只填“设备限制 + 实际启用的 feature + 格式支持” ----
+    {
+        VkPhysicalDeviceProperties sp{};
+        getProps(o.phys, &sp);
+        VkPhysicalDeviceFeatures supported{};
+        if (getFeatures) getFeatures(o.phys, &supported);
+
+        VkDeviceCaps& c = o.deviceCaps;
+        c.valid = true;
+        snprintf(c.deviceName, sizeof(c.deviceName), "%s", sp.deviceName);
+        c.vendorId = sp.vendorID;
+        c.deviceId = sp.deviceID;
+        c.apiVersion = sp.apiVersion;
+        c.driverVersion = sp.driverVersion;
+        c.deviceType = (int)sp.deviceType;
+        c.maxImageDimension2D = sp.limits.maxImageDimension2D;
+        c.maxImageDimensionCube = sp.limits.maxImageDimensionCube;
+        c.maxImageDimension3D = sp.limits.maxImageDimension3D;
+        c.maxFramebufferWidth = sp.limits.maxFramebufferWidth;
+        c.maxFramebufferHeight = sp.limits.maxFramebufferHeight;
+        c.maxViewportWidth = sp.limits.maxViewportDimensions[0];
+        c.maxViewportHeight = sp.limits.maxViewportDimensions[1];
+        c.maxPerStageDescriptorSampledImages = sp.limits.maxPerStageDescriptorSampledImages;
+        c.maxDescriptorSetSampledImages = sp.limits.maxDescriptorSetSampledImages;
+        c.maxVertexInputAttributes = sp.limits.maxVertexInputAttributes;
+        c.maxVertexInputBindings = sp.limits.maxVertexInputBindings;
+        c.maxVertexOutputComponents = sp.limits.maxVertexOutputComponents;
+        c.maxFragmentInputComponents = sp.limits.maxFragmentInputComponents;
+        c.maxFragmentOutputAttachments = sp.limits.maxFragmentOutputAttachments;
+        c.maxColorAttachments = sp.limits.maxColorAttachments;
+        c.framebufferColorSampleCounts = sp.limits.framebufferColorSampleCounts;
+        c.framebufferDepthSampleCounts = sp.limits.framebufferDepthSampleCounts;
+        c.subPixelPrecisionBits = sp.limits.subPixelPrecisionBits;
+        c.maxSamplerAnisotropy = sp.limits.maxSamplerAnisotropy;
+        c.lineWidthRange[0] = sp.limits.lineWidthRange[0];
+        c.lineWidthRange[1] = sp.limits.lineWidthRange[1];
+        c.pointSizeRange[0] = sp.limits.pointSizeRange[0];
+        c.pointSizeRange[1] = sp.limits.pointSizeRange[1];
+        c.maxUniformBufferRange = sp.limits.maxUniformBufferRange;
+        c.samplerAnisotropy = enabledFeatures.samplerAnisotropy == VK_TRUE;
+        c.wideLines = enabledFeatures.wideLines == VK_TRUE;
+        c.independentBlend = enabledFeatures.independentBlend == VK_TRUE;
+        c.depthClamp = enabledFeatures.depthClamp == VK_TRUE;
+        snprintf(c.enabledDeviceExtensions, sizeof(c.enabledDeviceExtensions), "%s", "VK_KHR_swapchain");
+
+        if (getFormatProps) {
+            VkFormatProperties fp{};
+            getFormatProps(o.phys, VK_FORMAT_B8G8R8A8_UNORM, &fp);
+            c.colorBgra8 = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) != 0;
+            getFormatProps(o.phys, VK_FORMAT_R8G8B8A8_UNORM, &fp);
+            c.colorRgba8 = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) != 0;
+            getFormatProps(o.phys, VK_FORMAT_D24_UNORM_S8_UINT, &fp);
+            c.depth24s8 = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
+            getFormatProps(o.phys, VK_FORMAT_D32_SFLOAT, &fp);
+            c.depth32f = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
+        }
+
+        fprintf(stderr,
+                "[vk] caps device=%s maxTex2D=%u viewport=%ux%u units=%u/%u attribs=%u "
+                "colorAtt=%u aniso=%d/%d format=BGRA8:%d RGBA8:%d D24S8:%d D32F:%d\n",
+                c.deviceName, c.maxImageDimension2D, c.maxViewportWidth, c.maxViewportHeight,
+                c.maxPerStageDescriptorSampledImages, c.maxDescriptorSetSampledImages,
+                c.maxVertexInputAttributes, c.maxColorAttachments,
+                c.samplerAnisotropy ? 1 : 0, supported.samplerAnisotropy ? 1 : 0,
+                c.colorBgra8 ? 1 : 0, c.colorRgba8 ? 1 : 0, c.depth24s8 ? 1 : 0, c.depth32f ? 1 : 0);
+    }
 
     VkSurfaceCapabilitiesKHR caps{};
     getSurfCaps(o.phys, o.surf, &caps);
@@ -859,6 +943,33 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
         fprintf(stderr, "[vk] presentMode=%s (mailbox_available=%d)\n",
                 swci.presentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "fifo",
                 hasMailbox ? 1 : 0);
+    }
+    // WSI 参数实验开关（默认全不改）：用来绕开驱动在 vkCreateSwapchainKHR 内部崩的分支。
+    {
+        const char* f = getenv("VK_SW_FORMAT");
+        if (f) {
+            if (!strcmp(f, "rgba")) fmt.format = VK_FORMAT_R8G8B8A8_UNORM;
+            else if (!strcmp(f, "bgra_srgb")) fmt.format = VK_FORMAT_B8G8R8A8_SRGB;
+            swci.imageFormat = fmt.format;
+        }
+        const char* a = getenv("VK_SW_ALPHA");
+        if (a) {
+            if (!strcmp(a, "pre")) swci.compositeAlpha = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
+            else if (!strcmp(a, "post")) swci.compositeAlpha = VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
+            else if (!strcmp(a, "inherit")) swci.compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+        }
+        const char* u = getenv("VK_SW_USAGE");
+        if (u && !strcmp(u, "ca")) swci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        const char* mi = getenv("VK_SW_MINIMG");
+        if (mi && atoi(mi) > 0) swci.minImageCount = (uint32_t)atoi(mi);
+        const char* pm2 = getenv("VK_PRESENT_MODE");
+        if (pm2) {
+            if (!strcmp(pm2, "immediate")) swci.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+            else if (!strcmp(pm2, "relaxed")) swci.presentMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+        }
+        fprintf(stderr, "[vk] wsi fmt=%d alpha=0x%x usage=0x%x min=%u pm=%d\n",
+                (int)swci.imageFormat, (unsigned)swci.compositeAlpha, (unsigned)swci.imageUsage,
+                swci.minImageCount, (int)swci.presentMode);
     }
     swci.clipped = VK_TRUE;
     if (createSwap(o.dev, &swci, nullptr, &o.swapchain) != VK_SUCCESS) { o.lastError = "swapchain failed"; return false; }
@@ -1382,6 +1493,18 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
                 (int) o.colorFormat, o.extent.width, o.extent.height,
                 (unsigned) ctx.uniformMemoryTypeIndex);
     }
+    {
+        const char* ms = getenv("VK_TEST_STALL_MS");
+        if (ms && atoi(ms) > 0) {
+#if defined(_WIN32)
+            Sleep((DWORD)atoi(ms));
+#else
+            struct timespec ts; ts.tv_sec = atoi(ms) / 1000; ts.tv_nsec = (long)(atoi(ms) % 1000) * 1000000L; nanosleep(&ts, nullptr);
+#endif
+            fprintf(stderr, "[vk] test stall ms=%d\n", atoi(ms));
+        }
+    }
+    o.ready = true;
     fprintf(stderr, "[vk] init ok swapchain=%ux%u images=%zu format=%d\n",
             o.extent.width, o.extent.height, o.swapImages.size(), (int)o.colorFormat);
     return true;
@@ -1389,6 +1512,8 @@ bool VkRenderer::Init(void* nativeWindow, int width, int height) {
 
 void VkRenderer::Shutdown() {
     Impl& o = *impl;
+    o.ready = false;
+    o.deviceCaps = VkDeviceCaps();
     if (!o.dev) return;
     if (g_waitIdle) g_waitIdle(o.queue);
     for (auto& t : o.textures) {

@@ -3,6 +3,8 @@
 #include <vector>
 #include <string>
 
+#include "vk_device_caps.h"
+
 // 平台边界：本头不得出现任何平台类型或平台 API 符号（含 win32 头名与窗口句柄类型）。
 // 原生窗口句柄一律用 void* 传递；平台差异全部在 vk_platform_*.cpp 里处理。
 
@@ -87,6 +89,11 @@ public:
     // nativeWindow：原生窗口句柄，各平台都按 void* 传入，本层不区分平台。
     bool Init(void* nativeWindow, int width, int height);
     void Shutdown();
+
+    // 只有 Init 全成功后 ready 才为 true；Shutdown/失败后为 false。
+    bool IsReady() const;
+    // 设备能力快照；IsReady()==false 时内容不可用于能力声明。
+    const VkDeviceCaps& Caps() const;
 
     // texture: returns id, 0 on failure. Pixels are RGBA8, row-major.
     uint32_t CreateTexture(int w, int h, const unsigned char* rgba);

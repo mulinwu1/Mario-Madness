@@ -4,6 +4,8 @@
 #include "gl_vk_contract.h"
 #include "gl_state.h"
 #include "gl_packet.h"
+#include "gl_query.h"
+#include "gl_query_state.h"
 #include "gl_shader.h"
 
 #include <vector>
@@ -115,6 +117,19 @@ static const GlVkCoreState S_STATE = {
     S_STATE_getTextureSize, S_STATE_getClearColor
 };
 
+// gl_query 的状态表：getter 分散在 gl_core / gl_fbo / gl_texture_params。
+static const glquery::State QUERY_STATE = {
+    gl_vk_query_active_texture,
+    gl_vk_query_bound_texture_2d,
+    gl_vk_query_bound_framebuffer,
+    gl_vk_query_bound_read_framebuffer,
+    gl_vk_query_bound_renderbuffer,
+    gl_vk_query_current_program,
+    gl_vk_query_bound_array_buffer,
+    gl_vk_query_bound_element_buffer,
+    gl_vk_query_pixel_store
+};
+
 // ---------- 转发到 VkRenderer 的扩展能力（未实现时返回 false/0，不谎报成功） ----------
 static bool EXT_setTextureSampler(uint32_t texId, int minFilter, int magFilter,
                                   int wrapS, int wrapT, int baseLevel, int maxLevel,
@@ -156,6 +171,17 @@ void gl_vk_init(void* nativeWindow, int width, int height) {
     if (r->Init(nativeWindow, width, height)) {
         g_renderer = r;
         fprintf(stderr, "[glvk] renderer ready %dx%d window=%p\n", width, height, nativeWindow);
+        // gl_query 的能力快照：min(设备限制, 已实现上限)，只在 ready 后安装。
+        glquery::Caps qcaps = glquery::BuildCaps(r->Caps(), r->IsReady());
+        glquery::SetCaps(qcaps);
+        glquery::SetState(&QUERY_STATE);
+        fprintf(stderr,
+                "[glquery] caps ready=%d device=%s maxTex=%d viewport=%dx%d units=%d/%d "
+                "attribs=%d colorAtt=%d aniso=%d\n",
+                qcaps.ready ? 1 : 0, r->Caps().deviceName, qcaps.maxTextureSize,
+                qcaps.maxViewportWidth, qcaps.maxViewportHeight, qcaps.maxTextureImageUnits,
+                qcaps.maxCombinedTextureImageUnits, qcaps.maxVertexAttribs,
+                qcaps.maxColorAttachments, qcaps.maxTextureMaxAnisotropy);
         // FBO / 纹理参数模块靠这两个契约拿到纹素与清屏色
         gl_vk_install_core_state(&S_STATE);
         gl_vk_install_renderer_ext(&EXT);
@@ -168,7 +194,7 @@ void gl_vk_init(void* nativeWindow, int width, int height) {
     }
 }
 
-bool gl_vk_active() { return g_renderer != nullptr; }
+bool gl_vk_active() { return g_renderer && g_renderer->IsReady(); }
 
 // 由 SDLWindow::ContextFlip 每帧末调用，提交并 present
 void gl_vk_end_frame() {
@@ -182,11 +208,14 @@ void gl_vk_end_frame() {
 }
 
 void gl_vk_shutdown() {
+    glquery::SetState(nullptr);
+    glquery::ClearCaps();
     if (g_renderer) {
         g_renderer->Shutdown();
         delete g_renderer;
         g_renderer = nullptr;
     }
+    glquery::Summary();
 }
 
 void lime_gl_clear_color(float red, float green, float blue, float alpha) {
@@ -225,9 +254,97 @@ void lime_gl_disable(int cap) {
 }
 
 void lime_gl_blend_func(int sfactor, int dfactor) {
-    g_blendSrc = sfactor;
-    g_blendDst = dfactor;
-    glstate::BlendFunc(sfactor, dfactor);
+    if (glstate::BlendFunc(sfactor, dfactor)) {
+        g_blendSrc = sfactor;
+        g_blendDst = dfactor;
+    }
+}
+
+void lime_gl_blend_color(float r, float g, float b, float a) {
+    glstate::BlendColor(r, g, b, a);
+}
+
+void lime_gl_blend_equation(int mode) {
+    glstate::BlendEquation(mode);
+}
+
+void lime_gl_blend_equation_separate(int rgb, int a) {
+    glstate::BlendEquationSeparate(rgb, a);
+}
+
+void lime_gl_blend_func_separate(int srcRGB, int destRGB, int srcAlpha, int destAlpha) {
+    if (glstate::BlendFuncSeparate(srcRGB, destRGB, srcAlpha, destAlpha)) {
+        g_blendSrc = srcRGB;
+        g_blendDst = destRGB;
+    }
+}
+
+void lime_gl_clear_depthf(float depth) {
+    glstate::ClearDepthf(depth);
+}
+
+void lime_gl_clear_stencil(int stencil) {
+    glstate::ClearStencil(stencil);
+}
+
+void lime_gl_depth_func(int func) {
+    glstate::DepthFunc(func);
+}
+
+void lime_gl_depth_mask(bool flag) {
+    glstate::DepthMask(flag);
+}
+
+void lime_gl_depth_rangef(float zNear, float zFar) {
+    glstate::DepthRangef(zNear, zFar);
+}
+
+void lime_gl_cull_face(int mode) {
+    glstate::CullFace(mode);
+}
+
+void lime_gl_front_face(int face) {
+    glstate::FrontFace(face);
+}
+
+void lime_gl_stencil_func(int func, int ref, int mask) {
+    glstate::StencilFunc(func, ref, mask);
+}
+
+void lime_gl_stencil_func_separate(int face, int func, int ref, int mask) {
+    glstate::StencilFuncSeparate(face, func, ref, mask);
+}
+
+void lime_gl_stencil_mask(int mask) {
+    glstate::StencilMask(mask);
+}
+
+void lime_gl_stencil_mask_separate(int face, int mask) {
+    glstate::StencilMaskSeparate(face, mask);
+}
+
+void lime_gl_stencil_op(int sfail, int dpfail, int dppass) {
+    glstate::StencilOp(sfail, dpfail, dppass);
+}
+
+void lime_gl_stencil_op_separate(int face, int sfail, int dpfail, int dppass) {
+    glstate::StencilOpSeparate(face, sfail, dpfail, dppass);
+}
+
+void lime_gl_polygon_offset(float factor, float units) {
+    glstate::PolygonOffset(factor, units);
+}
+
+void lime_gl_line_width(float width) {
+    glstate::LineWidth(width);
+}
+
+void lime_gl_sample_coverage(float val, bool invert) {
+    glstate::SampleCoverage(val, invert);
+}
+
+bool lime_gl_is_enabled(int cap) {
+    return glstate::IsEnabled(cap);
 }
 
 // 诊断用：读当前 GL 混合状态（只给日志，不参与渲染）。
@@ -1183,5 +1300,26 @@ bool SnapshotBuffer (int name, const uint8_t** data, uint32_t* bytes) {
 }
 
 } // namespace pkt
+
+// ---------------- gl_query 只读状态 getter ----------------
+int gl_vk_query_active_texture() {
+    return 0x84C0 + g_activeUnit;  // GL_TEXTURE0
+}
+
+int gl_vk_query_bound_texture_2d() {
+    return S_STATE_getBoundTexture();
+}
+
+int gl_vk_query_current_program() {
+    return gl_shader_current_program();
+}
+
+int gl_vk_query_bound_array_buffer() {
+    return g_boundArrayBuffer;
+}
+
+int gl_vk_query_bound_element_buffer() {
+    return g_boundElementBuffer;
+}
 
 } // namespace lime

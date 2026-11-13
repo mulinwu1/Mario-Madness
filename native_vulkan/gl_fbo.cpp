@@ -18,6 +18,7 @@
 #include "gl_vk_bridge.h"   // 内含 gl_compat.h
 #include "gl_vk_contract.h"
 #include "gl_packet.h"
+#include "gl_query_state.h"
 #include "vk_renderer.h"
 
 #include <cstdint>
@@ -769,6 +770,19 @@ void lime_gl_blit_framebuffer (int srcX0, int srcY0, int srcX1, int srcY1,
 // ---------------------------------------------------------------- 帧目标对接
 uint32_t gl_vk_current_target () {
     return g_currentTarget;
+}
+
+// ---------------- gl_query 只读状态 getter ----------------
+int gl_vk_query_bound_framebuffer () {
+    return g_boundDrawFbo;
+}
+
+int gl_vk_query_bound_read_framebuffer () {
+    return g_boundReadFbo;
+}
+
+int gl_vk_query_bound_renderbuffer () {
+    return g_boundRbo;
 }
 
 // packet 解码用：GL FBO 名 → VkRenderer RenderTarget id（>0）。0 表示后备缓冲或尚未创建。
