@@ -1045,18 +1045,34 @@ bool ExecuteDraw(const vkpkt::WirePacket& w)
 		if ((int64_t)w.first + w.count > (int64_t)(ib / 2)) return false;
 	}
 
-	// 常量属性：loc2=colorMultiplier、loc3=colorOffset；loc1/loc5 是 alpha 乘数
+	// 颜色乘数/偏移：与批处理 BuildVertexColor 同口径 —— 数组在 loc6/loc7。
+	// 旧实现读 loc2/loc3，但 2D 程序里这两个槽通常是未使用常量 0，会把整笔乘成黑色
+	// （主菜单砖墙 col=[1,0,0,1] 来自 loc6 数组，packet 侧曾因此全黑）。
+	AttrSnap s6{}, s7{};
+	bool ok6 = SnapshotAttr(6, &s6) != 0;
+	bool ok7 = SnapshotAttr(7, &s7) != 0;
+	bool mulArr = ok6 && s6.enabled && s6.size >= 4;
+	bool offArr = ok7 && s7.enabled && s7.size >= 4;
+	DryAttr cmul, coff;
+	if (mulArr) mulArr = ResolveDry(6, &cmul);
+	if (offArr) offArr = ResolveDry(7, &coff);
 	float mult[4] = {1, 1, 1, 1};
 	float off[4] = {0, 0, 0, 0};
+	if (ok6 && !mulArr && s6.constSet)
+		for (int k = 0; k < 4; k++) mult[k] = s6.constValue[k];
+	if (ok7 && !offArr && s7.constSet)
+		for (int k = 0; k < 4; k++) off[k] = s7.constValue[k];
+	if (!mulArr)
 	{
-		AttrSnap s;
-		if (SnapshotAttr(2, &s) && !s.enabled && s.constSet)
-			for (int k = 0; k < 4; k++) mult[k] = s.constValue[k];
+		bool zero = !ok6 || !s6.constSet ||
+			(mult[0] == 0.0f && mult[1] == 0.0f && mult[2] == 0.0f);
+		if (zero) for (int k = 0; k < 4; k++) mult[k] = 1.0f;
 	}
+	if (!offArr)
 	{
-		AttrSnap s;
-		if (SnapshotAttr(3, &s) && !s.enabled && s.constSet)
-			for (int k = 0; k < 4; k++) off[k] = s.constValue[k];
+		bool zero = !ok7 || !s7.constSet ||
+			(off[0] == 0.0f && off[1] == 0.0f && off[2] == 0.0f);
+		if (zero) for (int k = 0; k < 4; k++) off[k] = 0.0f;
 	}
 	float alphaConst = 1.0f;
 	if (!hasA)
@@ -1094,6 +1110,9 @@ bool ExecuteDraw(const vkpkt::WirePacket& w)
 
 	std::vector<float> px((size_t)w.count), py((size_t)w.count);
 	std::vector<float> pu, pv, pa;
+	std::vector<float> pmul, poff;
+	if (mulArr) pmul.resize((size_t)w.count * 4);
+	if (offArr) poff.resize((size_t)w.count * 4);
 	if (hasUv)
 	{
 		pu.resize((size_t)w.count);
@@ -1144,6 +1163,16 @@ bool ExecuteDraw(const vkpkt::WirePacket& w)
 			ReadFloatAt(alpha, vidx, 0, &a);
 			pa[(size_t)i] = a;
 		}
+		if (mulArr)
+		{
+			for (int k = 0; k < 4; k++)
+				ReadFloatAt(cmul, vidx, k, &pmul[(size_t)i * 4 + k]);
+		}
+		if (offArr)
+		{
+			for (int k = 0; k < 4; k++)
+				ReadFloatAt(coff, vidx, k, &poff[(size_t)i * 4 + k]);
+		}
 	}
 
 	int tw = 0, th = 0;
@@ -1172,8 +1201,8 @@ bool ExecuteDraw(const vkpkt::WirePacket& w)
 		o[2] = 0.0f;
 		o[3] = 1.0f;
 		o[4] = hasA ? pa[(size_t)i] : alphaConst;
-		for (int k = 0; k < 4; k++) o[5 + k] = mult[k];
-		for (int k = 0; k < 4; k++) o[9 + k] = off[k];
+		for (int k = 0; k < 4; k++) o[5 + k] = mulArr ? pmul[(size_t)i * 4 + k] : mult[k];
+		for (int k = 0; k < 4; k++) o[9 + k] = offArr ? poff[(size_t)i * 4 + k] : off[k];
 		o[13] = u;
 		o[14] = v;
 	}
