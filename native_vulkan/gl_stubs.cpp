@@ -1,4 +1,4 @@
-// AUTO-GENERATED stubs for lime GL functions not implemented in gl_core.cpp
+﻿// AUTO-GENERATED stubs for lime GL functions not implemented in gl_core.cpp
 #include "gl_compat.h"
 #include "gl_state.h"   // GetViewportBox：glGetIntegerv 的尺寸查询要用
 
@@ -197,7 +197,6 @@ void lime_gl_polygon_offset (float factor, float units) {}
 void lime_gl_program_binary (int program, int binaryFormat, double binary, int length) {}
 void lime_gl_program_parameteri (int program, int pname, int value) {}
 void lime_gl_read_buffer (int src) {}
-void lime_gl_read_pixels (int x, int y, int width, int height, int format, int type, double pixels) {}
 void lime_gl_release_shader_compiler () {}
 void lime_gl_renderbuffer_storage (int target, int internalformat, int width, int height) {}
 void lime_gl_renderbuffer_storage_multisample (int target, int samples, int internalformat, int width, int height) {}

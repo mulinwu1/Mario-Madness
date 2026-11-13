@@ -291,8 +291,9 @@ Caps BuildCaps(const VkDeviceCaps& device, bool ready) {
     caps.aliasedPointSizeRange[0] = 1.0f;
     caps.aliasedPointSizeRange[1] = 1.0f;
 
-    caps.implementationColorReadFormat = 0;  // readPixels 未实现
-    caps.implementationColorReadType = 0;
+    // 离屏 RenderTarget 已支持 RGBA8 回读；默认缓冲仍未接，但格式/类型本身是合法的。
+    caps.implementationColorReadFormat = 0x1908;  // GL_RGBA
+    caps.implementationColorReadType = 0x1401;    // GL_UNSIGNED_BYTE
     caps.numCompressedTextureFormats = 0;
 
     caps.ready = ready && device.valid &&

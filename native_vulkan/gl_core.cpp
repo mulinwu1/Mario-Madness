@@ -175,6 +175,34 @@ void gl_vk_init(void* nativeWindow, int width, int height) {
         glquery::Caps qcaps = glquery::BuildCaps(r->Caps(), r->IsReady());
         glquery::SetCaps(qcaps);
         glquery::SetState(&QUERY_STATE);
+
+        // 诊断自检（默认关）：验证离屏 RGBA8 ReadPixels 的布局转换/回读链路。
+        const char* sel = getenv("VK_READPIXELS_SELFTEST");
+        if (sel && sel[0] == '1') {
+            if (lime::pkt::ExecActive()) {
+                fprintf(stderr, "[readpixels] selftest SKIP packet-exec\n");
+            } else {
+                uint32_t rt = r->CreateRenderTarget(4, 4);
+                unsigned char px[64] = {};
+                if (rt) {
+                    // 第一次 pass 走“首用清透明”，让 rt.cleared=true；第二次才走
+                    // clearPending 的红色清屏，验证回读到的确实是红色。
+                    r->BindRenderTarget(rt, 0.0f, 0.0f, 0.0f, 0.0f);
+                    r->PresentTarget();
+                    r->BindRenderTarget(rt, 1.0f, 0.0f, 0.0f, 1.0f);
+                    r->RequestClear(rt, 1.0f, 0.0f, 0.0f, 1.0f);
+                    r->PresentTarget();
+                    const bool read = r->ReadPixels(rt, 0, 0, 4, 4, px);
+                    const bool pass = read && px[0] > 250 && px[1] < 5 && px[2] < 5 && px[3] > 250;
+                    fprintf(stderr, "[readpixels] selftest %s rt=%u read=%d px=%u,%u,%u,%u\n",
+                            pass ? "PASS" : "FAIL", rt, read ? 1 : 0, px[0], px[1], px[2], px[3]);
+                    r->DestroyRenderTarget(rt);
+                } else {
+                    fprintf(stderr, "[readpixels] selftest FAIL create failed\n");
+                }
+            }
+        }
+
         fprintf(stderr,
                 "[glquery] caps ready=%d device=%s maxTex=%d viewport=%dx%d units=%d/%d "
                 "attribs=%d colorAtt=%d aniso=%d\n",

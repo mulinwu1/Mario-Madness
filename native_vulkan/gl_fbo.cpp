@@ -19,6 +19,7 @@
 #include "gl_vk_contract.h"
 #include "gl_packet.h"
 #include "gl_query_state.h"
+#include "gl_state.h"
 #include "vk_renderer.h"
 
 #include <cstdint>
@@ -783,6 +784,72 @@ int gl_vk_query_bound_read_framebuffer () {
 
 int gl_vk_query_bound_renderbuffer () {
     return g_boundRbo;
+}
+
+// GL readPixels：只支持 READ_FRAMEBUFFER 绑定的离屏 FBO 的 RGBA8 回读；
+// 默认 framebuffer(0) 仍未接，必须显式报错，不能静默返回全 0。
+void lime_gl_read_pixels (int x, int y, int width, int height, int format, int type,
+                          double pixels) {
+    if (!pixels) {
+        glstate::SetError (0x0501);  // GL_INVALID_VALUE
+        return;
+    }
+    const bool bgra = (format == 0x80E1);  // GL_BGRA_EXT
+    if (!bgra && format != 0x1908 /* GL_RGBA */) {
+        glstate::SetError (0x0500);  // GL_INVALID_ENUM
+        return;
+    }
+    if (type != 0x1401 /* GL_UNSIGNED_BYTE */) {
+        glstate::SetError (0x0500);
+        return;
+    }
+    if (width <= 0 || height <= 0) {
+        glstate::SetError (0x0501);
+        return;
+    }
+
+    // GL 的 readPixels 读 READ_FRAMEBUFFER，不是 DRAW_FRAMEBUFFER。
+    const int readFbo = g_boundReadFbo;
+    if (readFbo <= 0 || (size_t)readFbo >= g_fbos.size () || !g_fbos[(size_t)readFbo].used) {
+        glstate::SetError (0x0502);  // GL_INVALID_OPERATION：默认缓冲回读未接
+        return;
+    }
+    const uint32_t target = g_fbos[(size_t)readFbo].rtId;
+    if (target < 1000) {
+        glstate::SetError (0x0502);
+        return;
+    }
+    VkRenderer* r = gl_vk_get_renderer ();
+    if (!r) {
+        glstate::SetError (0x0502);
+        return;
+    }
+
+    // 当前目标还开着时先收尾，回读后再按原 FBO 重新打开；只让 renderer EndFrame
+    // 而不重置 g_currentTarget 会让后续 BindDrawFbo 误判 alreadyOpen。
+    const int drawFbo = g_boundDrawFbo;
+    const bool reopen = (g_currentTarget == target);
+    if (reopen) CloseOpenFrame ();
+
+    unsigned char* out = (unsigned char*)(uintptr_t)pixels;
+    const bool ok = r->ReadPixels (target, x, y, width, height, out);
+
+    if (reopen) BindDrawFbo (drawFbo);
+
+    if (!ok) {
+        glstate::SetError (0x0502);
+        return;
+    }
+    // OpenFL 的 drawToBitmapData 在声明 EXT_bgra 后会传 0x80E1；Vulkan RT 是 RGBA8，
+    // 需要交换 R/B 才是 BGRA 字节序。
+    if (bgra) {
+        const size_t count = (size_t)width * (size_t)height;
+        for (size_t i = 0; i < count; i++) {
+            unsigned char t = out[i * 4 + 0];
+            out[i * 4 + 0] = out[i * 4 + 2];
+            out[i * 4 + 2] = t;
+        }
+    }
 }
 
 // packet 解码用：GL FBO 名 → VkRenderer RenderTarget id（>0）。0 表示后备缓冲或尚未创建。

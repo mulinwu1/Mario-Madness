@@ -2051,10 +2051,131 @@ uint32_t VkRenderer::CreateRenderTargetEx(int w, int h, bool withDepth) {
 }
 
 bool VkRenderer::ReadPixels(uint32_t targetId, int x, int y, int w, int h, unsigned char* rgba) {
-    // 离屏回读还没接：需要把目标 image 转 TRANSFER_SRC 再拷到 staging。
-    // 先明确返回 false，避免上层把未初始化的像素当成真实结果。
-    (void)targetId; (void)x; (void)y; (void)w; (void)h; (void)rgba;
-    return false;
+    Impl& o = *impl;
+    if (!o.dev || !rgba || w <= 0 || h <= 0) return false;
+    if (targetId < 1000) return false;  // 后缓冲回读未接；只支持离屏 RenderTarget
+    uint32_t ti = targetId - 1000;
+    if (ti >= o.targets.size() || !o.targets[ti].used) return false;
+    RenderTarget& t = o.targets[ti];
+    if (DiagOn()) {
+        fprintf(stderr, "[readpixels] req target=%u ti=%u used=%d layout=%d size=%dx%d rect=(%d,%d %dx%d)\n",
+                targetId, ti, t.used ? 1 : 0, (int)t.layout, t.w, t.h, x, y, w, h);
+    }
+    if (t.layout == VK_IMAGE_LAYOUT_UNDEFINED) return false;  // 从未渲染过
+    if (x < 0 || y < 0 || (int64_t)x + w > t.w || (int64_t)y + h > t.h) return false;
+
+    // 当前目标还开着时，批处理路径的绘制还在 verts 里，必须先 EndFrame 落地；
+    // 否则回读拿到的是绑定前的内容。packet 路径不能在这里 EndFrame（会关掉 pktOpen），
+    // 明确返回不支持。
+    if (o.frameOpen && o.currentTarget == targetId) {
+        if (lime::pkt::ExecActive()) return false;
+        EndFrame();
+    }
+
+    // 先把在飞的帧等干净，再单独开一次一次性拷贝；读回很少发生，不追求零等待。
+    g_waitIdle(o.queue);
+
+    size_t bytes = (size_t)w * (size_t)h * 4u;
+    VkBuffer sb = VK_NULL_HANDLE;
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = (VkDeviceSize)bytes;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (g_createBuf(o.dev, &bci, nullptr, &sb) != VK_SUCCESS || !sb) return false;
+
+    VkMemoryRequirements smr{};
+    g_getBufReqs(o.dev, sb, &smr);
+    VkPhysicalDeviceMemoryProperties mp{};
+    ((PFN_vkGetPhysicalDeviceMemoryProperties)g_gipa(o.inst, "vkGetPhysicalDeviceMemoryProperties"))(o.phys, &mp);
+    VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    mai.allocationSize = smr.size;
+    mai.memoryTypeIndex = FindMemType(mp, smr.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VkDeviceMemory sm = VK_NULL_HANDLE;
+    if (g_allocMem(o.dev, &mai, nullptr, &sm) != VK_SUCCESS || !sm) {
+        o.destroyBuffer(o.dev, sb, nullptr);
+        return false;
+    }
+    g_bindBufMem(o.dev, sb, sm, 0);
+
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    VkCommandBufferAllocateInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cbi.commandPool = o.cmdPool;
+    cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbi.commandBufferCount = 1;
+    VkResult allocRes = ((PFN_vkAllocateCommandBuffers)g_gipa(o.inst, "vkAllocateCommandBuffers"))(o.dev, &cbi, &cb);
+    if (allocRes != VK_SUCCESS || !cb) {
+        o.destroyBuffer(o.dev, sb, nullptr);
+        o.freeMemory(o.dev, sm, nullptr);
+        return false;
+    }
+    VkCommandBufferBeginInfo cbb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    cbb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (g_beginCB(cb, &cbb) != VK_SUCCESS) {
+        ((PFN_vkFreeCommandBuffers)g_gipa(o.inst, "vkFreeCommandBuffers"))(o.dev, o.cmdPool, 1, &cb);
+        o.destroyBuffer(o.dev, sb, nullptr);
+        o.freeMemory(o.dev, sm, nullptr);
+        return false;
+    }
+
+    const VkImageLayout savedLayout = t.layout;
+    VkImageMemoryBarrier b1{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    b1.oldLayout = savedLayout;
+    b1.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    b1.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b1.image = t.image;
+    b1.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    b1.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    b1.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    g_cmdBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                 0, 0, nullptr, 0, nullptr, 1, &b1);
+
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    // 离屏 FBO 的内容已经是“视觉顶在 row 0”：OpenFL/Stage3D 用
+    // vcPositionScale.y=-1 把投影翻过，真实 GL 的 FBO row 0 也正好是视觉顶。
+    // 所以这里按 image 行原样拷，等价于 GL 对该 FBO 的 glReadPixels；
+    // 只有默认 framebuffer(0) 的回读才需要再翻一次（以后单独接）。
+    region.imageOffset = {x, y, 0};
+    region.imageExtent = {(uint32_t)w, (uint32_t)h, 1};
+    g_cmdCopyImgToBuf(cb, t.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sb, 1, &region);
+
+    VkImageMemoryBarrier b2 = b1;
+    b2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    b2.newLayout = savedLayout;
+    b2.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    b2.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    g_cmdBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                 0, 0, nullptr, 0, nullptr, 1, &b2);
+
+    if (g_endCB(cb) != VK_SUCCESS) {
+        ((PFN_vkFreeCommandBuffers)g_gipa(o.inst, "vkFreeCommandBuffers"))(o.dev, o.cmdPool, 1, &cb);
+        o.destroyBuffer(o.dev, sb, nullptr);
+        o.freeMemory(o.dev, sm, nullptr);
+        return false;
+    }
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cb;
+    if (g_submit(o.queue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) {
+        ((PFN_vkFreeCommandBuffers)g_gipa(o.inst, "vkFreeCommandBuffers"))(o.dev, o.cmdPool, 1, &cb);
+        o.destroyBuffer(o.dev, sb, nullptr);
+        o.freeMemory(o.dev, sm, nullptr);
+        return false;
+    }
+    g_waitIdle(o.queue);
+    ((PFN_vkFreeCommandBuffers)g_gipa(o.inst, "vkFreeCommandBuffers"))(o.dev, o.cmdPool, 1, &cb);
+
+    bool ok = false;
+    void* sp = nullptr;
+    if (g_mapMem(o.dev, sm, 0, smr.size, 0, &sp) == VK_SUCCESS && sp) {
+        memcpy(rgba, sp, bytes);
+        ok = true;
+    }
+    if (sp) g_unmapMem(o.dev, sm);
+    o.destroyBuffer(o.dev, sb, nullptr);
+    o.freeMemory(o.dev, sm, nullptr);
+    return ok;
 }
 
 void VkRenderer::SetUniform(int index, float value) {
@@ -5346,6 +5467,15 @@ void VkRenderer::EndFrame() {
         }
     }
     g_endRP(o.cmd);
+
+    // 批处理离屏 pass 的 finalLayout 是 SRO；把记录同步成真实布局，
+    // 否则后续 ReadPixels/清除屏障会把 UNDEFINED 当成当前布局。
+    if (o.currentTarget >= 1000) {
+        uint32_t ti = o.currentTarget - 1000;
+        if (ti < o.targets.size() && o.targets[ti].used) {
+            o.targets[ti].layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+    }
 
     // Phase 0：pass 终点针（BOTTOM_OF_PIPE = pass 命令全部完成时写入）
     if (o.passStat && o.passQueries[o.slot] != VK_NULL_HANDLE) {
